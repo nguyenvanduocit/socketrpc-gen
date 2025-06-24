@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.2](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.2.1...v1.2.2) (2025-06-24)
+
+
+### Bug Fixes
+
+* remove 'undefined' from argsString in client and server function AST generation for cleaner output ([dd65553](https://github.com/nguyenvanduocit/socketrpc-gen/commit/dd65553fe1e65b2e549f2227c31a34208f3c465c))
+
 ## [1.2.1](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.2.0...v1.2.1) (2025-06-24)
 
 

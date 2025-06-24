@@ -1,3 +1,5 @@
+#!/usr/bin/env bun
+
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -747,7 +749,7 @@ if (require.main === module) {
   const program = new Command();
 
   program
-    .name('rpc-generator')
+    .name('socketrpc-gen')
     .description('Generate Socket.IO RPC code from interface definitions.')
     .version('1.0.0');
 

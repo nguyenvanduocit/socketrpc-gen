@@ -51,6 +51,8 @@ interface ClientFunctions {
    */
   askQuestion: (question: string) => string;
 }
+
+**Important Note:** Do not use `Promise` in the return types when defining functions in your interfaces (`ServerFunctions`, `ClientFunctions`). The library automatically wraps the return types in `Promise`. The implementation of these functions can be `async` and return a `Promise`, but the definition should specify the final resolved type. For example, use `(prompt: string) => string` instead of `(prompt: string) => Promise<string>`.
 ```
 
 ### 2. Run the Generator
@@ -83,7 +85,7 @@ import {
   handleGenerateText,
   showError,
   askQuestion,
-} from "@socket-rpc/rpc/server";
+} from "@socket-rpc/rpc/server.generated";
 import { RpcError, isRpcError } from "@socket-rpc/rpc";
 
 const httpServer = createServer();
@@ -143,7 +145,7 @@ import {
   generateText,
   handleShowError,
   handleAskQuestion,
-} from "@socket-rpc/rpc/client";
+} from "@socket-rpc/rpc/client.generated";
 import { isRpcError } from "@socket-rpc/rpc";
 
 const socket = io("http://localhost:8080");

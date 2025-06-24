@@ -160,7 +160,7 @@ function createJSDoc(
  */
 function generateTypesFile(project: Project, outputDir: string): void {
   const typesFile = project.createSourceFile(
-    path.join(outputDir, 'types.ts'),
+    path.join(outputDir, 'types.generated.ts'),
     '',
     { overwrite: true }
   );
@@ -200,7 +200,7 @@ function generateTypesFile(project: Project, outputDir: string): void {
     docs: ['Type guard to check if an object is an RpcError.'],
     parameters: [{ name: 'obj', type: 'any' }],
     returnType: 'obj is RpcError',
-    statements: `return !!obj && typeof (obj as RpcError).message === 'string' && typeof (obj as RpcError).code === 'string' && typeof (obj as RpcError).data === 'any';`
+    statements: `return !!obj && typeof (obj as RpcError).message === 'string' && typeof (obj as RpcError).code === 'string';`
   });
 
   typesFile.formatText();
@@ -272,7 +272,7 @@ function generateClientFunctionAST(
       });
       writer.writeLine(`} catch (err) {`);
       writer.indent(() => {
-        writer.writeLine(`return { message: err instanceof Error ? err.message : String(err) };`);
+        writer.writeLine(`return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };`);
       });
       writer.writeLine(`}`);
     }
@@ -325,7 +325,7 @@ function generateServerFunctionAST(
       });
       writer.writeLine(`} catch (err) {`);
       writer.indent(() => {
-        writer.writeLine(`return { message: err instanceof Error ? err.message : String(err) };`);
+        writer.writeLine(`return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };`);
       });
       writer.writeLine(`}`);
     }
@@ -477,7 +477,7 @@ function generateClientFile(
   config: Required<GeneratorConfig>
 ): void {
   const clientFile = project.createSourceFile(
-    path.join(outputDir, 'client.ts'),
+    path.join(outputDir, 'client.generated.ts'),
     '',
     { overwrite: true }
   );
@@ -492,7 +492,7 @@ function generateClientFile(
   // Add RpcError import if there are functions that can return errors
   if (clientFunctions.some(f => !f.isVoid) || serverFunctions.some(f => !f.isVoid)) {
     clientFile.addImportDeclaration({
-      moduleSpecifier: './types',
+      moduleSpecifier: './types.generated',
       namedImports: ['RpcError'],
       isTypeOnly: true
     });
@@ -543,7 +543,7 @@ function generateServerFile(
   config: Required<GeneratorConfig>
 ): void {
   const serverFile = project.createSourceFile(
-    path.join(outputDir, 'server.ts'),
+    path.join(outputDir, 'server.generated.ts'),
     '',
     { overwrite: true }
   );
@@ -558,7 +558,7 @@ function generateServerFile(
   // Add RpcError import if there are functions that can return errors
   if (serverFunctions.some(f => !f.isVoid) || clientFunctions.some(f => !f.isVoid)) {
     serverFile.addImportDeclaration({
-      moduleSpecifier: './types',
+      moduleSpecifier: './types.generated',
       namedImports: ['RpcError'],
       isTypeOnly: true
     });
@@ -619,9 +619,9 @@ function generateIndexFile(project: Project, outputDir: string, config: Required
   // Add export statements
   indexFile.addExportDeclarations([
     { moduleSpecifier: './define' },
-    { moduleSpecifier: './client' },
-    { moduleSpecifier: './server' },
-    { moduleSpecifier: './types' }
+    { moduleSpecifier: './client.generated' },
+    { moduleSpecifier: './server.generated' },
+    { moduleSpecifier: './types.generated' }
   ]);
 
   // Format and save
@@ -767,9 +767,9 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
     console.log('✅ Generated RPC package successfully using ts-morph AST!');
     console.log(`📦 Package location: ${outputDir}`);
     console.log(`📄 Generated files:`);
-    console.log(`   - client.ts (${clientFunctions.length} call functions, ${serverFunctions.length} handler functions)`);
-    console.log(`   - server.ts (${serverFunctions.length} call functions, ${clientFunctions.length} handler functions)`);
-    console.log(`   - types.ts`);
+    console.log(`   - client.generated.ts (${clientFunctions.length} call functions, ${serverFunctions.length} handler functions)`);
+    console.log(`   - server.generated.ts (${serverFunctions.length} call functions, ${clientFunctions.length} handler functions)`);
+    console.log(`   - types.generated.ts`);
     console.log(`   - index.ts`);
 
     // Log generated functions

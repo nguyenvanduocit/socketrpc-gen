@@ -5,7 +5,7 @@ import { Server } from "socket.io";
 // import '@shopify/shopify-api/adapters/node';
 import type { ExtendedSocket } from "./type.d";
 import { authMiddleware } from "./auth";
-import { handleGenerateText, showError } from "@socket-rpc/rpc/server";
+import { handleGenerateText, showError } from "@socket-rpc/rpc/server.generated";
 import type { RpcError } from "@socket-rpc/rpc";
 
 // Constants

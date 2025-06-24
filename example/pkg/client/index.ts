@@ -1,5 +1,5 @@
 import { io, Socket } from "socket.io-client";
-import { generateText, handleShowError } from "@socket-rpc/rpc/client";
+import { generateText, handleShowError } from "@socket-rpc/rpc/client.generated";
 import { isRpcError } from "@socket-rpc/rpc";
 
 /**

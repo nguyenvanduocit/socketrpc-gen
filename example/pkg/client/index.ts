@@ -1,5 +1,5 @@
 import { io, Socket } from "socket.io-client";
-import { generateText } from "@socket-rpc/rpc/client";
+import { generateText, handleShowError } from "@socket-rpc/rpc/client";
 
 /**
  * Socket.IO RPC Client Configuration
@@ -45,6 +45,11 @@ const socket = io(url, {
  * 4. Error handling and cleanup
  */
 const clientPromise = new Promise<void>((resolve, reject) => {
+
+  handleShowError(socket, async (error: Error): Promise<void> => {
+    console.error("💥 Test failed:", error);
+  });
+
   /**
    * Connection Success Handler
    *

@@ -1,22 +1,26 @@
 {
-  "name": "socket-rpc",
+  "name": "@socket-rpc/generator",
+  "version": "1.0.0",
+  "description": "Code generator for Socket.IO RPC packages using ts-morph",
+  "main": "index.ts",
   "module": "index.ts",
   "type": "module",
-  "private": true,
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "scripts": {
-    "generate": "bun run generator/index.ts",
-    "generate:watch": "bun run generator/index.ts --watch",
-    "server": "cd pkg/server && bun run index.ts",
-    "plugin": "cd pkg/plugin && bun run dev"
-  },
-  "workspaces": [
-    "pkg/*",
-    "generator"
+  "keywords": [
+    "socket.io",
+    "rpc",
+    "generator",
+    "typescript",
+    "ts-morph"
   ],
+  "dependencies": {
+    "commander": "^14.0.0",
+    "ts-morph": "^26.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^20.0.0"
+  },
   "peerDependencies": {
-    "typescript": "^5"
+    "typescript": "^5.0.0"
   }
 }

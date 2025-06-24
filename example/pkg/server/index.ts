@@ -5,7 +5,7 @@ import { Server } from "socket.io";
 // import '@shopify/shopify-api/adapters/node';
 import type { ExtendedSocket } from "./type.d";
 import { authMiddleware } from "./auth";
-import { handleGenerateText } from "@socket-rpc/rpc/server";
+import { handleGenerateText, showError } from "@socket-rpc/rpc/server";
 
 // Constants
 /** Server port configuration - defaults to 8080 if PORT environment variable is not set */
@@ -77,6 +77,7 @@ io.on("connection", async (socket: ExtendedSocket) => {
     socket,
     async (prompt: string): Promise<string> => {
       // TODO: Implement actual text generation logic
+      showError(socket, new Error("Test error"));
       // Currently returns a placeholder response
       return "Hello, world!";
     }

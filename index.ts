@@ -180,6 +180,16 @@ function generateTypesFile(project: Project, outputDir: string): void {
         name: 'message',
         type: 'string',
         docs: ['The error message.']
+      },
+      {
+        name: 'code',
+        type: 'string',
+        docs: ['The error code.']
+      },
+      {
+        name: 'data',
+        type: 'any',
+        docs: ['The error data.']
       }
     ]
   });
@@ -190,7 +200,7 @@ function generateTypesFile(project: Project, outputDir: string): void {
     docs: ['Type guard to check if an object is an RpcError.'],
     parameters: [{ name: 'obj', type: 'any' }],
     returnType: 'obj is RpcError',
-    statements: `return !!obj && typeof (obj as RpcError).message === 'string';`
+    statements: `return !!obj && typeof (obj as RpcError).message === 'string' && typeof (obj as RpcError).code === 'string' && typeof (obj as RpcError).data === 'any';`
   });
 
   typesFile.formatText();

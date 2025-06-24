@@ -150,26 +150,35 @@ import { isRpcError } from "@socket-rpc/rpc";
 
 const socket = io("http://localhost:8080");
 
+// --- Best Practice: Đăng ký các trình xử lý sự kiện MỘT LẦN ở đây ---
+
+// Xử lý RPC `showError` từ server
+handleShowError(socket, async (error: Error): Promise<void> => {
+  console.error("Server sent an error:", error.message);
+});
+
+// Xử lý RPC `askQuestion` từ server (và gửi trả lời)
+handleAskQuestion(socket, async (question: string) => {
+  console.log(`Server asked: ${question}`);
+  return "blue"; // Trả lời câu hỏi của server
+});
+
+
+// --- Logic chạy mỗi khi kết nối thành công (hoặc kết nối lại) sẽ nằm trong này ---
 socket.on("connect", async () => {
-  // Handle the `showError` RPC call from the server (fire-and-forget)
-  handleShowError(socket, async (error: Error): Promise<void> => {
-    console.error("Server sent an error:", error.message);
-  });
+  console.log("Connected to the server!");
 
-  // Handle the `askQuestion` RPC call from the server (with response)
-  handleAskQuestion(socket, async (question: string) => {
-    console.log(`Server asked: ${question}`);
-    // Respond to the server's question
-    return "blue";
-  });
-
-  // Call the `generateText` RPC function on the server with a custom timeout
+  // Gọi hàm `generateText` trên server
   const response = await generateText(socket, "Hello, server!", 10000); // 10s timeout
   if (isRpcError(response)) {
     console.error("RPC Error:", response);
   } else {
     console.log("Server responded:", response);
   }
+});
+
+socket.on("disconnect", (reason) => {
+    console.log(`Disconnected from server: ${reason}`);
 });
 ```
 

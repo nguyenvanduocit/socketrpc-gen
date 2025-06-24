@@ -37,6 +37,15 @@ const socket = io(url, {
 });
 
 /**
+ * Handle Show Error
+ * 
+ * Handles errors from the server by logging them to the console.
+ */
+handleShowError(socket, async (error: Error): Promise<void> => {
+  console.error("💥 Test failed:", error);
+});
+
+/**
  * Client Promise for Async Connection Management
  * 
  * This promise encapsulates the entire client lifecycle:
@@ -46,11 +55,14 @@ const socket = io(url, {
  * 4. Error handling and cleanup
  */
 const clientPromise = new Promise<void>((resolve, reject) => {
-
-  handleShowError(socket, async (error: Error): Promise<void> => {
-    console.error("💥 Test failed:", error);
-  });
-
+  /**
+   * Connection Success Handler
+   * 
+   * Triggered when the socket successfully connects to the server.
+   * Executes the main client logic including RPC calls.
+   */
+  socket.on("connect", async () => {
+    console.log("✅ Connected to Socket RPC server");
   /**
    * Connection Success Handler
    *

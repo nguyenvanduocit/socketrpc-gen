@@ -2,19 +2,20 @@
 
 [![npm version](https://badge.fury.io/js/socketrpc-gen.svg)](https://badge.fury.io/js/socketrpc-gen)
 
-`socket-rpc` is a powerful command-line tool that automatically generates a type-safe RPC (Remote Procedure Call) layer for your client and server applications using `socket.io`. It takes a TypeScript interface as input and generates all the necessary code for you to communicate between your client and server with full type safety.
+`socket-rpc` is a powerful command-line tool that automatically generates a type-safe RPC (Remote Procedure Call) layer for your client and server applications using `socket.io`. It takes a TypeScript interface as input and generates all the necessary code for you to communicate between your client and server with full type safety. It's unopinionated, meaning it only generates the function bindings and doesn't interfere with your existing `socket.io` configuration.
 
 ## Features
 
 -   **Type-Safe:** Full static type checking for your RPC calls, powered by TypeScript.
 -   **Auto-generation:** Automatically generates client and server code from a single TypeScript interface definition.
+-   **Unopinionated:** Generates only the type-safe bindings, leaving you in full control of your `socket.io` setup.
 -   **Bidirectional Communication:** Supports both client-to-server and server-to-client RPC calls.
 -   **Simple to Use:** Get started with a single command.
--   **Customizable:** Configure the generated code to fit your needs.
 -   **Error Handling:** Built-in error handling with `RpcError` type.
--   **Configurable Timeouts:** Set a global timeout for RPC calls and override it on a per-call basis.
 
 ## Getting Started
+
+The `example` directory in this repository is a great starting point and can be used as a template to bootstrap your own project. It demonstrates a practical project structure that you can adapt for your needs.
 
 ### 1. Define Your RPC Interface
 
@@ -72,6 +73,54 @@ bunx socketrpc-gen ./example/pkg/rpc/define.ts
 This will generate a new package in the `example/pkg/rpc` directory containing the generated client and server code.
 
 ## Example Usage
+
+```mermaid
+sequenceDiagram
+    participant ClientApp as "Your Client Application"
+    participant GenClient as "Generated Client-Side RPC"
+    participant GenServer as "Generated Server-Side RPC"
+    participant ServerApp as "Your Server Application"
+
+    title socket-rpc: Bidirectional Communication Flow
+
+    ClientApp->>GenClient: 1. Calls `generateText("hello")`
+    activate GenClient
+    GenClient->>GenServer: 2. Emits "rpc:generateText" event over network
+    deactivate GenClient
+    
+    activate GenServer
+    GenServer->>ServerApp: 3. Invokes your `generateText` handler
+    activate ServerApp
+
+    Note over ServerApp: Server logic decides to<br/>call a function on the client
+    
+    ServerApp->>GenServer: 4. Calls `askQuestion("Favorite color?")`
+    GenServer->>GenClient: 5. Emits "rpc:askQuestion" event over network
+    deactivate GenServer
+
+    activate GenClient
+    GenClient->>ClientApp: 6. Invokes your `askQuestion` handler
+    activate ClientApp
+    ClientApp-->>GenClient: 7. Returns answer: "blue"
+    deactivate ClientApp
+    
+    GenClient-->>GenServer: 8. Sends response ("blue") back to server
+    deactivate GenClient
+
+    activate GenServer
+    GenServer-->>ServerApp: 9. `askQuestion` promise resolves with "blue"
+    
+    Note over ServerApp: Server finishes its logic and<br/>returns the final result
+    
+    ServerApp-->>GenServer: 10. Returns final result for `generateText`
+    deactivate ServerApp
+    GenServer-->>GenClient: 11. Sends final result back to client
+    deactivate GenServer
+
+    activate GenClient
+    GenClient-->>ClientApp: 12. Original `generateText` promise resolves
+    deactivate GenClient
+```
 
 ### Server
 

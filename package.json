@@ -1,0 +1,20 @@
+{
+  "name": "socket-rpc",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "scripts": {
+    "generate": "cd pkg/rpc && bun run generate.ts",
+    "server": "cd pkg/server && bun run index.ts",
+    "plugin": "cd pkg/plugin && bun run dev"
+  },
+  "workspaces": [
+    "pkg/*"
+  ],
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

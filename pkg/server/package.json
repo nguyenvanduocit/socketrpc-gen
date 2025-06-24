@@ -1,0 +1,27 @@
+{
+  "name": "@socket-rpc/server",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "scripts": {
+    "dev": "bun run index.ts",
+    "build": "bun build index.ts --target=bun --outdir=dist",
+    "deploy": "fly deploy"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@socket-rpc/rpc": "workspace:*",
+    "@shopify/shopify-api": "^11.12.0",
+    "shopify-api-node": "^3.14.2",
+    "socket.io": "^4.8.1"
+  },
+  "optionalDependencies": {
+    "bufferutil": "^4.0.9",
+    "utf-8-validate": "^6.0.5"
+  }
+}

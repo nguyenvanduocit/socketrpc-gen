@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as ts from 'typescript';
+import { Project, InterfaceDeclaration, PropertySignature, SyntaxKind, TypeNode, Type } from 'ts-morph';
 
 /**
  * Configuration options for the RPC generator
@@ -8,18 +8,19 @@ import * as ts from 'typescript';
 interface GeneratorConfig {
   /** Path to the input TypeScript file containing interface definitions */
   inputPath?: string;
-  /** Output path for generated client functions */
-  clientOutputPath?: string;
-  /** Output path for generated server functions */
-  serverOutputPath?: string;
+  /** Output directory for generated RPC package */
+  outputDir?: string;
+  /** Package name for the generated RPC package */
+  packageName?: string;
   /** Default timeout for RPC calls in milliseconds */
   defaultTimeout?: number;
   /** Whether to generate JSDoc comments */
   generateJSDoc?: boolean;
   /** Whether to generate handler functions */
   generateHandlers?: boolean;
-  /** Custom import path for Socket types */
+  /** Socket.io client import path */
   socketClientImport?: string;
+  /** Socket.io server import path */
   socketServerImport?: string;
 }
 
@@ -27,9 +28,9 @@ interface GeneratorConfig {
  * Default configuration values
  */
 const DEFAULT_CONFIG: Required<GeneratorConfig> = {
-  inputPath: 'define.ts',
-  clientOutputPath: 'client.ts',
-  serverOutputPath: 'server.ts',
+  inputPath: '../pkg/rpc/define.ts',
+  outputDir: '../pkg/rpc',
+  packageName: '@socket-rpc/rpc',
   defaultTimeout: 5000,
   generateJSDoc: true,
   generateHandlers: true,
@@ -62,45 +63,9 @@ interface FunctionSignature {
 const customTypesUsed = new Set<string>();
 
 /**
- * Checks if a type is a built-in TypeScript type using a comprehensive approach
- * This is more robust than maintaining a hard-coded list and uses TypeScript's own knowledge
+ * Checks if a type is a built-in TypeScript type
  */
-function isBuiltInType(typeName: string, checker: ts.TypeChecker, sourceFile: ts.SourceFile): boolean {
-  // Try to resolve the type from the source file
-  try {
-    const typeSymbol = checker.getSymbolAtLocation(
-      ts.factory.createIdentifier(typeName)
-    );
-
-    // If we can't find the symbol, it might be a built-in type
-    if (!typeSymbol) {
-      return isKnownBuiltInType(typeName);
-    }
-
-    // Check if the symbol comes from a declaration file (lib.*.d.ts)
-    const declarations = typeSymbol.getDeclarations();
-    if (declarations && declarations.length > 0) {
-      const firstDeclaration = declarations[0];
-      const fileName = firstDeclaration.getSourceFile().fileName;
-
-      // If it's from lib.*.d.ts files, it's a built-in type
-      if (fileName.includes('lib.') && fileName.endsWith('.d.ts')) {
-        return true;
-      }
-    }
-
-    return isKnownBuiltInType(typeName);
-  } catch {
-    // If any error occurs, fall back to known built-in types
-    return isKnownBuiltInType(typeName);
-  }
-}
-
-/**
- * Checks against a curated list of known built-in types
- * This serves as a fallback when TypeScript API checks fail
- */
-function isKnownBuiltInType(typeName: string): boolean {
+function isBuiltInType(typeName: string): boolean {
   // Primitive types
   const primitiveTypes = new Set([
     'string', 'number', 'boolean', 'void', 'undefined', 'any', 'unknown',
@@ -132,16 +97,24 @@ function isKnownBuiltInType(typeName: string): boolean {
 }
 
 /**
+ * Cleans up type strings by removing import paths
+ */
+function cleanTypeString(typeString: string): string {
+  // Remove import("..."). prefix from types
+  return typeString.replace(/import\("[^"]+"\)\./g, '');
+}
+
+/**
  * Extracts and tracks custom types from a type string
  */
-function trackCustomTypes(typeString: string, checker: ts.TypeChecker, sourceFile: ts.SourceFile): void {
+function trackCustomTypes(typeString: string): void {
   // Extract type names from complex type strings
   const typePattern = /\b[A-Z][a-zA-Z0-9]*\b/g;
   const matches = typeString.match(typePattern);
 
   if (matches) {
     for (const match of matches) {
-      if (!isBuiltInType(match, checker, sourceFile)) {
+      if (!isBuiltInType(match)) {
         customTypesUsed.add(match);
       }
     }
@@ -149,172 +122,60 @@ function trackCustomTypes(typeString: string, checker: ts.TypeChecker, sourceFil
 }
 
 /**
- * Extracts function signatures from a TypeScript interface using AST parsing
+ * Extracts function signatures from a TypeScript interface using ts-morph
  */
-function extractFunctionSignatures(interfaceDeclaration: ts.InterfaceDeclaration, checker: ts.TypeChecker, sourceFile: ts.SourceFile): FunctionSignature[] {
+function extractFunctionSignatures(interfaceDeclaration: InterfaceDeclaration): FunctionSignature[] {
   const signatures: FunctionSignature[] = [];
 
-  for (const member of interfaceDeclaration.members) {
-    if (ts.isPropertySignature(member) && member.type && ts.isFunctionTypeNode(member.type)) {
-      if (!member.name || !ts.isIdentifier(member.name)) {
-        continue;
-      }
+  interfaceDeclaration.getProperties().forEach(property => {
+    const typeNode = property.getTypeNode();
 
-      const name = member.name.text;
+    if (typeNode && typeNode.getKind() === SyntaxKind.FunctionType) {
+      const name = property.getName();
+      const functionType = property.getType();
+      const callSignatures = functionType.getCallSignatures();
 
-      // Extract parameters from function type
-      const params: FunctionParam[] = [];
-      if (member.type.parameters) {
-        for (const param of member.type.parameters) {
-          if (ts.isParameter(param) && param.name && ts.isIdentifier(param.name)) {
-            const paramName = param.name.text;
-            const isOptional = !!param.questionToken;
-            let typeString = 'any';
+      if (callSignatures.length > 0) {
+        const signature = callSignatures[0];
+        if (!signature) return;
 
-            if (param.type) {
-              typeString = getTypeStringFromNode(param.type);
-              trackCustomTypes(typeString, checker, sourceFile);
-            }
+        // Extract parameters
+        const params: FunctionParam[] = signature.getParameters().map(param => {
+          const paramType = param.getTypeAtLocation(property);
+          let typeString = paramType.getText();
 
-            params.push({
-              name: paramName,
-              type: typeString,
-              isOptional
-            });
-          }
-        }
-      }
+          // Clean up import paths in type strings
+          typeString = cleanTypeString(typeString);
+          trackCustomTypes(typeString);
 
-      // Extract return type
-      let returnTypeString = 'void';
-      let isVoid = true;
+          return {
+            name: param.getName(),
+            type: typeString,
+            isOptional: param.isOptional()
+          };
+        });
 
-      if (member.type.type) {
-        returnTypeString = getTypeStringFromNode(member.type.type);
-        isVoid = returnTypeString === 'void';
+        // Extract return type
+        const returnType = signature.getReturnType();
+        let returnTypeString = returnType.getText();
+        returnTypeString = cleanTypeString(returnTypeString);
+        const isVoid = returnTypeString === 'void';
+
         if (!isVoid) {
-          trackCustomTypes(returnTypeString, checker, sourceFile);
+          trackCustomTypes(returnTypeString);
         }
-      }
 
-      signatures.push({
-        name,
-        params,
-        returnType: returnTypeString,
-        isVoid
-      });
+        signatures.push({
+          name,
+          params,
+          returnType: returnTypeString,
+          isVoid
+        });
+      }
     }
-  }
+  });
 
   return signatures;
-}
-
-/**
- * Converts a TypeScript type node to a string representation
- */
-function getTypeStringFromNode(typeNode: ts.TypeNode): string {
-  switch (typeNode.kind) {
-    case ts.SyntaxKind.StringKeyword:
-      return 'string';
-    case ts.SyntaxKind.NumberKeyword:
-      return 'number';
-    case ts.SyntaxKind.BooleanKeyword:
-      return 'boolean';
-    case ts.SyntaxKind.VoidKeyword:
-      return 'void';
-    case ts.SyntaxKind.UndefinedKeyword:
-      return 'undefined';
-    case ts.SyntaxKind.NullKeyword:
-      return 'null';
-    case ts.SyntaxKind.AnyKeyword:
-      return 'any';
-    case ts.SyntaxKind.UnknownKeyword:
-      return 'unknown';
-    case ts.SyntaxKind.NeverKeyword:
-      return 'never';
-    case ts.SyntaxKind.ObjectKeyword:
-      return 'object';
-    case ts.SyntaxKind.SymbolKeyword:
-      return 'symbol';
-    case ts.SyntaxKind.BigIntKeyword:
-      return 'bigint';
-  }
-
-  if (ts.isTypeReferenceNode(typeNode) && ts.isIdentifier(typeNode.typeName)) {
-    const typeName = typeNode.typeName.text;
-
-    // Handle generic types with type arguments (e.g., Record<string, any>)
-    if (typeNode.typeArguments && typeNode.typeArguments.length > 0) {
-      const typeArgs = typeNode.typeArguments.map(getTypeStringFromNode).join(', ');
-      return `${typeName}<${typeArgs}>`;
-    }
-
-    return typeName;
-  }
-
-  if (ts.isUnionTypeNode(typeNode)) {
-    return typeNode.types.map(getTypeStringFromNode).join(' | ');
-  }
-
-  if (ts.isIntersectionTypeNode(typeNode)) {
-    return typeNode.types.map(getTypeStringFromNode).join(' & ');
-  }
-
-  if (ts.isArrayTypeNode(typeNode)) {
-    return getTypeStringFromNode(typeNode.elementType) + '[]';
-  }
-
-  if (ts.isTupleTypeNode(typeNode)) {
-    const elements = typeNode.elements.map(getTypeStringFromNode).join(', ');
-    return `[${elements}]`;
-  }
-
-  if (ts.isTypeLiteralNode(typeNode)) {
-    // For object types, return a simplified representation
-    const members = typeNode.members.map(member => {
-      if (ts.isPropertySignature(member) && member.name && ts.isIdentifier(member.name)) {
-        const propName = member.name.text;
-        const propType = member.type ? getTypeStringFromNode(member.type) : 'any';
-        const optional = member.questionToken ? '?' : '';
-        return `${propName}${optional}: ${propType}`;
-      }
-      return '';
-    }).filter(Boolean).join('; ');
-
-    return `{ ${members} }`;
-  }
-
-  if (ts.isLiteralTypeNode(typeNode)) {
-    if (ts.isStringLiteral(typeNode.literal)) {
-      return `'${typeNode.literal.text}'`;
-    }
-    if (ts.isNumericLiteral(typeNode.literal)) {
-      return typeNode.literal.text;
-    }
-    if (typeNode.literal.kind === ts.SyntaxKind.TrueKeyword) {
-      return 'true';
-    }
-    if (typeNode.literal.kind === ts.SyntaxKind.FalseKeyword) {
-      return 'false';
-    }
-  }
-
-  if (ts.isParenthesizedTypeNode(typeNode)) {
-    return `(${getTypeStringFromNode(typeNode.type)})`;
-  }
-
-  if (ts.isFunctionTypeNode(typeNode)) {
-    const params = typeNode.parameters.map(p => {
-      const name = p.name && ts.isIdentifier(p.name) ? p.name.text : '_';
-      const type = p.type ? getTypeStringFromNode(p.type) : 'any';
-      return `${name}: ${type}`;
-    }).join(', ');
-    const returnType = typeNode.type ? getTypeStringFromNode(typeNode.type) : 'void';
-    return `(${params}) => ${returnType}`;
-  }
-
-  // Fallback for complex types
-  return 'any';
 }
 
 /**
@@ -442,87 +303,130 @@ function generateServerHandler(func: FunctionSignature, config: Required<Generat
 }
 
 /**
- * Main generator function that reads define.ts and generates client/server functions
+ * Generates the index.ts file that exports all modules
  */
-function generateRpcFunctions(userConfig?: GeneratorConfig): void {
+function generateIndexFile(config: Required<GeneratorConfig>): string {
+  return `/**
+ * @${config.packageName}
+ * Auto-generated RPC package for Socket.IO
+ */
+
+// Export type definitions
+export * from './define';
+
+// Export client functions and handlers
+export * from './client';
+
+// Export server functions and handlers  
+export * from './server';
+`;
+}
+
+/**
+ * Generates package.json for the RPC package
+ */
+function generatePackageJson(config: Required<GeneratorConfig>): object {
+  return {
+    name: config.packageName,
+    version: "1.0.0",
+    description: "Auto-generated RPC package for Socket.IO",
+    main: "index.ts",
+    module: "index.ts",
+    type: "module",
+    scripts: {
+      "build": "tsc",
+      "dev": "tsc --watch"
+    },
+    dependencies: {
+      "socket.io": "^4.8.1",
+      "socket.io-client": "^4.8.1"
+    },
+    devDependencies: {
+      "@types/node": "^20.0.0",
+      "typescript": "^5.0.0"
+    },
+    peerDependencies: {
+      "socket.io": "^4.0.0",
+      "socket.io-client": "^4.0.0"
+    }
+  };
+}
+
+/**
+ * Generates tsconfig.json for the RPC package
+ */
+function generateTsConfig(): object {
+  return {
+    compilerOptions: {
+      target: "ES2020",
+      module: "ESNext",
+      lib: ["ES2020"],
+      moduleResolution: "node",
+      esModuleInterop: true,
+      forceConsistentCasingInFileNames: true,
+      strict: true,
+      skipLibCheck: true,
+      declaration: true,
+      declarationMap: true,
+      sourceMap: true,
+      outDir: "./dist",
+      rootDir: "./",
+      composite: true
+    },
+    include: ["**/*.ts"],
+    exclude: ["node_modules", "dist"]
+  };
+}
+
+/**
+ * Main generator function that reads define.ts and generates the entire RPC package
+ */
+function generateRpcPackage(userConfig?: GeneratorConfig): void {
   // Merge user config with defaults
   const config: Required<GeneratorConfig> = { ...DEFAULT_CONFIG, ...userConfig };
 
   // Reset custom types tracking for each generation
   customTypesUsed.clear();
 
-  const typesFilePath = path.join(__dirname, config.inputPath);
-  const clientFilePath = path.join(__dirname, config.clientOutputPath);
-  const serverFilePath = path.join(__dirname, config.serverOutputPath);
+  const inputPath = path.resolve(__dirname, config.inputPath);
+  const outputDir = path.resolve(__dirname, config.outputDir);
 
-  // Validate that define.ts exists
-  if (!fs.existsSync(typesFilePath)) {
-    console.error('❌ Error: Input file not found at', typesFilePath);
+  // Validate that input file exists
+  if (!fs.existsSync(inputPath)) {
+    console.error('❌ Error: Input file not found at', inputPath);
     console.error('💡 Please create a file with ClientFunctions and ServerFunctions interfaces');
     process.exit(1);
   }
 
   try {
-    // Read and parse the define.ts file
-    const sourceCode = fs.readFileSync(typesFilePath, 'utf-8');
-    const sourceFile = ts.createSourceFile(
-      'define.ts',
-      sourceCode,
-      ts.ScriptTarget.Latest,
-      true
-    );
-
-    // Create a TypeScript program and type checker
-    const program = ts.createProgram([typesFilePath], {
-      target: ts.ScriptTarget.ES2020,
-      module: ts.ModuleKind.CommonJS,
-      strict: true,
-      esModuleInterop: true,
-      skipLibCheck: true,
-      forceConsistentCasingInFileNames: true
+    // Create a new ts-morph project
+    const project = new Project({
+      tsConfigFilePath: path.join(__dirname, 'tsconfig.json'),
+      skipAddingFilesFromTsConfig: true
     });
 
-    // Check for compilation errors
-    const diagnostics = ts.getPreEmitDiagnostics(program);
-    if (diagnostics.length > 0) {
-      console.error('❌ TypeScript compilation errors in define.ts:');
-      diagnostics.forEach(diagnostic => {
-        if (diagnostic.file) {
-          const { line, character } = diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start!);
-          const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n');
-          console.error(`  Line ${line + 1}, Column ${character + 1}: ${message}`);
-        } else {
-          console.error(`  ${ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')}`);
-        }
-      });
+    // Add the input file to the project
+    const sourceFile = project.addSourceFileAtPath(inputPath);
+
+    // Find the interfaces
+    const clientFunctionsInterface = sourceFile.getInterface('ClientFunctions');
+    const serverFunctionsInterface = sourceFile.getInterface('ServerFunctions');
+
+    if (!clientFunctionsInterface || !serverFunctionsInterface) {
+      console.error('❌ Error: Could not find ClientFunctions or ServerFunctions interfaces');
       process.exit(1);
     }
 
-    const checker = program.getTypeChecker();
+    // Extract function signatures
+    const clientFunctions = extractFunctionSignatures(serverFunctionsInterface);
+    const serverFunctions = extractFunctionSignatures(clientFunctionsInterface);
 
-    let clientFunctions: FunctionSignature[] = [];
-    let serverFunctions: FunctionSignature[] = [];
-
-    // Visit each node in the AST
-    function visit(node: ts.Node) {
-      if (ts.isInterfaceDeclaration(node)) {
-        const interfaceName = node.name.text;
-
-        if (interfaceName === 'ClientFunctions') {
-          // ClientFunctions are called by server to client, so generate server functions
-          serverFunctions = extractFunctionSignatures(node, checker, sourceFile);
-        } else if (interfaceName === 'ServerFunctions') {
-          // ServerFunctions are called by client to server, so generate client functions
-          clientFunctions = extractFunctionSignatures(node, checker, sourceFile);
-        }
-      }
-
-      ts.forEachChild(node, visit);
+    // Ensure output directory exists
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
     }
 
-    visit(sourceFile);
-
-    // Generate client functions file
+    // Generate client.ts
     const customTypeImports = customTypesUsed.size > 0
       ? `import type { ${Array.from(customTypesUsed).sort().join(', ')} } from './define';\n`
       : '';
@@ -530,7 +434,7 @@ function generateRpcFunctions(userConfig?: GeneratorConfig): void {
     const clientImports = `import type { Socket } from '${config.socketClientImport}';
 ${customTypeImports}
 /**
- * Auto-generated client functions from ${config.inputPath}
+ * Auto-generated client functions from define.ts
  * These functions allow CLIENT to call SERVER functions (ServerFunctions interface)
  * and set up handlers for CLIENT functions (ClientFunctions interface)
  */
@@ -545,13 +449,13 @@ ${customTypeImports}
       '\n\n// === CLIENT HANDLER FUNCTIONS ===\n' +
       clientHandlerFunctions;
 
-    fs.writeFileSync(clientFilePath, clientCode);
+    fs.writeFileSync(path.join(outputDir, 'client.ts'), clientCode);
 
-    // Generate server functions file  
+    // Generate server.ts
     const serverImports = `import type { Socket } from '${config.socketServerImport}';
 ${customTypeImports}
 /**
- * Auto-generated server functions from ${config.inputPath}
+ * Auto-generated server functions from define.ts
  * These functions allow SERVER to call CLIENT functions (ClientFunctions interface)
  * and set up handlers for SERVER functions (ServerFunctions interface)
  */
@@ -566,11 +470,32 @@ ${customTypeImports}
       '\n\n// === SERVER HANDLER FUNCTIONS ===\n' +
       serverHandlerFunctions;
 
-    fs.writeFileSync(serverFilePath, serverCode);
+    fs.writeFileSync(path.join(outputDir, 'server.ts'), serverCode);
 
-    console.log('✅ Generated RPC functions:');
-    console.log(`📄 Client functions: ${clientFilePath} (${clientFunctions.length} call functions, ${serverFunctions.length} handler functions)`);
-    console.log(`📄 Server functions: ${serverFilePath} (${serverFunctions.length} call functions, ${clientFunctions.length} handler functions)`);
+    // Generate index.ts
+    const indexCode = generateIndexFile(config);
+    fs.writeFileSync(path.join(outputDir, 'index.ts'), indexCode);
+
+    // Generate package.json if it doesn't exist
+    const packageJsonPath = path.join(outputDir, 'package.json');
+    if (!fs.existsSync(packageJsonPath)) {
+      const packageJson = generatePackageJson(config);
+      fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
+    }
+
+    // Generate tsconfig.json if it doesn't exist
+    const tsConfigPath = path.join(outputDir, 'tsconfig.json');
+    if (!fs.existsSync(tsConfigPath)) {
+      const tsConfig = generateTsConfig();
+      fs.writeFileSync(tsConfigPath, JSON.stringify(tsConfig, null, 2));
+    }
+
+    console.log('✅ Generated RPC package successfully!');
+    console.log(`📦 Package location: ${outputDir}`);
+    console.log(`📄 Generated files:`);
+    console.log(`   - client.ts (${clientFunctions.length} call functions, ${serverFunctions.length} handler functions)`);
+    console.log(`   - server.ts (${serverFunctions.length} call functions, ${clientFunctions.length} handler functions)`);
+    console.log(`   - index.ts`);
 
     // Log generated functions
     if (clientFunctions.length > 0) {
@@ -587,23 +512,25 @@ ${customTypeImports}
       });
     }
 
-    if (serverFunctions.length > 0) {
-      console.log('\n📋 Generated client handler functions:');
-      serverFunctions.forEach(f => {
-        const handlerName = `handle${f.name.charAt(0).toUpperCase() + f.name.slice(1)}`;
-        console.log(`  - ${handlerName}(socket, handler)`);
-      });
-    }
+    if (config.generateHandlers) {
+      if (serverFunctions.length > 0) {
+        console.log('\n📋 Generated client handler functions:');
+        serverFunctions.forEach(f => {
+          const handlerName = `handle${f.name.charAt(0).toUpperCase() + f.name.slice(1)}`;
+          console.log(`  - ${handlerName}(socket, handler)`);
+        });
+      }
 
-    if (clientFunctions.length > 0) {
-      console.log('\n📋 Generated server handler functions:');
-      clientFunctions.forEach(f => {
-        const handlerName = `handle${f.name.charAt(0).toUpperCase() + f.name.slice(1)}`;
-        console.log(`  - ${handlerName}(socket, handler)`);
-      });
+      if (clientFunctions.length > 0) {
+        console.log('\n📋 Generated server handler functions:');
+        clientFunctions.forEach(f => {
+          const handlerName = `handle${f.name.charAt(0).toUpperCase() + f.name.slice(1)}`;
+          console.log(`  - ${handlerName}(socket, handler)`);
+        });
+      }
     }
   } catch (error) {
-    console.error('❌ Error generating RPC functions:', error);
+    console.error('❌ Error generating RPC package:', error);
     process.exit(1);
   }
 }
@@ -613,19 +540,19 @@ ${customTypeImports}
  */
 function watchMode(config?: GeneratorConfig): void {
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
-  const inputPath = path.join(__dirname, mergedConfig.inputPath);
+  const inputPath = path.resolve(__dirname, mergedConfig.inputPath);
 
   console.log(`👀 Watching ${inputPath} for changes...`);
 
   // Initial generation
-  generateRpcFunctions(config);
+  generateRpcPackage(config);
 
   // Watch for changes
   fs.watchFile(inputPath, { interval: 1000 }, (curr, prev) => {
     if (curr.mtime !== prev.mtime) {
-      console.log(`\n🔄 ${mergedConfig.inputPath} changed, regenerating...`);
+      console.log(`\n🔄 ${path.basename(inputPath)} changed, regenerating...`);
       try {
-        generateRpcFunctions(config);
+        generateRpcPackage(config);
       } catch (error) {
         console.error('❌ Error during regeneration:', error);
       }
@@ -648,6 +575,10 @@ if (require.main === module) {
   if (watchFlag) {
     watchMode();
   } else {
-    generateRpcFunctions();
+    generateRpcPackage();
   }
 }
+
+// Export for programmatic use
+export { generateRpcPackage, watchMode };
+export type { GeneratorConfig };

@@ -3,19 +3,13 @@
   "module": "index.ts",
   "type": "module",
   "scripts": {
-    "generate": "bun run generate.ts",
-    "demo:server": "bun run generate.ts && bun run demo-server.ts",
-    "demo:client": "bun run generate.ts && bun run demo-client.ts",
-    "dev": "bun run generate.ts --watch"
+    "build": "tsc",
+    "dev": "tsc --watch"
   },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
-  },
-  "dependencies": {
-    "socket.io": "^4.8.1",
-    "socket.io-client": "^4.8.1"
   }
 }

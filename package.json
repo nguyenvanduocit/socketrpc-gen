@@ -7,12 +7,14 @@
     "@types/bun": "latest"
   },
   "scripts": {
-    "generate": "cd pkg/rpc && bun run generate.ts",
+    "generate": "bun run generator/index.ts",
+    "generate:watch": "bun run generator/index.ts --watch",
     "server": "cd pkg/server && bun run index.ts",
     "plugin": "cd pkg/plugin && bun run dev"
   },
   "workspaces": [
-    "pkg/*"
+    "pkg/*",
+    "generator"
   ],
   "peerDependencies": {
     "typescript": "^5"

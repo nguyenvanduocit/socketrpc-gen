@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.2.0...v1.2.1) (2025-06-24)
+
+
+### Bug Fixes
+
+* error when create tsconfig file ([23649d2](https://github.com/nguyenvanduocit/socketrpc-gen/commit/23649d2460bd825cd5065bd82e15d93b24f14211))
+
 ## [1.2.0](https://github.com/nguyenvanduocit/socket-rpc-template/compare/v1.1.0...v1.2.0) (2025-06-24)
 
 

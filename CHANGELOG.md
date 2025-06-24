@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0](https://github.com/nguyenvanduocit/socket-rpc-template/compare/v1.1.0...v1.2.0) (2025-06-24)
+
+
+### Features
+
+* improve RpcError handling with enhanced validation and error messaging ([961712f](https://github.com/nguyenvanduocit/socket-rpc-template/commit/961712f21bffa8097ed1f67576b07e402a03a00c))
+* update generated file names and enhance error handling in RPC package ([e9261e9](https://github.com/nguyenvanduocit/socket-rpc-template/commit/e9261e938d443aee4d49944670c82af9f2adddd6))
+
 ## [1.1.0](https://github.com/nguyenvanduocit/socket-rpc-template/compare/v1.0.0...v1.1.0) (2025-06-24)
 
 

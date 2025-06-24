@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/nguyenvanduocit/socket-rpc-template/compare/v1.0.0...v1.1.0) (2025-06-24)
+
+
+### Features
+
+* add RpcError handling and types for RPC package ([a5e5529](https://github.com/nguyenvanduocit/socket-rpc-template/commit/a5e5529fc11a1574f7d9558c6d92dd94da3b5cb1))
+* enhance RpcError interface with additional properties and update type guard ([3582c66](https://github.com/nguyenvanduocit/socket-rpc-template/commit/3582c66749ba223686ec5dbecd5c12113641cc6e))
+
 ## 1.0.0 (2025-06-24)
 
 

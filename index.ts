@@ -265,7 +265,7 @@ function generateClientFunctionAST(
     } else {
       // For non-void functions, emit with acknowledgment and error handling
       const argsArray = func.params.map(p => p.name);
-      const argsString = argsArray.length > 0 ? `, ${argsArray.join(', ')}` : ', undefined';
+      const argsString = argsArray.length > 0 ? `, ${argsArray.join(', ')}` : '';
       writer.writeLine(`try {`);
       writer.indent(() => {
         writer.writeLine(`return await socket.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
@@ -318,7 +318,7 @@ function generateServerFunctionAST(
     } else {
       // For non-void functions, emit with acknowledgment and error handling
       const argsArray = func.params.map(p => p.name);
-      const argsString = argsArray.length > 0 ? `, ${argsArray.join(', ')}` : ', undefined';
+      const argsString = argsArray.length > 0 ? `, ${argsArray.join(', ')}` : '';
       writer.writeLine(`try {`);
       writer.indent(() => {
         writer.writeLine(`return await socket.timeout(timeout).emitWithAck('${func.name}'${argsString});`);

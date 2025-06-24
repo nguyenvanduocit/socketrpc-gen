@@ -731,6 +731,20 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
       fs.mkdirSync(outputDir, { recursive: true });
     }
 
+    // Generate package.json if it doesn't exist
+    const packageJsonPath = path.join(outputDir, 'package.json');
+    if (!fs.existsSync(packageJsonPath)) {
+      const packageJson = generatePackageJson(config);
+      fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
+    }
+
+    // Generate tsconfig.json if it doesn't exist
+    const tsConfigPath = path.join(outputDir, 'tsconfig.json');
+    if (!fs.existsSync(tsConfigPath)) {
+      const tsConfig = generateTsConfig();
+      fs.writeFileSync(tsConfigPath, JSON.stringify(tsConfig, null, 2));
+    }
+
     // Create a new ts-morph project for generating output files
     const outputProject = new Project({
       useInMemoryFileSystem: false,
@@ -749,20 +763,6 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
 
     // Save all generated files
     await outputProject.save();
-
-    // Generate package.json if it doesn't exist
-    const packageJsonPath = path.join(outputDir, 'package.json');
-    if (!fs.existsSync(packageJsonPath)) {
-      const packageJson = generatePackageJson(config);
-      fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
-    }
-
-    // Generate tsconfig.json if it doesn't exist
-    const tsConfigPath = path.join(outputDir, 'tsconfig.json');
-    if (!fs.existsSync(tsConfigPath)) {
-      const tsConfig = generateTsConfig();
-      fs.writeFileSync(tsConfigPath, JSON.stringify(tsConfig, null, 2));
-    }
 
     console.log('✅ Generated RPC package successfully using ts-morph AST!');
     console.log(`📦 Package location: ${outputDir}`);

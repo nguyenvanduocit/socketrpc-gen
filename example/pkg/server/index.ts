@@ -6,6 +6,7 @@ import { Server } from "socket.io";
 import type { ExtendedSocket } from "./type.d";
 import { authMiddleware } from "./auth";
 import { handleGenerateText, showError } from "@socket-rpc/rpc/server";
+import type { RpcError } from "@socket-rpc/rpc";
 
 // Constants
 /** Server port configuration - defaults to 8080 if PORT environment variable is not set */
@@ -75,11 +76,13 @@ io.on("connection", async (socket: ExtendedSocket) => {
    */
   handleGenerateText(
     socket,
-    async (prompt: string): Promise<string> => {
-      // TODO: Implement actual text generation logic
-      showError(socket, new Error("Test error"));
-      // Currently returns a placeholder response
-      return "Hello, world!";
+    async (prompt: string): Promise<string | RpcError> => {
+      if (prompt === "error") {
+        return { message: "expected error" } as RpcError;
+      } else if (prompt === "throw") {
+        throw new Error("unexpected error");
+      }
+      return "test success";
     }
   );
 });

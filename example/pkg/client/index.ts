@@ -1,5 +1,6 @@
 import { io, Socket } from "socket.io-client";
 import { generateText, handleShowError } from "@socket-rpc/rpc/client";
+import { isRpcError } from "@socket-rpc/rpc";
 
 /**
  * Socket.IO RPC Client Configuration
@@ -70,8 +71,26 @@ const clientPromise = new Promise<void>((resolve, reject) => {
        * - Error propagation
        * - Timeout management
        */
-      const text = await generateText(socket, "Hello, AI!");
-      console.log("💬 Generated text:", text);
+      const text = await generateText(socket, "should be success");
+      if (isRpcError(text)) {
+        console.error("you should not see this");
+      } else {
+        console.log("Generated text:", text);
+      }
+
+      const text2 = await generateText(socket, "error");
+      if (isRpcError(text2)) {
+        console.error("Test ok:", text2);
+      } else {
+        console.log("you should not see this", text2);
+      }
+
+      const text3 = await generateText(socket, "throw");
+      if (isRpcError(text3)) {
+        console.error("Test ok:", text3);
+      } else {
+        console.log("you should not see this", text3);
+      }
 
       // Wait for generateText to complete before disconnecting
       console.log("🔄 generateText completed, disconnecting...");

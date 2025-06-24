@@ -154,6 +154,49 @@ function createJSDoc(
 }
 
 /**
+ * Creates a new file types.ts for custom types.
+ * @param project The ts-morph project instance.
+ * @param outputDir The output directory.
+ */
+function generateTypesFile(project: Project, outputDir: string): void {
+  const typesFile = project.createSourceFile(
+    path.join(outputDir, 'types.ts'),
+    '',
+    { overwrite: true }
+  );
+
+  typesFile.insertText(0, `/**
+ * Auto-generated types for the RPC package
+ */
+
+`);
+
+  typesFile.addInterface({
+    name: 'RpcError',
+    isExported: true,
+    docs: ['Represents an error that occurred during an RPC call.'],
+    properties: [
+      {
+        name: 'message',
+        type: 'string',
+        docs: ['The error message.']
+      }
+    ]
+  });
+
+  typesFile.addFunction({
+    name: 'isRpcError',
+    isExported: true,
+    docs: ['Type guard to check if an object is an RpcError.'],
+    parameters: [{ name: 'obj', type: 'any' }],
+    returnType: 'obj is RpcError',
+    statements: `return !!obj && typeof (obj as RpcError).message === 'string';`
+  });
+
+  typesFile.formatText();
+}
+
+/**
  * Creates function parameters structure for ts-morph
  */
 function createFunctionParameters(
@@ -210,18 +253,29 @@ function generateClientFunctionAST(
       const argsString = argsArray.length > 0 ? `, ${argsArray.join(', ')}` : '';
       writer.writeLine(`socket.emit('${func.name}'${argsString});`);
     } else {
-      // For non-void functions, emit with acknowledgment
+      // For non-void functions, emit with acknowledgment and error handling
       const argsArray = func.params.map(p => p.name);
       const argsString = argsArray.length > 0 ? `, ${argsArray.join(', ')}` : ', undefined';
-      writer.writeLine(`return socket.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
+      writer.writeLine(`try {`);
+      writer.indent(() => {
+        writer.writeLine(`return await socket.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
+      });
+      writer.writeLine(`} catch (err) {`);
+      writer.indent(() => {
+        writer.writeLine(`return { message: err instanceof Error ? err.message : String(err) };`);
+      });
+      writer.writeLine(`}`);
     }
   };
 
-  const description = `Auto-generated client function - CLIENT calls SERVER: Emits '${func.name}' event to server ${func.isVoid ? 'without' : 'with'
-    } acknowledgment`;
+  const description = `CLIENT calls SERVER: Emits '${func.name}' event to server ${func.isVoid ? 'without' : 'with'
+    } acknowledgment. Includes built-in error handling.`;
   const returnType = func.isVoid
     ? null
-    : { type: `Promise<${func.returnType}>`, description: 'A promise that resolves with the result from the server.' };
+    : {
+      type: `Promise<${func.returnType} | RpcError>`,
+      description: 'A promise that resolves with the result from the server, or an RpcError if one occurred.'
+    };
 
   return {
     kind: StructureKind.Function,
@@ -229,7 +283,7 @@ function generateClientFunctionAST(
     isExported: true,
     isAsync: !func.isVoid,
     parameters: params,
-    returnType: func.isVoid ? 'void' : `Promise<${func.returnType}>`,
+    returnType: func.isVoid ? 'void' : `Promise<${func.returnType} | RpcError>`,
     statements: bodyWriter,
     docs: [createJSDoc(description, params, returnType)]
   };
@@ -252,18 +306,29 @@ function generateServerFunctionAST(
       const argsString = argsArray.length > 0 ? `, ${argsArray.join(', ')}` : '';
       writer.writeLine(`socket.emit('${func.name}'${argsString});`);
     } else {
-      // For non-void functions, emit with acknowledgment
+      // For non-void functions, emit with acknowledgment and error handling
       const argsArray = func.params.map(p => p.name);
       const argsString = argsArray.length > 0 ? `, ${argsArray.join(', ')}` : ', undefined';
-      writer.writeLine(`return socket.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
+      writer.writeLine(`try {`);
+      writer.indent(() => {
+        writer.writeLine(`return await socket.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
+      });
+      writer.writeLine(`} catch (err) {`);
+      writer.indent(() => {
+        writer.writeLine(`return { message: err instanceof Error ? err.message : String(err) };`);
+      });
+      writer.writeLine(`}`);
     }
   };
 
-  const description = `Auto-generated server function - SERVER calls CLIENT: Emits '${func.name}' event to client ${func.isVoid ? 'without' : 'with'
-    } acknowledgment`;
+  const description = `SERVER calls CLIENT: Emits '${func.name}' event to client ${func.isVoid ? 'without' : 'with'
+    } acknowledgment. Includes built-in error handling.`;
   const returnType = func.isVoid
     ? null
-    : { type: `Promise<${func.returnType}>`, description: 'A promise that resolves with the result from the client.' };
+    : {
+      type: `Promise<${func.returnType} | RpcError>`,
+      description: 'A promise that resolves with the result from the client, or an RpcError if one occurred.'
+    };
 
   return {
     kind: StructureKind.Function,
@@ -271,7 +336,7 @@ function generateServerFunctionAST(
     isExported: true,
     isAsync: !func.isVoid,
     parameters: params,
-    returnType: func.isVoid ? 'void' : `Promise<${func.returnType}>`,
+    returnType: func.isVoid ? 'void' : `Promise<${func.returnType} | RpcError>`,
     statements: bodyWriter,
     docs: [createJSDoc(description, params, returnType)]
   };
@@ -287,8 +352,8 @@ function generateClientHandlerAST(
 
   const handlerName = `handle${func.name.charAt(0).toUpperCase() + func.name.slice(1)}`;
   const handlerParamType = func.params.length > 0
-    ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType}>`}`
-    : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType}>`}`;
+    ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`
+    : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
 
   const bodyWriter = (writer: any) => {
     if (func.isVoid) {
@@ -308,7 +373,7 @@ function generateClientHandlerAST(
         writer.writeLine('} catch (error) {');
         writer.indent(() => {
           writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-          writer.writeLine("callback({ error: error instanceof Error ? error.message : 'Unknown error' });");
+          writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
         });
         writer.writeLine('}');
       });
@@ -320,7 +385,7 @@ function generateClientHandlerAST(
     { name: 'socket', type: 'Socket' },
     { name: 'handler', type: handlerParamType }
   ];
-  const description = `Auto-generated client handler - Sets up listener for '${func.name}' events from server${func.isVoid ? '' : ' with acknowledgment'
+  const description = `Sets up listener for '${func.name}' events from server${func.isVoid ? '' : ' with acknowledgment'
     }`;
 
   return {
@@ -344,8 +409,8 @@ function generateServerHandlerAST(
 
   const handlerName = `handle${func.name.charAt(0).toUpperCase() + func.name.slice(1)}`;
   const handlerParamType = func.params.length > 0
-    ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType}>`}`
-    : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType}>`}`;
+    ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`
+    : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
 
   const bodyWriter = (writer: any) => {
     if (func.isVoid) {
@@ -365,7 +430,7 @@ function generateServerHandlerAST(
         writer.writeLine('} catch (error) {');
         writer.indent(() => {
           writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-          writer.writeLine("callback({ error: error instanceof Error ? error.message : 'Unknown error' });");
+          writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
         });
         writer.writeLine('}');
       });
@@ -377,7 +442,7 @@ function generateServerHandlerAST(
     { name: 'socket', type: 'Socket' },
     { name: 'handler', type: handlerParamType }
   ];
-  const description = `Auto-generated server handler - Sets up listener for '${func.name}' events from client${func.isVoid ? '' : ' with acknowledgment'
+  const description = `Sets up listener for '${func.name}' events from client${func.isVoid ? '' : ' with acknowledgment'
     }`;
 
   return {
@@ -413,6 +478,15 @@ function generateClientFile(
     namedImports: ['Socket'],
     isTypeOnly: true
   });
+
+  // Add RpcError import if there are functions that can return errors
+  if (clientFunctions.some(f => !f.isVoid) || serverFunctions.some(f => !f.isVoid)) {
+    clientFile.addImportDeclaration({
+      moduleSpecifier: './types',
+      namedImports: ['RpcError'],
+      isTypeOnly: true
+    });
+  }
 
   // Add file header comment
   clientFile.insertText(0, `/**
@@ -471,6 +545,15 @@ function generateServerFile(
     isTypeOnly: true
   });
 
+  // Add RpcError import if there are functions that can return errors
+  if (serverFunctions.some(f => !f.isVoid) || clientFunctions.some(f => !f.isVoid)) {
+    serverFile.addImportDeclaration({
+      moduleSpecifier: './types',
+      namedImports: ['RpcError'],
+      isTypeOnly: true
+    });
+  }
+
   // Add file header comment
   serverFile.insertText(0, `/**
  * Auto-generated server functions from define.ts
@@ -527,7 +610,8 @@ function generateIndexFile(project: Project, outputDir: string, config: Required
   indexFile.addExportDeclarations([
     { moduleSpecifier: './define' },
     { moduleSpecifier: './client' },
-    { moduleSpecifier: './server' }
+    { moduleSpecifier: './server' },
+    { moduleSpecifier: './types' }
   ]);
 
   // Format and save
@@ -648,6 +732,7 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
     });
 
     // Generate files using ts-morph
+    generateTypesFile(outputProject, outputDir);
     generateClientFile(outputProject, outputDir, clientFunctions, serverFunctions, config);
     generateServerFile(outputProject, outputDir, clientFunctions, serverFunctions, config);
     generateIndexFile(outputProject, outputDir, config);
@@ -674,6 +759,7 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
     console.log(`📄 Generated files:`);
     console.log(`   - client.ts (${clientFunctions.length} call functions, ${serverFunctions.length} handler functions)`);
     console.log(`   - server.ts (${serverFunctions.length} call functions, ${clientFunctions.length} handler functions)`);
+    console.log(`   - types.ts`);
     console.log(`   - index.ts`);
 
     // Log generated functions

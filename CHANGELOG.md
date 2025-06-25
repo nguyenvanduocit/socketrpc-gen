@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.2.2...v1.3.0) (2025-06-25)
+
+
+### Features
+
+* display CLI version on startup and reformat arguments ([7bdff4c](https://github.com/nguyenvanduocit/socketrpc-gen/commit/7bdff4c656c329e86a262abc9651b67fe3693b63))
+
 ## [1.2.2](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.2.1...v1.2.2) (2025-06-24)
 
 

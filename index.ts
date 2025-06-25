@@ -845,21 +845,41 @@ if (require.main === module) {
   const program = new Command();
 
   program
-    .name('socketrpc-gen')
-    .description('Generate Socket.IO RPC code from interface definitions.')
-    .version('1.0.0');
+    .name("socketrpc-gen")
+    .description("Generate Socket.IO RPC code from interface definitions.")
+    .version("1.0.0");
+
+  // Display the current version when the program starts
+  console.log(`🚀 socketrpc-gen v${program.version()}`);
 
   program
-    .argument('<path>', 'Path to the input TypeScript file containing interface definitions')
-    .option('-p, --package-name <name>', 'Package name for the generated RPC package', '@socket-rpc/rpc')
-    .option('-t, --timeout <ms>', 'Default timeout for RPC calls in milliseconds', '5000')
-    .option('-w, --watch', 'Watch for changes and regenerate automatically', false)
+    .argument(
+      "<path>",
+      "Path to the input TypeScript file containing interface definitions"
+    )
+    .option(
+      "-p, --package-name <name>",
+      "Package name for the generated RPC package",
+      "@socket-rpc/rpc"
+    )
+    .option(
+      "-t, --timeout <ms>",
+      "Default timeout for RPC calls in milliseconds",
+      "5000"
+    )
+    .option(
+      "-w, --watch",
+      "Watch for changes and regenerate automatically",
+      false
+    )
     .action((filePath, options) => {
       const inputPath = path.resolve(process.cwd(), filePath);
 
       // Validate input path
       if (!fs.existsSync(inputPath) || !fs.statSync(inputPath).isFile()) {
-        console.error(`❌ Error: Input file not found or is not a file at ${inputPath}`);
+        console.error(
+          `❌ Error: Input file not found or is not a file at ${inputPath}`
+        );
         process.exit(1);
       }
 
@@ -870,7 +890,7 @@ if (require.main === module) {
         inputPath: inputPath,
         outputDir: outputDir,
         packageName: options.packageName,
-        defaultTimeout: parseInt(options.timeout, 10)
+        defaultTimeout: parseInt(options.timeout, 10),
       };
 
       if (options.watch) {

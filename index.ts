@@ -374,13 +374,21 @@ function generateClientHandlerAST(
     writer.indent(() => {
       writer.writeLine('try {');
       writer.indent(() => {
-        writer.writeLine(`const result = await handler(${handlerArgs});`);
-        writer.writeLine('callback(result);');
+        if (func.isVoid) {
+          writer.writeLine(`await handler(${handlerArgs});`);
+        } else {
+          writer.writeLine(`const result = await handler(${handlerArgs});`);
+          writer.writeLine('callback(result);');
+        }
       });
       writer.writeLine('} catch (error) {');
       writer.indent(() => {
         writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-        writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
+        // emit the error to the client
+        writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);`);
+        if (!func.isVoid) {
+          writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
+        }
       });
       writer.writeLine('}');
     });
@@ -427,13 +435,21 @@ function generateServerHandlerAST(
     writer.indent(() => {
       writer.writeLine('try {');
       writer.indent(() => {
-        writer.writeLine(`const result = await handler(${handlerArgs});`);
-        writer.writeLine('callback(result);');
+        if (func.isVoid) {
+          writer.writeLine(`await handler(${handlerArgs});`);
+        } else {
+          writer.writeLine(`const result = await handler(${handlerArgs});`);
+          writer.writeLine('callback(result);');
+        }
       });
       writer.writeLine('} catch (error) {');
       writer.indent(() => {
         writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-        writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
+        // emit the error to the client
+        writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);`);
+        if (!func.isVoid) {
+          writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
+        }
       });
       writer.writeLine('}');
     });

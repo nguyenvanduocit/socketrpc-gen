@@ -46,7 +46,14 @@ export async function getPlan(socket: Socket, planId: string, timeout: number = 
  * @param {(error: Error) => Promise<void>} handler The handler function to process incoming events.
  */
 export function handleShowError(socket: Socket, handler: (error: Error) => Promise<void>): void {
-    socket.on('showError', handler);
+    socket.on('showError', async (error, callback) => {
+        try {
+            await handler(error);
+        } catch (error) {
+            console.error('[showError] Handler error:', error);
+            socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
+        }
+    });
 }
 
 /**
@@ -55,7 +62,14 @@ export function handleShowError(socket: Socket, handler: (error: Error) => Promi
  * @param {(url: string) => Promise<void>} handler The handler function to process incoming events.
  */
 export function handleUpdateDiscoveriedUrls(socket: Socket, handler: (url: string) => Promise<void>): void {
-    socket.on('updateDiscoveriedUrls', handler);
+    socket.on('updateDiscoveriedUrls', async (url, callback) => {
+        try {
+            await handler(url);
+        } catch (error) {
+            console.error('[updateDiscoveriedUrls] Handler error:', error);
+            socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
+        }
+    });
 }
 
 /**
@@ -70,6 +84,7 @@ export function handleGetBrowserVersion(socket: Socket, handler: () => Promise<s
             callback(result);
         } catch (error) {
             console.error('[getBrowserVersion] Handler error:', error);
+            socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
             callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
         }
     });

@@ -35,7 +35,7 @@ export function updateDiscoveriedUrls(socket: Socket, url: string): void {
  */
 export async function getBrowserVersion(socket: Socket, timeout: number = 5000): Promise<string | RpcError> {
     try {
-        return await socket.timeout(timeout).emitWithAck('getBrowserVersion', undefined);
+        return await socket.timeout(timeout).emitWithAck('getBrowserVersion');
     } catch (err) {
         return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
     }
@@ -54,6 +54,7 @@ export function handleGenerateText(socket: Socket, handler: (prompt: string) => 
             callback(result);
         } catch (error) {
             console.error('[generateText] Handler error:', error);
+            socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
             callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
         }
     });
@@ -71,6 +72,7 @@ export function handleGetPlan(socket: Socket, handler: (planId: string) => Promi
             callback(result);
         } catch (error) {
             console.error('[getPlan] Handler error:', error);
+            socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
             callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
         }
     });

@@ -89,3 +89,14 @@ export function handleGetBrowserVersion(socket: Socket, handler: () => Promise<s
         }
     });
 }
+
+/**
+ * Sets up listener for 'rpcError' events. This handler is called whenever an RPC error occurs during function execution.
+ * @param {Socket} socket The socket instance for communication.
+ * @param {(error: RpcError) => void} handler The handler function to process incoming events.
+ */
+export function handleRpcError(socket: Socket, handler: (error: RpcError) => void): void {
+    socket.on('rpcError', (error: RpcError) => {
+        handler(error);
+    });
+}

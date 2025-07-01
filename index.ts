@@ -475,6 +475,44 @@ function generateServerHandlerAST(
 }
 
 /**
+ * Generates handleRpcError function using ts-morph AST with async/await and try-catch
+ */
+function generateRpcErrorHandlerAST(): FunctionDeclarationStructure {
+  const bodyWriter = (writer: any) => {
+    writer.writeLine(`socket.on('rpcError', async (error: RpcError) => {`);
+    writer.indent(() => {
+      writer.writeLine('try {');
+      writer.indent(() => {
+        writer.writeLine('await handler(error);');
+      });
+      writer.writeLine('} catch (handlerError) {');
+      writer.indent(() => {
+        writer.writeLine(`console.error('[handleRpcError] Error in RPC error handler:', handlerError);`);
+      });
+      writer.writeLine('}');
+    });
+    writer.writeLine('});');
+  };
+
+  const params: OptionalKind<ParameterDeclarationStructure>[] = [
+    { name: 'socket', type: 'Socket' },
+    { name: 'handler', type: '(error: RpcError) => Promise<void>' }
+  ];
+
+  const description = `Sets up listener for 'rpcError' events with async/await and try-catch. This handler is called whenever an RPC error occurs during function execution.`;
+
+  return {
+    kind: StructureKind.Function,
+    name: 'handleRpcError',
+    isExported: true,
+    parameters: params,
+    returnType: 'void',
+    statements: bodyWriter,
+    docs: [createJSDoc(description, params, null)]
+  };
+}
+
+/**
  * Generates client.ts file using ts-morph
  */
 function generateClientFile(
@@ -497,14 +535,12 @@ function generateClientFile(
     isTypeOnly: true
   });
 
-  // Add RpcError import if there are functions that can return errors
-  if (clientFunctions.some(f => !f.isVoid) || serverFunctions.some(f => !f.isVoid)) {
-    clientFile.addImportDeclaration({
-      moduleSpecifier: './types.generated',
-      namedImports: ['RpcError'],
-      isTypeOnly: true
-    });
-  }
+  // Always add RpcError import since we generate handleRpcError by default
+  clientFile.addImportDeclaration({
+    moduleSpecifier: './types.generated',
+    namedImports: ['RpcError'],
+    isTypeOnly: true
+  });
 
   // Add file header comment
   clientFile.insertText(0, `/**
@@ -535,6 +571,10 @@ function generateClientFile(
     }
   });
 
+  // Add handleRpcError function
+  const rpcErrorHandlerStructure = generateRpcErrorHandlerAST();
+  clientFile.addFunction(rpcErrorHandlerStructure);
+
   // Format and save
   clientFile.formatText();
   clientFile.fixMissingImports();
@@ -563,14 +603,12 @@ function generateServerFile(
     isTypeOnly: true
   });
 
-  // Add RpcError import if there are functions that can return errors
-  if (serverFunctions.some(f => !f.isVoid) || clientFunctions.some(f => !f.isVoid)) {
-    serverFile.addImportDeclaration({
-      moduleSpecifier: './types.generated',
-      namedImports: ['RpcError'],
-      isTypeOnly: true
-    });
-  }
+  // Always add RpcError import since we generate handleRpcError by default
+  serverFile.addImportDeclaration({
+    moduleSpecifier: './types.generated',
+    namedImports: ['RpcError'],
+    isTypeOnly: true
+  });
 
   // Add file header comment
   serverFile.insertText(0, `/**
@@ -600,6 +638,10 @@ function generateServerFile(
       serverFile.addFunction(handlerStructure);
     }
   });
+
+  // Add handleRpcError function
+  const rpcErrorHandlerStructure = generateRpcErrorHandlerAST();
+  serverFile.addFunction(rpcErrorHandlerStructure);
 
   // Format and save
   serverFile.formatText();
@@ -810,6 +852,9 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
         console.log(`  - ${handlerName}(socket, handler)`);
       });
     }
+
+    console.log('\n📋 Generated default handler functions (always included):');
+    console.log('  - handleRpcError(socket, handler) - handles RPC errors from both client and server');
   } catch (error) {
     console.error('❌ Error generating RPC package:', error);
     process.exit(1);

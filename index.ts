@@ -366,29 +366,25 @@ function generateClientHandlerAST(
     : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
 
   const bodyWriter = (writer: any) => {
-    if (func.isVoid) {
-      writer.writeLine(`socket.on('${func.name}', handler);`);
-    } else {
-      const paramNames = func.params.map(p => p.name);
-      const callbackParam = paramNames.length > 0 ? ', callback' : 'callback';
-      const handlerArgs = paramNames.join(', ');
+    const paramNames = func.params.map(p => p.name);
+    const callbackParam = paramNames.length > 0 ? ', callback' : 'callback';
+    const handlerArgs = paramNames.join(', ');
 
-      writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}${callbackParam}) => {`);
+    writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}${callbackParam}) => {`);
+    writer.indent(() => {
+      writer.writeLine('try {');
       writer.indent(() => {
-        writer.writeLine('try {');
-        writer.indent(() => {
-          writer.writeLine(`const result = await handler(${handlerArgs});`);
-          writer.writeLine('callback(result);');
-        });
-        writer.writeLine('} catch (error) {');
-        writer.indent(() => {
-          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-          writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
-        });
-        writer.writeLine('}');
+        writer.writeLine(`const result = await handler(${handlerArgs});`);
+        writer.writeLine('callback(result);');
       });
-      writer.writeLine('});');
-    }
+      writer.writeLine('} catch (error) {');
+      writer.indent(() => {
+        writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
+        writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
+      });
+      writer.writeLine('}');
+    });
+    writer.writeLine('});');
   };
 
   const params: OptionalKind<ParameterDeclarationStructure>[] = [
@@ -423,29 +419,25 @@ function generateServerHandlerAST(
     : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
 
   const bodyWriter = (writer: any) => {
-    if (func.isVoid) {
-      writer.writeLine(`socket.on('${func.name}', handler);`);
-    } else {
-      const paramNames = func.params.map(p => p.name);
-      const callbackParam = paramNames.length > 0 ? ', callback' : 'callback';
-      const handlerArgs = paramNames.join(', ');
+    const paramNames = func.params.map(p => p.name);
+    const callbackParam = paramNames.length > 0 ? ', callback' : 'callback';
+    const handlerArgs = paramNames.join(', ');
 
-      writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}${callbackParam}) => {`);
+    writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}${callbackParam}) => {`);
+    writer.indent(() => {
+      writer.writeLine('try {');
       writer.indent(() => {
-        writer.writeLine('try {');
-        writer.indent(() => {
-          writer.writeLine(`const result = await handler(${handlerArgs});`);
-          writer.writeLine('callback(result);');
-        });
-        writer.writeLine('} catch (error) {');
-        writer.indent(() => {
-          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-          writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
-        });
-        writer.writeLine('}');
+        writer.writeLine(`const result = await handler(${handlerArgs});`);
+        writer.writeLine('callback(result);');
       });
-      writer.writeLine('});');
-    }
+      writer.writeLine('} catch (error) {');
+      writer.indent(() => {
+        writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
+        writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
+      });
+      writer.writeLine('}');
+    });
+    writer.writeLine('});');
   };
 
   const params: OptionalKind<ParameterDeclarationStructure>[] = [

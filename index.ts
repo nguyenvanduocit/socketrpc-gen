@@ -647,37 +647,6 @@ function generateServerFile(
   serverFile.formatText();
   serverFile.fixMissingImports();
 }
-
-/**
- * Generates the index.ts file using ts-morph
- */
-function generateIndexFile(project: Project, outputDir: string, config: Required<GeneratorConfig>): void {
-  const indexFile = project.createSourceFile(
-    path.join(outputDir, 'index.ts'),
-    '',
-    { overwrite: true }
-  );
-
-  // Add file header comment
-  indexFile.insertText(0, `/**
- * @${config.packageName}
- * Auto-generated RPC package for Socket.IO
- */
-
-`);
-
-  // Add export statements
-  indexFile.addExportDeclarations([
-    { moduleSpecifier: './define' },
-    { moduleSpecifier: './client.generated' },
-    { moduleSpecifier: './server.generated' },
-    { moduleSpecifier: './types.generated' }
-  ]);
-
-  // Format and save
-  indexFile.formatText();
-}
-
 /**
  * Generates package.json for the RPC package
  */
@@ -686,8 +655,6 @@ function generatePackageJson(config: Required<GeneratorConfig>): object {
     name: config.packageName,
     version: "1.0.0",
     description: "Auto-generated RPC package for Socket.IO",
-    main: "index.ts",
-    module: "index.ts",
     type: "module",
     scripts: {
       "build": "tsc",
@@ -809,7 +776,6 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
     generateTypesFile(outputProject, outputDir);
     generateClientFile(outputProject, outputDir, clientFunctions, serverFunctions, config);
     generateServerFile(outputProject, outputDir, clientFunctions, serverFunctions, config);
-    generateIndexFile(outputProject, outputDir, config);
 
     // Save all generated files
     await outputProject.save();

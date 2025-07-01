@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.4.0...v1.5.0) (2025-07-01)
+
+
+### Features
+
+* add handleRpcError function for improved RPC error handling with async/await ([fbeaafe](https://github.com/nguyenvanduocit/socketrpc-gen/commit/fbeaafe945763aa4434d4ac3e6012e818cd26c43))
+* enhance error handling in RPC functions and update callback logic ([b8a1f10](https://github.com/nguyenvanduocit/socketrpc-gen/commit/b8a1f10b3f19e368f3ddaa6edd9f8c61ff4e8638))
+
 ## [1.4.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.3.0...v1.4.0) (2025-07-01)
 
 

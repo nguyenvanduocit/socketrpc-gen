@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.5.0...v1.6.0) (2025-07-03)
+
+
+### Features
+
+* bump version ([0615b7d](https://github.com/nguyenvanduocit/socketrpc-gen/commit/0615b7d35469a5c532460f0f5a17b64ea33c91c9))
+
 ## [1.5.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.4.0...v1.5.0) (2025-07-01)
 
 

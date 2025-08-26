@@ -46,44 +46,51 @@ export async function getPlan(socket: Socket, request: GetPlanRequest, timeout: 
 
 // === CLIENT HANDLER FUNCTIONS ===
 /**
- * Sets up listener for 'showError' events from server
+ * Sets up listener for 'showError' events from server. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
  * @param {(error: Error) => Promise<void>} handler The handler function to process incoming events.
+ * @returns {() => void} A function that removes the event listener when called
  */
-export function handleShowError(socket: Socket, handler: (error: Error) => Promise<void>): void {
-    socket.on('showError', async (error) => {
+export function handleShowError(socket: Socket, handler: (error: Error) => Promise<void>): () => void {
+    const listener = async (error: Error) => {
         try {
             await handler(error);
         } catch (error) {
             console.error('[showError] Handler error:', error);
             socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
         }
-    });
+    };
+    socket.on('showError', listener);
+    return () => socket.off('showError', listener);
 }
 
 /**
- * Sets up listener for 'updateDiscoveriedUrls' events from server
+ * Sets up listener for 'updateDiscoveriedUrls' events from server. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
  * @param {(url: string) => Promise<void>} handler The handler function to process incoming events.
+ * @returns {() => void} A function that removes the event listener when called
  */
-export function handleUpdateDiscoveriedUrls(socket: Socket, handler: (url: string) => Promise<void>): void {
-    socket.on('updateDiscoveriedUrls', async (url) => {
+export function handleUpdateDiscoveriedUrls(socket: Socket, handler: (url: string) => Promise<void>): () => void {
+    const listener = async (url: string) => {
         try {
             await handler(url);
         } catch (error) {
             console.error('[updateDiscoveriedUrls] Handler error:', error);
             socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
         }
-    });
+    };
+    socket.on('updateDiscoveriedUrls', listener);
+    return () => socket.off('updateDiscoveriedUrls', listener);
 }
 
 /**
- * Sets up listener for 'getBrowserVersion' events from server with acknowledgment
+ * Sets up listener for 'getBrowserVersion' events from server with acknowledgment. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
  * @param {() => Promise<string | RpcError>} handler The handler function to process incoming events.
+ * @returns {() => void} A function that removes the event listener when called
  */
-export function handleGetBrowserVersion(socket: Socket, handler: () => Promise<string | RpcError>): void {
-    socket.on('getBrowserVersion', async (callback) => {
+export function handleGetBrowserVersion(socket: Socket, handler: () => Promise<string | RpcError>): () => void {
+    const listener = async (callback: (result: string | RpcError) => void) => {
         try {
             const result = await handler();
             callback(result);
@@ -92,20 +99,25 @@ export function handleGetBrowserVersion(socket: Socket, handler: () => Promise<s
             socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
             callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
         }
-    });
+    };
+    socket.on('getBrowserVersion', listener);
+    return () => socket.off('getBrowserVersion', listener);
 }
 
 /**
- * Sets up listener for 'rpcError' events with async/await and try-catch. This handler is called whenever an RPC error occurs during function execution.
+ * Sets up listener for 'rpcError' events with async/await and try-catch. This handler is called whenever an RPC error occurs during function execution. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
  * @param {(error: RpcError) => Promise<void>} handler The handler function to process incoming events.
+ * @returns {() => void} A function that removes the event listener when called
  */
-export function handleRpcError(socket: Socket, handler: (error: RpcError) => Promise<void>): void {
-    socket.on('rpcError', async (error: RpcError) => {
+export function handleRpcError(socket: Socket, handler: (error: RpcError) => Promise<void>): () => void {
+    const listener = async (error: RpcError) => {
         try {
             await handler(error);
         } catch (handlerError) {
             console.error('[handleRpcError] Error in RPC error handler:', handlerError);
         }
-    });
+    };
+    socket.on('rpcError', listener);
+    return () => socket.off('rpcError', listener);
 }

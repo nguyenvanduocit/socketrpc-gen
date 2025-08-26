@@ -369,7 +369,8 @@ function generateClientHandlerAST(
 
     if (func.isVoid) {
       // For void functions, no callback parameter
-      writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}) => {`);
+      const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
+      writer.writeLine(`const listener = async (${typedParams}) => {`);
       writer.indent(() => {
         writer.writeLine('try {');
         writer.indent(() => {
@@ -382,11 +383,15 @@ function generateClientHandlerAST(
         });
         writer.writeLine('}');
       });
-      writer.writeLine('});');
+      writer.writeLine('};');
+      writer.writeLine(`socket.on('${func.name}', listener);`);
+      writer.writeLine(`return () => socket.off('${func.name}', listener);`);
     } else {
       // For non-void functions, include callback parameter
-      const callbackParam = paramNames.length > 0 ? ', callback' : 'callback';
-      writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}${callbackParam}) => {`);
+      const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
+      const callbackType = `(result: ${func.returnType} | RpcError) => void`;
+      const fullParams = typedParams ? `${typedParams}, callback: ${callbackType}` : `callback: ${callbackType}`;
+      writer.writeLine(`const listener = async (${fullParams}) => {`);
       writer.indent(() => {
         writer.writeLine('try {');
         writer.indent(() => {
@@ -401,7 +406,9 @@ function generateClientHandlerAST(
         });
         writer.writeLine('}');
       });
-      writer.writeLine('});');
+      writer.writeLine('};');
+      writer.writeLine(`socket.on('${func.name}', listener);`);
+      writer.writeLine(`return () => socket.off('${func.name}', listener);`);
     }
   };
 
@@ -409,17 +416,16 @@ function generateClientHandlerAST(
     { name: 'socket', type: 'Socket' },
     { name: 'handler', type: handlerParamType }
   ];
-  const description = `Sets up listener for '${func.name}' events from server${func.isVoid ? '' : ' with acknowledgment'
-    }`;
+  const description = `Sets up listener for '${func.name}' events from server${func.isVoid ? '' : ' with acknowledgment'}. Returns a function to remove the listener.`;
 
   return {
     kind: StructureKind.Function,
     name: handlerName,
     isExported: true,
     parameters: params,
-    returnType: 'void',
+    returnType: '() => void',
     statements: bodyWriter,
-    docs: [createJSDoc(description, params, null)]
+    docs: [createJSDoc(description, params, { type: '() => void', description: 'A function that removes the event listener when called' })]
   };
 }
 
@@ -442,7 +448,8 @@ function generateServerHandlerAST(
 
     if (func.isVoid) {
       // For void functions, no callback parameter
-      writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}) => {`);
+      const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
+      writer.writeLine(`const listener = async (${typedParams}) => {`);
       writer.indent(() => {
         writer.writeLine('try {');
         writer.indent(() => {
@@ -455,11 +462,15 @@ function generateServerHandlerAST(
         });
         writer.writeLine('}');
       });
-      writer.writeLine('});');
+      writer.writeLine('};');
+      writer.writeLine(`socket.on('${func.name}', listener);`);
+      writer.writeLine(`return () => socket.off('${func.name}', listener);`);
     } else {
       // For non-void functions, include callback parameter
-      const callbackParam = paramNames.length > 0 ? ', callback' : 'callback';
-      writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}${callbackParam}) => {`);
+      const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
+      const callbackType = `(result: ${func.returnType} | RpcError) => void`;
+      const fullParams = typedParams ? `${typedParams}, callback: ${callbackType}` : `callback: ${callbackType}`;
+      writer.writeLine(`const listener = async (${fullParams}) => {`);
       writer.indent(() => {
         writer.writeLine('try {');
         writer.indent(() => {
@@ -474,7 +485,9 @@ function generateServerHandlerAST(
         });
         writer.writeLine('}');
       });
-      writer.writeLine('});');
+      writer.writeLine('};');
+      writer.writeLine(`socket.on('${func.name}', listener);`);
+      writer.writeLine(`return () => socket.off('${func.name}', listener);`);
     }
   };
 
@@ -482,17 +495,16 @@ function generateServerHandlerAST(
     { name: 'socket', type: 'Socket' },
     { name: 'handler', type: handlerParamType }
   ];
-  const description = `Sets up listener for '${func.name}' events from client${func.isVoid ? '' : ' with acknowledgment'
-    }`;
+  const description = `Sets up listener for '${func.name}' events from client${func.isVoid ? '' : ' with acknowledgment'}. Returns a function to remove the listener.`;
 
   return {
     kind: StructureKind.Function,
     name: handlerName,
     isExported: true,
     parameters: params,
-    returnType: 'void',
+    returnType: '() => void',
     statements: bodyWriter,
-    docs: [createJSDoc(description, params, null)]
+    docs: [createJSDoc(description, params, { type: '() => void', description: 'A function that removes the event listener when called' })]
   };
 }
 
@@ -501,7 +513,7 @@ function generateServerHandlerAST(
  */
 function generateRpcErrorHandlerAST(): FunctionDeclarationStructure {
   const bodyWriter = (writer: any) => {
-    writer.writeLine(`socket.on('rpcError', async (error: RpcError) => {`);
+    writer.writeLine(`const listener = async (error: RpcError) => {`);
     writer.indent(() => {
       writer.writeLine('try {');
       writer.indent(() => {
@@ -513,7 +525,9 @@ function generateRpcErrorHandlerAST(): FunctionDeclarationStructure {
       });
       writer.writeLine('}');
     });
-    writer.writeLine('});');
+    writer.writeLine('};');
+    writer.writeLine(`socket.on('rpcError', listener);`);
+    writer.writeLine(`return () => socket.off('rpcError', listener);`);
   };
 
   const params: OptionalKind<ParameterDeclarationStructure>[] = [
@@ -521,16 +535,16 @@ function generateRpcErrorHandlerAST(): FunctionDeclarationStructure {
     { name: 'handler', type: '(error: RpcError) => Promise<void>' }
   ];
 
-  const description = `Sets up listener for 'rpcError' events with async/await and try-catch. This handler is called whenever an RPC error occurs during function execution.`;
+  const description = `Sets up listener for 'rpcError' events with async/await and try-catch. This handler is called whenever an RPC error occurs during function execution. Returns a function to remove the listener.`;
 
   return {
     kind: StructureKind.Function,
     name: 'handleRpcError',
     isExported: true,
     parameters: params,
-    returnType: 'void',
+    returnType: '() => void',
     statements: bodyWriter,
-    docs: [createJSDoc(description, params, null)]
+    docs: [createJSDoc(description, params, { type: '() => void', description: 'A function that removes the event listener when called' })]
   };
 }
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.7.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.6.0...v1.7.0) (2025-08-26)
+
+
+### Features
+
+* enhance generated file headers with clear warnings and regeneration instructions ([c468028](https://github.com/nguyenvanduocit/socketrpc-gen/commit/c4680286ca937a9004d55d7267800dcf0675a38e))
+* improve RPC generation with custom type imports and void function handling ([ef89b78](https://github.com/nguyenvanduocit/socketrpc-gen/commit/ef89b78f4819d68fdc4299249fc205992ed9a5fa))
+
 ## [1.6.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.5.0...v1.6.0) (2025-07-03)
 
 

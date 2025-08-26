@@ -10,7 +10,7 @@
  */
 
 import type { Socket } from "socket.io";
-import type { RpcError } from "./types.generated";
+import type { RpcError, UnsubscribeFunction } from "./types.generated";
 import type { GetPlanRequest, Plan } from "./define";
 
 // === SERVER CALLING CLIENT FUNCTIONS ===
@@ -51,9 +51,9 @@ export async function getBrowserVersion(socket: Socket, timeout: number = 5000):
  * Sets up listener for 'generateText' events from client with acknowledgment. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
  * @param {(prompt: string) => Promise<string | RpcError>} handler The handler function to process incoming events.
- * @returns {() => void} A function that removes the event listener when called
+ * @returns {UnsubscribeFunction} A function that removes the event listener when called
  */
-export function handleGenerateText(socket: Socket, handler: (prompt: string) => Promise<string | RpcError>): () => void {
+export function handleGenerateText(socket: Socket, handler: (prompt: string) => Promise<string | RpcError>): UnsubscribeFunction {
     const listener = async (prompt: string, callback: (result: string | RpcError) => void) => {
         try {
             const result = await handler(prompt);
@@ -72,9 +72,9 @@ export function handleGenerateText(socket: Socket, handler: (prompt: string) => 
  * Sets up listener for 'getPlan' events from client with acknowledgment. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
  * @param {(request: GetPlanRequest) => Promise<Plan | RpcError>} handler The handler function to process incoming events.
- * @returns {() => void} A function that removes the event listener when called
+ * @returns {UnsubscribeFunction} A function that removes the event listener when called
  */
-export function handleGetPlan(socket: Socket, handler: (request: GetPlanRequest) => Promise<Plan | RpcError>): () => void {
+export function handleGetPlan(socket: Socket, handler: (request: GetPlanRequest) => Promise<Plan | RpcError>): UnsubscribeFunction {
     const listener = async (request: GetPlanRequest, callback: (result: Plan | RpcError) => void) => {
         try {
             const result = await handler(request);
@@ -93,9 +93,9 @@ export function handleGetPlan(socket: Socket, handler: (request: GetPlanRequest)
  * Sets up listener for 'rpcError' events with async/await and try-catch. This handler is called whenever an RPC error occurs during function execution. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
  * @param {(error: RpcError) => Promise<void>} handler The handler function to process incoming events.
- * @returns {() => void} A function that removes the event listener when called
+ * @returns {UnsubscribeFunction} A function that removes the event listener when called
  */
-export function handleRpcError(socket: Socket, handler: (error: RpcError) => Promise<void>): () => void {
+export function handleRpcError(socket: Socket, handler: (error: RpcError) => Promise<void>): UnsubscribeFunction {
     const listener = async (error: RpcError) => {
         try {
             await handler(error);

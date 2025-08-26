@@ -6,6 +6,9 @@
  * To regenerate this file, run:
  * bunx socketrpc-gen /Volumes/Data/Projects/socket-rpc/example/pkg/rpc/define.ts
  */
+/** Function to unsubscribe from an event listener. Call this to clean up the listener. */
+export type UnsubscribeFunction = () => void;
+
 /** Represents an error that occurred during an RPC call. */
 export interface RpcError {
     /** The error message. */

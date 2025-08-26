@@ -169,6 +169,13 @@ function generateTypesFile(project: Project, outputDir: string, config: Required
 
 `);
 
+  typesFile.addTypeAlias({
+    name: 'UnsubscribeFunction',
+    type: '() => void',
+    isExported: true,
+    docs: ['Function to unsubscribe from an event listener. Call this to clean up the listener.']
+  });
+
   typesFile.addInterface({
     name: 'RpcError',
     isExported: true,
@@ -413,9 +420,9 @@ function generateHandlerAST(
     name: handlerName,
     isExported: true,
     parameters: params,
-    returnType: '() => void',
+    returnType: 'UnsubscribeFunction',
     statements: bodyWriter,
-    docs: [createJSDoc(description, params, { type: '() => void', description: 'A function that removes the event listener when called' })]
+    docs: [createJSDoc(description, params, { type: 'UnsubscribeFunction', description: 'A function that removes the event listener when called' })]
   };
 }
 
@@ -473,9 +480,9 @@ function generateRpcErrorHandlerAST(): FunctionDeclarationStructure {
     name: 'handleRpcError',
     isExported: true,
     parameters: params,
-    returnType: '() => void',
+    returnType: 'UnsubscribeFunction',
     statements: bodyWriter,
-    docs: [createJSDoc(description, params, { type: '() => void', description: 'A function that removes the event listener when called' })]
+    docs: [createJSDoc(description, params, { type: 'UnsubscribeFunction', description: 'A function that removes the event listener when called' })]
   };
 }
 
@@ -490,10 +497,10 @@ function createStandardImports(sourceFile: any, socketModule: string): void {
     isTypeOnly: true
   });
 
-  // Always add RpcError import since we generate handleRpcError by default
+  // Always add RpcError and UnsubscribeFunction imports since we generate handleRpcError by default
   sourceFile.addImportDeclaration({
     moduleSpecifier: './types.generated',
-    namedImports: ['RpcError'],
+    namedImports: ['RpcError', 'UnsubscribeFunction'],
     isTypeOnly: true
   });
 }

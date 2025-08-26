@@ -10,7 +10,7 @@
  */
 
 import type { Socket } from "socket.io-client";
-import type { RpcError } from "./types.generated";
+import type { RpcError, UnsubscribeFunction } from "./types.generated";
 import type { GetPlanRequest, Plan } from "./define";
 
 // === CLIENT CALLING SERVER FUNCTIONS ===
@@ -49,9 +49,9 @@ export async function getPlan(socket: Socket, request: GetPlanRequest, timeout: 
  * Sets up listener for 'showError' events from server. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
  * @param {(error: Error) => Promise<void>} handler The handler function to process incoming events.
- * @returns {() => void} A function that removes the event listener when called
+ * @returns {UnsubscribeFunction} A function that removes the event listener when called
  */
-export function handleShowError(socket: Socket, handler: (error: Error) => Promise<void>): () => void {
+export function handleShowError(socket: Socket, handler: (error: Error) => Promise<void>): UnsubscribeFunction {
     const listener = async (error: Error) => {
         try {
             await handler(error);
@@ -68,9 +68,9 @@ export function handleShowError(socket: Socket, handler: (error: Error) => Promi
  * Sets up listener for 'updateDiscoveriedUrls' events from server. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
  * @param {(url: string) => Promise<void>} handler The handler function to process incoming events.
- * @returns {() => void} A function that removes the event listener when called
+ * @returns {UnsubscribeFunction} A function that removes the event listener when called
  */
-export function handleUpdateDiscoveriedUrls(socket: Socket, handler: (url: string) => Promise<void>): () => void {
+export function handleUpdateDiscoveriedUrls(socket: Socket, handler: (url: string) => Promise<void>): UnsubscribeFunction {
     const listener = async (url: string) => {
         try {
             await handler(url);
@@ -87,9 +87,9 @@ export function handleUpdateDiscoveriedUrls(socket: Socket, handler: (url: strin
  * Sets up listener for 'getBrowserVersion' events from server with acknowledgment. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
  * @param {() => Promise<string | RpcError>} handler The handler function to process incoming events.
- * @returns {() => void} A function that removes the event listener when called
+ * @returns {UnsubscribeFunction} A function that removes the event listener when called
  */
-export function handleGetBrowserVersion(socket: Socket, handler: () => Promise<string | RpcError>): () => void {
+export function handleGetBrowserVersion(socket: Socket, handler: () => Promise<string | RpcError>): UnsubscribeFunction {
     const listener = async (callback: (result: string | RpcError) => void) => {
         try {
             const result = await handler();
@@ -108,9 +108,9 @@ export function handleGetBrowserVersion(socket: Socket, handler: () => Promise<s
  * Sets up listener for 'rpcError' events with async/await and try-catch. This handler is called whenever an RPC error occurs during function execution. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
  * @param {(error: RpcError) => Promise<void>} handler The handler function to process incoming events.
- * @returns {() => void} A function that removes the event listener when called
+ * @returns {UnsubscribeFunction} A function that removes the event listener when called
  */
-export function handleRpcError(socket: Socket, handler: (error: RpcError) => Promise<void>): () => void {
+export function handleRpcError(socket: Socket, handler: (error: RpcError) => Promise<void>): UnsubscribeFunction {
     const listener = async (error: RpcError) => {
         try {
             await handler(error);

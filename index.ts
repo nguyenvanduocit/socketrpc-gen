@@ -367,32 +367,44 @@ function generateClientHandlerAST(
 
   const bodyWriter = (writer: any) => {
     const paramNames = func.params.map(p => p.name);
-    const callbackParam = paramNames.length > 0 ? ', callback' : 'callback';
     const handlerArgs = paramNames.join(', ');
 
-    writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}${callbackParam}) => {`);
-    writer.indent(() => {
-      writer.writeLine('try {');
+    if (func.isVoid) {
+      // For void functions, no callback parameter
+      writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}) => {`);
       writer.indent(() => {
-        if (func.isVoid) {
+        writer.writeLine('try {');
+        writer.indent(() => {
           writer.writeLine(`await handler(${handlerArgs});`);
-        } else {
+        });
+        writer.writeLine('} catch (error) {');
+        writer.indent(() => {
+          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
+          writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);`);
+        });
+        writer.writeLine('}');
+      });
+      writer.writeLine('});');
+    } else {
+      // For non-void functions, include callback parameter
+      const callbackParam = paramNames.length > 0 ? ', callback' : 'callback';
+      writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}${callbackParam}) => {`);
+      writer.indent(() => {
+        writer.writeLine('try {');
+        writer.indent(() => {
           writer.writeLine(`const result = await handler(${handlerArgs});`);
           writer.writeLine('callback(result);');
-        }
-      });
-      writer.writeLine('} catch (error) {');
-      writer.indent(() => {
-        writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-        // emit the error to the client
-        writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);`);
-        if (!func.isVoid) {
+        });
+        writer.writeLine('} catch (error) {');
+        writer.indent(() => {
+          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
+          writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);`);
           writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
-        }
+        });
+        writer.writeLine('}');
       });
-      writer.writeLine('}');
-    });
-    writer.writeLine('});');
+      writer.writeLine('});');
+    }
   };
 
   const params: OptionalKind<ParameterDeclarationStructure>[] = [
@@ -428,32 +440,44 @@ function generateServerHandlerAST(
 
   const bodyWriter = (writer: any) => {
     const paramNames = func.params.map(p => p.name);
-    const callbackParam = paramNames.length > 0 ? ', callback' : 'callback';
     const handlerArgs = paramNames.join(', ');
 
-    writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}${callbackParam}) => {`);
-    writer.indent(() => {
-      writer.writeLine('try {');
+    if (func.isVoid) {
+      // For void functions, no callback parameter
+      writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}) => {`);
       writer.indent(() => {
-        if (func.isVoid) {
+        writer.writeLine('try {');
+        writer.indent(() => {
           writer.writeLine(`await handler(${handlerArgs});`);
-        } else {
+        });
+        writer.writeLine('} catch (error) {');
+        writer.indent(() => {
+          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
+          writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);`);
+        });
+        writer.writeLine('}');
+      });
+      writer.writeLine('});');
+    } else {
+      // For non-void functions, include callback parameter
+      const callbackParam = paramNames.length > 0 ? ', callback' : 'callback';
+      writer.writeLine(`socket.on('${func.name}', async (${paramNames.join(', ')}${callbackParam}) => {`);
+      writer.indent(() => {
+        writer.writeLine('try {');
+        writer.indent(() => {
           writer.writeLine(`const result = await handler(${handlerArgs});`);
           writer.writeLine('callback(result);');
-        }
-      });
-      writer.writeLine('} catch (error) {');
-      writer.indent(() => {
-        writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-        // emit the error to the client
-        writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);`);
-        if (!func.isVoid) {
+        });
+        writer.writeLine('} catch (error) {');
+        writer.indent(() => {
+          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
+          writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);`);
           writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
-        }
+        });
+        writer.writeLine('}');
       });
-      writer.writeLine('}');
-    });
-    writer.writeLine('});');
+      writer.writeLine('});');
+    }
   };
 
   const params: OptionalKind<ParameterDeclarationStructure>[] = [
@@ -513,6 +537,74 @@ function generateRpcErrorHandlerAST(): FunctionDeclarationStructure {
 }
 
 /**
+ * Extracts custom types used in function signatures and adds them as type-only imports
+ */
+function addCustomTypeImports(
+  sourceFile: any,
+  functions: FunctionSignature[],
+  inputFile: SourceFile
+): void {
+  const usedTypes = new Set<string>();
+
+  // Extract types from function parameters and return types
+  functions.forEach(func => {
+    func.params.forEach(param => {
+      // Extract type names from complex types like GetPlanRequest, Plan[], etc.
+      const typeNames = extractTypeNames(param.type);
+      typeNames.forEach(typeName => usedTypes.add(typeName));
+    });
+
+    // Extract types from return types
+    const returnTypeNames = extractTypeNames(func.returnType);
+    returnTypeNames.forEach(typeName => usedTypes.add(typeName));
+  });
+
+  // Filter out primitive types and built-in types
+  const customTypes = Array.from(usedTypes).filter(type =>
+    !['string', 'number', 'boolean', 'void', 'any', 'unknown', 'object', 'Array', 'Promise', 'Error'].includes(type) &&
+    !type.includes('|') && // Skip union types for now
+    !type.includes('<') && // Skip generic types for now
+    !type.includes('[') // Skip array types for now
+  );
+
+  if (customTypes.length > 0) {
+    // Check if these types are exported from the input file
+    const exportedTypes = inputFile.getExportedDeclarations();
+    const availableTypes = customTypes.filter(type => {
+      return exportedTypes.has(type) ||
+        inputFile.getTypeAlias(type) ||
+        inputFile.getInterface(type);
+    });
+
+    if (availableTypes.length > 0) {
+      sourceFile.addImportDeclaration({
+        moduleSpecifier: './define',
+        namedImports: availableTypes,
+        isTypeOnly: true
+      });
+    }
+  }
+}
+
+/**
+ * Extracts type names from a TypeScript type string
+ */
+function extractTypeNames(typeString: string): string[] {
+  const types: string[] = [];
+
+  // Simple regex to extract custom type names
+  // This handles cases like: GetPlanRequest, Plan, Plan[], Promise<Plan>, etc.
+  const typeRegex = /\b([A-Z][a-zA-Z0-9]*)\b/g;
+  let match;
+
+  while ((match = typeRegex.exec(typeString)) !== null) {
+    types.push(match[1]);
+  }
+
+  return types;
+}
+
+/**
  * Generates client.ts file using ts-morph
  */
 function generateClientFile(
@@ -520,7 +612,8 @@ function generateClientFile(
   outputDir: string,
   clientFunctions: FunctionSignature[],
   serverFunctions: FunctionSignature[],
-  config: Required<GeneratorConfig>
+  config: Required<GeneratorConfig>,
+  inputFile: SourceFile
 ): void {
   const clientFile = project.createSourceFile(
     path.join(outputDir, 'client.generated.ts'),
@@ -541,6 +634,9 @@ function generateClientFile(
     namedImports: ['RpcError'],
     isTypeOnly: true
   });
+
+  // Add custom type imports from define.ts
+  addCustomTypeImports(clientFile, [...clientFunctions, ...serverFunctions], inputFile);
 
   // Add file header comment
   clientFile.insertText(0, `/**
@@ -588,7 +684,8 @@ function generateServerFile(
   outputDir: string,
   clientFunctions: FunctionSignature[],
   serverFunctions: FunctionSignature[],
-  config: Required<GeneratorConfig>
+  config: Required<GeneratorConfig>,
+  inputFile: SourceFile
 ): void {
   const serverFile = project.createSourceFile(
     path.join(outputDir, 'server.generated.ts'),
@@ -609,6 +706,9 @@ function generateServerFile(
     namedImports: ['RpcError'],
     isTypeOnly: true
   });
+
+  // Add custom type imports from define.ts
+  addCustomTypeImports(serverFile, [...clientFunctions, ...serverFunctions], inputFile);
 
   // Add file header comment
   serverFile.insertText(0, `/**
@@ -647,6 +747,7 @@ function generateServerFile(
   serverFile.formatText();
   serverFile.fixMissingImports();
 }
+
 /**
  * Generates package.json for the RPC package
  */
@@ -699,6 +800,60 @@ function generateTsConfig(): object {
     include: ["**/*.ts"],
     exclude: ["node_modules", "dist"]
   };
+}
+
+/**
+ * Interface representing a property extracted from TypeScript interface
+ */
+interface InterfaceProperty {
+  name: string;
+  type: string;
+  isOptional: boolean;
+  docs?: string;
+}
+
+/**
+ * Extracts properties from a TypeScript interface using ts-morph
+ */
+function extractInterfaceProperties(interfaceDeclaration: InterfaceDeclaration): InterfaceProperty[] {
+  const properties: InterfaceProperty[] = [];
+
+  try {
+    interfaceDeclaration.getProperties().forEach((prop: PropertySignature) => {
+      const name = prop.getName();
+
+      // Get type information more reliably
+      const typeNode = prop.getTypeNode();
+      let type: string;
+
+      if (typeNode) {
+        type = typeNode.getText();
+      } else {
+        // Fallback to getting type from type checker
+        const propType = prop.getType();
+        type = propType.getText(prop);
+      }
+
+      const isOptional = prop.hasQuestionToken();
+
+      // Extract JSDoc comments
+      const jsDocs = prop.getJsDocs();
+      const docs = jsDocs.length > 0
+        ? jsDocs[0].getDescription().trim()
+        : undefined;
+
+      properties.push({
+        name,
+        type,
+        isOptional,
+        docs
+      });
+    });
+  } catch (error) {
+    console.warn(`Warning: Could not extract properties from interface: ${error}`);
+  }
+
+  return properties;
 }
 
 /**
@@ -774,8 +929,8 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
 
     // Generate files using ts-morph
     generateTypesFile(outputProject, outputDir);
-    generateClientFile(outputProject, outputDir, clientFunctions, serverFunctions, config);
-    generateServerFile(outputProject, outputDir, clientFunctions, serverFunctions, config);
+    generateClientFile(outputProject, outputDir, clientFunctions, serverFunctions, config, sourceFile);
+    generateServerFile(outputProject, outputDir, clientFunctions, serverFunctions, config, sourceFile);
 
     // Save all generated files
     await outputProject.save();
@@ -821,6 +976,7 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
 
     console.log('\n📋 Generated default handler functions (always included):');
     console.log('  - handleRpcError(socket, handler) - handles RPC errors from both client and server');
+
   } catch (error) {
     console.error('❌ Error generating RPC package:', error);
     process.exit(1);
@@ -887,10 +1043,11 @@ if (require.main === module) {
       "5000"
     )
     .option(
-      "-w, --watch",
+      "-w, --watch", 
       "Watch for changes and regenerate automatically",
       false
     )
+
     .action((filePath, options) => {
       const inputPath = path.resolve(process.cwd(), filePath);
 

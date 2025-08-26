@@ -8,6 +8,10 @@ export type Plan = {
   name: string;
 };
 
+export type GetPlanRequest = {
+  shopId: string, planId: string
+}
+
 /**
  * Interface defining the functions available on the RPC server
  * These functions can be called remotely by RPC clients
@@ -21,7 +25,7 @@ interface ServerFunctions {
   /**
    * Get plan
    */
-  getPlan: (planId: string) => Plan;
+  getPlan: (request: GetPlanRequest) => Plan;
 }
 
 /**

@@ -6,7 +6,7 @@
 
 import type { Socket } from "socket.io";
 import type { RpcError } from "./types.generated";
-import type { Plan } from "./define";
+import type { GetPlanRequest, Plan } from "./define";
 
 // === SERVER CALLING CLIENT FUNCTIONS ===
 /**
@@ -63,12 +63,12 @@ export function handleGenerateText(socket: Socket, handler: (prompt: string) => 
 /**
  * Sets up listener for 'getPlan' events from client with acknowledgment
  * @param {Socket} socket The socket instance for communication.
- * @param {(planId: string) => Promise<Plan | RpcError>} handler The handler function to process incoming events.
+ * @param {(request: GetPlanRequest) => Promise<Plan | RpcError>} handler The handler function to process incoming events.
  */
-export function handleGetPlan(socket: Socket, handler: (planId: string) => Promise<Plan | RpcError>): void {
-    socket.on('getPlan', async (planId, callback) => {
+export function handleGetPlan(socket: Socket, handler: (request: GetPlanRequest) => Promise<Plan | RpcError>): void {
+    socket.on('getPlan', async (request, callback) => {
         try {
-            const result = await handler(planId);
+            const result = await handler(request);
             callback(result);
         } catch (error) {
             console.error('[getPlan] Handler error:', error);
@@ -79,12 +79,16 @@ export function handleGetPlan(socket: Socket, handler: (planId: string) => Promi
 }
 
 /**
- * Sets up listener for 'rpcError' events. This handler is called whenever an RPC error occurs during function execution.
+ * Sets up listener for 'rpcError' events with async/await and try-catch. This handler is called whenever an RPC error occurs during function execution.
  * @param {Socket} socket The socket instance for communication.
- * @param {(error: RpcError) => void} handler The handler function to process incoming events.
+ * @param {(error: RpcError) => Promise<void>} handler The handler function to process incoming events.
  */
-export function handleRpcError(socket: Socket, handler: (error: RpcError) => void): void {
-    socket.on('rpcError', (error: RpcError) => {
-        handler(error);
+export function handleRpcError(socket: Socket, handler: (error: RpcError) => Promise<void>): void {
+    socket.on('rpcError', async (error: RpcError) => {
+        try {
+            await handler(error);
+        } catch (handlerError) {
+            console.error('[handleRpcError] Error in RPC error handler:', handlerError);
+        }
     });
 }

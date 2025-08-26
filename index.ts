@@ -245,16 +245,10 @@ function createFunctionParameters(
 }
 
 /**
- * Generates client function using ts-morph AST
+ * Creates common RPC function body writer (shared between client and server)
  */
-function generateClientFunctionAST(
-  func: FunctionSignature,
-  config: Required<GeneratorConfig>
-): FunctionDeclarationStructure {
-  const params = createFunctionParameters(func, true, !func.isVoid, config);
-
-  // Create function body based on whether it's void or not
-  const bodyWriter = (writer: any) => {
+function createRpcFunctionBodyWriter(func: FunctionSignature): (writer: any) => void {
+  return (writer: any) => {
     if (func.isVoid) {
       // For void functions, emit without acknowledgment
       const argsArray = func.params.map(p => p.name);
@@ -275,6 +269,17 @@ function generateClientFunctionAST(
       writer.writeLine(`}`);
     }
   };
+}
+
+/**
+ * Generates client function using ts-morph AST with shared body logic
+ */
+function generateClientFunctionAST(
+  func: FunctionSignature,
+  config: Required<GeneratorConfig>
+): FunctionDeclarationStructure {
+  const params = createFunctionParameters(func, true, !func.isVoid, config);
+  const bodyWriter = createRpcFunctionBodyWriter(func);
 
   const description = `CLIENT calls SERVER: Emits '${func.name}' event to server ${func.isVoid ? 'without' : 'with'
     } acknowledgment. Includes built-in error handling.`;
@@ -298,36 +303,14 @@ function generateClientFunctionAST(
 }
 
 /**
- * Generates server function using ts-morph AST
+ * Generates server function using ts-morph AST with shared body logic
  */
 function generateServerFunctionAST(
   func: FunctionSignature,
   config: Required<GeneratorConfig>
 ): FunctionDeclarationStructure {
   const params = createFunctionParameters(func, true, !func.isVoid, config);
-
-  // Create function body based on whether it's void or not
-  const bodyWriter = (writer: any) => {
-    if (func.isVoid) {
-      // For void functions, emit without acknowledgment
-      const argsArray = func.params.map(p => p.name);
-      const argsString = argsArray.length > 0 ? `, ${argsArray.join(', ')}` : '';
-      writer.writeLine(`socket.emit('${func.name}'${argsString});`);
-    } else {
-      // For non-void functions, emit with acknowledgment and error handling
-      const argsArray = func.params.map(p => p.name);
-      const argsString = argsArray.length > 0 ? `, ${argsArray.join(', ')}` : '';
-      writer.writeLine(`try {`);
-      writer.indent(() => {
-        writer.writeLine(`return await socket.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
-      });
-      writer.writeLine(`} catch (err) {`);
-      writer.indent(() => {
-        writer.writeLine(`return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };`);
-      });
-      writer.writeLine(`}`);
-    }
-  };
+  const bodyWriter = createRpcFunctionBodyWriter(func);
 
   const description = `SERVER calls CLIENT: Emits '${func.name}' event to client ${func.isVoid ? 'without' : 'with'
     } acknowledgment. Includes built-in error handling.`;
@@ -351,19 +334,10 @@ function generateServerFunctionAST(
 }
 
 /**
- * Generates client handler function using ts-morph AST
+ * Creates common handler function body writer (shared between client and server)
  */
-function generateClientHandlerAST(
-  func: FunctionSignature,
-  config: Required<GeneratorConfig>
-): FunctionDeclarationStructure | null {
-
-  const handlerName = `handle${func.name.charAt(0).toUpperCase() + func.name.slice(1)}`;
-  const handlerParamType = func.params.length > 0
-    ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`
-    : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
-
-  const bodyWriter = (writer: any) => {
+function createHandlerBodyWriter(func: FunctionSignature): (writer: any) => void {
+  return (writer: any) => {
     const paramNames = func.params.map(p => p.name);
     const handlerArgs = paramNames.join(', ');
 
@@ -411,12 +385,28 @@ function generateClientHandlerAST(
       writer.writeLine(`return () => socket.off('${func.name}', listener);`);
     }
   };
+}
+
+/**
+ * Generates handler function using ts-morph AST (shared logic for client and server)
+ */
+function generateHandlerAST(
+  func: FunctionSignature,
+  config: Required<GeneratorConfig>,
+  eventSource: 'server' | 'client'
+): FunctionDeclarationStructure | null {
+  const handlerName = `handle${func.name.charAt(0).toUpperCase() + func.name.slice(1)}`;
+  const handlerParamType = func.params.length > 0
+    ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`
+    : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
+
+  const bodyWriter = createHandlerBodyWriter(func);
 
   const params: OptionalKind<ParameterDeclarationStructure>[] = [
     { name: 'socket', type: 'Socket' },
     { name: 'handler', type: handlerParamType }
   ];
-  const description = `Sets up listener for '${func.name}' events from server${func.isVoid ? '' : ' with acknowledgment'}. Returns a function to remove the listener.`;
+  const description = `Sets up listener for '${func.name}' events from ${eventSource}${func.isVoid ? '' : ' with acknowledgment'}. Returns a function to remove the listener.`;
 
   return {
     kind: StructureKind.Function,
@@ -430,82 +420,23 @@ function generateClientHandlerAST(
 }
 
 /**
- * Generates server handler function using ts-morph AST
+ * Generates client handler function using shared AST logic
+ */
+function generateClientHandlerAST(
+  func: FunctionSignature,
+  config: Required<GeneratorConfig>
+): FunctionDeclarationStructure | null {
+  return generateHandlerAST(func, config, 'server');
+}
+
+/**
+ * Generates server handler function using shared AST logic
  */
 function generateServerHandlerAST(
   func: FunctionSignature,
   config: Required<GeneratorConfig>
 ): FunctionDeclarationStructure | null {
-
-  const handlerName = `handle${func.name.charAt(0).toUpperCase() + func.name.slice(1)}`;
-  const handlerParamType = func.params.length > 0
-    ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`
-    : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
-
-  const bodyWriter = (writer: any) => {
-    const paramNames = func.params.map(p => p.name);
-    const handlerArgs = paramNames.join(', ');
-
-    if (func.isVoid) {
-      // For void functions, no callback parameter
-      const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
-      writer.writeLine(`const listener = async (${typedParams}) => {`);
-      writer.indent(() => {
-        writer.writeLine('try {');
-        writer.indent(() => {
-          writer.writeLine(`await handler(${handlerArgs});`);
-        });
-        writer.writeLine('} catch (error) {');
-        writer.indent(() => {
-          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-          writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);`);
-        });
-        writer.writeLine('}');
-      });
-      writer.writeLine('};');
-      writer.writeLine(`socket.on('${func.name}', listener);`);
-      writer.writeLine(`return () => socket.off('${func.name}', listener);`);
-    } else {
-      // For non-void functions, include callback parameter
-      const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
-      const callbackType = `(result: ${func.returnType} | RpcError) => void`;
-      const fullParams = typedParams ? `${typedParams}, callback: ${callbackType}` : `callback: ${callbackType}`;
-      writer.writeLine(`const listener = async (${fullParams}) => {`);
-      writer.indent(() => {
-        writer.writeLine('try {');
-        writer.indent(() => {
-          writer.writeLine(`const result = await handler(${handlerArgs});`);
-          writer.writeLine('callback(result);');
-        });
-        writer.writeLine('} catch (error) {');
-        writer.indent(() => {
-          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-          writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);`);
-          writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
-        });
-        writer.writeLine('}');
-      });
-      writer.writeLine('};');
-      writer.writeLine(`socket.on('${func.name}', listener);`);
-      writer.writeLine(`return () => socket.off('${func.name}', listener);`);
-    }
-  };
-
-  const params: OptionalKind<ParameterDeclarationStructure>[] = [
-    { name: 'socket', type: 'Socket' },
-    { name: 'handler', type: handlerParamType }
-  ];
-  const description = `Sets up listener for '${func.name}' events from client${func.isVoid ? '' : ' with acknowledgment'}. Returns a function to remove the listener.`;
-
-  return {
-    kind: StructureKind.Function,
-    name: handlerName,
-    isExported: true,
-    parameters: params,
-    returnType: '() => void',
-    statements: bodyWriter,
-    docs: [createJSDoc(description, params, { type: '() => void', description: 'A function that removes the event listener when called' })]
-  };
+  return generateHandlerAST(func, config, 'client');
 }
 
 /**
@@ -546,6 +477,25 @@ function generateRpcErrorHandlerAST(): FunctionDeclarationStructure {
     statements: bodyWriter,
     docs: [createJSDoc(description, params, { type: '() => void', description: 'A function that removes the event listener when called' })]
   };
+}
+
+/**
+ * Creates standard import declarations for generated files
+ */
+function createStandardImports(sourceFile: any, socketModule: string): void {
+  // Add Socket import
+  sourceFile.addImportDeclaration({
+    moduleSpecifier: socketModule,
+    namedImports: ['Socket'],
+    isTypeOnly: true
+  });
+
+  // Always add RpcError import since we generate handleRpcError by default
+  sourceFile.addImportDeclaration({
+    moduleSpecifier: './types.generated',
+    namedImports: ['RpcError'],
+    isTypeOnly: true
+  });
 }
 
 /**
@@ -634,19 +584,8 @@ function generateClientFile(
     { overwrite: true }
   );
 
-  // Add imports
-  clientFile.addImportDeclaration({
-    moduleSpecifier: 'socket.io-client',
-    namedImports: ['Socket'],
-    isTypeOnly: true
-  });
-
-  // Always add RpcError import since we generate handleRpcError by default
-  clientFile.addImportDeclaration({
-    moduleSpecifier: './types.generated',
-    namedImports: ['RpcError'],
-    isTypeOnly: true
-  });
+  // Add standard imports using optimized function
+  createStandardImports(clientFile, 'socket.io-client');
 
   // Add custom type imports from input file
   const inputFilename = path.basename(config.inputPath, path.extname(config.inputPath));
@@ -712,19 +651,8 @@ function generateServerFile(
     { overwrite: true }
   );
 
-  // Add imports
-  serverFile.addImportDeclaration({
-    moduleSpecifier: 'socket.io',
-    namedImports: ['Socket'],
-    isTypeOnly: true
-  });
-
-  // Always add RpcError import since we generate handleRpcError by default
-  serverFile.addImportDeclaration({
-    moduleSpecifier: './types.generated',
-    namedImports: ['RpcError'],
-    isTypeOnly: true
-  });
+  // Add standard imports using optimized function
+  createStandardImports(serverFile, 'socket.io');
 
   // Add custom type imports from input file
   const inputFilename = path.basename(config.inputPath, path.extname(config.inputPath));
@@ -913,7 +841,6 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
     console.log(`   - client.generated.ts (${clientFunctions.length} call functions, ${serverFunctions.length} handler functions)`);
     console.log(`   - server.generated.ts (${serverFunctions.length} call functions, ${clientFunctions.length} handler functions)`);
     console.log(`   - types.generated.ts`);
-    console.log(`   - index.ts`);
 
     // Log generated functions
     if (clientFunctions.length > 0) {

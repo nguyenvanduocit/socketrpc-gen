@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.8.0...v1.9.0) (2025-08-26)
+
+
+### Features
+
+* add exported handler types for better type safety ([c1e5b78](https://github.com/nguyenvanduocit/socketrpc-gen/commit/c1e5b7866adad1a0796abe2460e0a5f3227c7e17))
+
 ## [1.8.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.7.0...v1.8.0) (2025-08-26)
 
 

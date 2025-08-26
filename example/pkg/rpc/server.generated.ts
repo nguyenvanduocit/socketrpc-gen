@@ -13,6 +13,12 @@ import type { Socket } from "socket.io";
 import type { RpcError, UnsubscribeFunction } from "./types.generated";
 import type { GetPlanRequest, Plan } from "./define";
 
+// === SERVER HANDLER TYPES ===
+/** Handler type for processing 'generateText' events from client */
+export type GenerateTextHandler = (prompt: string) => Promise<string | RpcError>;
+/** Handler type for processing 'getPlan' events from client */
+export type GetPlanHandler = (request: GetPlanRequest) => Promise<Plan | RpcError>;
+
 // === SERVER CALLING CLIENT FUNCTIONS ===
 /**
  * SERVER calls CLIENT: Emits 'showError' event to client without acknowledgment. Includes built-in error handling.
@@ -50,10 +56,10 @@ export async function getBrowserVersion(socket: Socket, timeout: number = 5000):
 /**
  * Sets up listener for 'generateText' events from client with acknowledgment. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
- * @param {(prompt: string) => Promise<string | RpcError>} handler The handler function to process incoming events.
+ * @param {GenerateTextHandler} handler The handler function to process incoming events.
  * @returns {UnsubscribeFunction} A function that removes the event listener when called
  */
-export function handleGenerateText(socket: Socket, handler: (prompt: string) => Promise<string | RpcError>): UnsubscribeFunction {
+export function handleGenerateText(socket: Socket, handler: GenerateTextHandler): UnsubscribeFunction {
     const listener = async (prompt: string, callback: (result: string | RpcError) => void) => {
         try {
             const result = await handler(prompt);
@@ -71,10 +77,10 @@ export function handleGenerateText(socket: Socket, handler: (prompt: string) => 
 /**
  * Sets up listener for 'getPlan' events from client with acknowledgment. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
- * @param {(request: GetPlanRequest) => Promise<Plan | RpcError>} handler The handler function to process incoming events.
+ * @param {GetPlanHandler} handler The handler function to process incoming events.
  * @returns {UnsubscribeFunction} A function that removes the event listener when called
  */
-export function handleGetPlan(socket: Socket, handler: (request: GetPlanRequest) => Promise<Plan | RpcError>): UnsubscribeFunction {
+export function handleGetPlan(socket: Socket, handler: GetPlanHandler): UnsubscribeFunction {
     const listener = async (request: GetPlanRequest, callback: (result: Plan | RpcError) => void) => {
         try {
             const result = await handler(request);

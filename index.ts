@@ -400,12 +400,16 @@ function createHandlerBodyWriter(func: FunctionSignature): (writer: any) => void
 function generateHandlerAST(
   func: FunctionSignature,
   config: Required<GeneratorConfig>,
-  eventSource: 'server' | 'client'
+  eventSource: 'server' | 'client',
+  useExportedType: boolean = false
 ): FunctionDeclarationStructure | null {
   const handlerName = `handle${func.name.charAt(0).toUpperCase() + func.name.slice(1)}`;
-  const handlerParamType = func.params.length > 0
-    ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`
-    : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
+  const handlerTypeName = `${func.name.charAt(0).toUpperCase() + func.name.slice(1)}Handler`;
+  const handlerParamType = useExportedType 
+    ? handlerTypeName
+    : func.params.length > 0
+      ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`
+      : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
 
   const bodyWriter = createHandlerBodyWriter(func);
 
@@ -433,7 +437,7 @@ function generateClientHandlerAST(
   func: FunctionSignature,
   config: Required<GeneratorConfig>
 ): FunctionDeclarationStructure | null {
-  return generateHandlerAST(func, config, 'server');
+  return generateHandlerAST(func, config, 'server', true); // Use exported type
 }
 
 /**
@@ -443,7 +447,7 @@ function generateServerHandlerAST(
   func: FunctionSignature,
   config: Required<GeneratorConfig>
 ): FunctionDeclarationStructure | null {
-  return generateHandlerAST(func, config, 'client');
+  return generateHandlerAST(func, config, 'client', true); // Use exported type
 }
 
 /**
@@ -575,6 +579,58 @@ function extractTypeNames(typeString: string): string[] {
 }
 
 /**
+ * Generates handler type exports in the client file
+ */
+function generateClientHandlerTypes(
+  clientFile: any,
+  serverFunctions: FunctionSignature[]
+): void {
+  // Add section comment for handler types
+  clientFile.addStatements('\n// === CLIENT HANDLER TYPES ===');
+  
+  // Generate type alias for each handler
+  serverFunctions.forEach(func => {
+    const handlerName = `${func.name.charAt(0).toUpperCase() + func.name.slice(1)}Handler`;
+    const handlerType = func.params.length > 0
+      ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`
+      : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
+    
+    clientFile.addTypeAlias({
+      name: handlerName,
+      type: handlerType,
+      isExported: true,
+      docs: [`Handler type for processing '${func.name}' events from server`]
+    });
+  });
+}
+
+/**
+ * Generates handler type exports in the server file
+ */
+function generateServerHandlerTypes(
+  serverFile: any,
+  clientFunctions: FunctionSignature[]
+): void {
+  // Add section comment for handler types
+  serverFile.addStatements('\n// === SERVER HANDLER TYPES ===');
+  
+  // Generate type alias for each handler
+  clientFunctions.forEach(func => {
+    const handlerName = `${func.name.charAt(0).toUpperCase() + func.name.slice(1)}Handler`;
+    const handlerType = func.params.length > 0
+      ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`
+      : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
+    
+    serverFile.addTypeAlias({
+      name: handlerName,
+      type: handlerType,
+      isExported: true,
+      docs: [`Handler type for processing '${func.name}' events from client`]
+    });
+  });
+}
+
+/**
  * Generates client.ts file using ts-morph
  */
 function generateClientFile(
@@ -611,6 +667,9 @@ function generateClientFile(
  */
 
 `);
+
+  // Generate handler type exports
+  generateClientHandlerTypes(clientFile, serverFunctions);
 
   // Add section comment for client calling server functions
   clientFile.addStatements('\n// === CLIENT CALLING SERVER FUNCTIONS ===');
@@ -678,6 +737,9 @@ function generateServerFile(
  */
 
 `);
+
+  // Generate handler type exports
+  generateServerHandlerTypes(serverFile, clientFunctions);
 
   // Add section comment for server calling client functions
   serverFile.addStatements('\n// === SERVER CALLING CLIENT FUNCTIONS ===');

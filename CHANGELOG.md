@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.7.0...v1.8.0) (2025-08-26)
+
+
+### Features
+
+* improve handler functions with proper event listener cleanup ([035ba61](https://github.com/nguyenvanduocit/socketrpc-gen/commit/035ba614cbbf6cf8ace7c5e509ee4f0cce1c62a3))
+
 ## [1.7.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.6.0...v1.7.0) (2025-08-26)
 
 

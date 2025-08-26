@@ -265,4 +265,157 @@ The `socket-rpc` tool works by parsing your TypeScript interface file and genera
     -   A `handle<FunctionName>` function for the client to process incoming requests from the server.
     -   A `<functionName>` function for the server to call the client method.
 
-This approach provides a clean and type-safe way to communicate between your client and server, without having to write any boilerplate `socket.io` code yourself. It automatically handles acknowledgments for functions that return values and uses fire-and-forget for `void` functions. 
+This approach provides a clean and type-safe way to communicate between your client and server, without having to write any boilerplate `socket.io` code yourself. It automatically handles acknowledgments for functions that return values and uses fire-and-forget for `void` functions.
+
+## Common Patterns
+
+### Sync vs Async Communication
+
+**Synchronous Pattern (Request-Response)**
+Use this pattern when you need to wait for a response:
+
+```typescript
+// define.ts
+interface ServerFunctions {
+  getData: (id: string) => UserData;
+}
+```
+
+**Asynchronous Pattern (Fire-and-Forget with Callback)**
+Use this pattern for streaming or progressive updates. Declare the server function as `void` and create a client callback to receive responses:
+
+```typescript
+// define.ts
+interface ServerFunctions {
+  startStreaming: (topic: string) => void; // Fire-and-forget
+}
+
+interface ClientFunctions {
+  onStreamData: (data: StreamChunk) => void; // Callback for receiving stream data
+  onStreamEnd: () => void; // Callback when stream ends
+}
+```
+
+### Streaming Simulation Example
+
+Here's a complete example showing how to simulate streaming data from server to client:
+
+**1. Interface Definition (`pkg/rpc/define.ts`)**
+
+```typescript
+interface StreamChunk {
+  id: number;
+  content: string;
+  timestamp: number;
+}
+
+interface ServerFunctions {
+  startDataStream: (topic: string) => void; // Initiate streaming (fire-and-forget)
+  stopDataStream: () => void; // Stop streaming
+}
+
+interface ClientFunctions {
+  onStreamChunk: (chunk: StreamChunk) => void; // Receive stream data
+  onStreamComplete: (totalChunks: number) => void; // Stream finished
+  onStreamError: (error: string) => void; // Stream error
+}
+```
+
+**2. Server Implementation**
+
+```typescript
+import { 
+  handleStartDataStream, 
+  handleStopDataStream,
+  onStreamChunk,
+  onStreamComplete,
+  onStreamError 
+} from "@socket-rpc/rpc/server.generated";
+
+io.on("connection", (socket) => {
+  let streamInterval: NodeJS.Timeout | null = null;
+  
+  // Handle stream start request
+  handleStartDataStream(socket, async (topic: string) => {
+    console.log(`Starting stream for topic: ${topic}`);
+    
+    let chunkId = 0;
+    const maxChunks = 10;
+    
+    streamInterval = setInterval(async () => {
+      if (chunkId >= maxChunks) {
+        clearInterval(streamInterval!);
+        streamInterval = null;
+        
+        // Notify client that stream is complete
+        onStreamComplete(socket, maxChunks);
+        return;
+      }
+      
+      // Send stream chunk to client
+      const chunk: StreamChunk = {
+        id: chunkId++,
+        content: `Data chunk for ${topic} #${chunkId}`,
+        timestamp: Date.now()
+      };
+      
+      onStreamChunk(socket, chunk);
+    }, 500); // Send chunk every 500ms
+  });
+  
+  // Handle stream stop request
+  handleStopDataStream(socket, async () => {
+    if (streamInterval) {
+      clearInterval(streamInterval);
+      streamInterval = null;
+      console.log("Stream stopped by client request");
+    }
+  });
+  
+  // Clean up on disconnect
+  socket.on("disconnect", () => {
+    if (streamInterval) {
+      clearInterval(streamInterval);
+    }
+  });
+});
+```
+
+**3. Client Implementation**
+
+```typescript
+import { 
+  startDataStream, 
+  stopDataStream,
+  handleOnStreamChunk,
+  handleOnStreamComplete,
+  handleOnStreamError 
+} from "@socket-rpc/rpc/client.generated";
+
+const socket = io("http://localhost:8080");
+
+// Set up stream handlers
+handleOnStreamChunk(socket, async (chunk: StreamChunk) => {
+  console.log(`Received chunk ${chunk.id}: ${chunk.content} at ${new Date(chunk.timestamp).toISOString()}`);
+});
+
+handleOnStreamComplete(socket, async (totalChunks: number) => {
+  console.log(`Stream completed! Received ${totalChunks} chunks total.`);
+});
+
+handleOnStreamError(socket, async (error: string) => {
+  console.error("Stream error:", error);
+});
+
+socket.on("connect", () => {
+  // Start streaming data
+  startDataStream(socket, "user-activity");
+  
+  // Stop stream after 8 seconds
+  setTimeout(() => {
+    stopDataStream(socket);
+  }, 8000);
+});
+```
+
+This pattern enables real-time data streaming while maintaining type safety. The server uses fire-and-forget functions to initiate streams, then uses client callback functions to progressively send data chunks. 

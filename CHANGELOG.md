@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.9.0...v1.10.0) (2025-10-24)
+
+
+### Features
+
+* **generator:** add socket parameter to handler types ([a052931](https://github.com/nguyenvanduocit/socketrpc-gen/commit/a052931375f7e347975967b8b0f3ae31443138ae))
+
 ## [1.9.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.8.0...v1.9.0) (2025-08-26)
 
 

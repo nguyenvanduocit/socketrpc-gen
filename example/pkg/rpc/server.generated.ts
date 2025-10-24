@@ -15,9 +15,9 @@ import type { GetPlanRequest, Plan } from "./define";
 
 // === SERVER HANDLER TYPES ===
 /** Handler type for processing 'generateText' events from client */
-export type GenerateTextHandler = (prompt: string) => Promise<string | RpcError>;
+export type GenerateTextHandler = (socket: Socket, prompt: string) => Promise<string | RpcError>;
 /** Handler type for processing 'getPlan' events from client */
-export type GetPlanHandler = (request: GetPlanRequest) => Promise<Plan | RpcError>;
+export type GetPlanHandler = (socket: Socket, request: GetPlanRequest) => Promise<Plan | RpcError>;
 
 // === SERVER CALLING CLIENT FUNCTIONS ===
 /**
@@ -62,7 +62,7 @@ export async function getBrowserVersion(socket: Socket, timeout: number = 5000):
 export function handleGenerateText(socket: Socket, handler: GenerateTextHandler): UnsubscribeFunction {
     const listener = async (prompt: string, callback: (result: string | RpcError) => void) => {
         try {
-            const result = await handler(prompt);
+            const result = await handler(socket, prompt);
             callback(result);
         } catch (error) {
             console.error('[generateText] Handler error:', error);
@@ -83,7 +83,7 @@ export function handleGenerateText(socket: Socket, handler: GenerateTextHandler)
 export function handleGetPlan(socket: Socket, handler: GetPlanHandler): UnsubscribeFunction {
     const listener = async (request: GetPlanRequest, callback: (result: Plan | RpcError) => void) => {
         try {
-            const result = await handler(request);
+            const result = await handler(socket, request);
             callback(result);
         } catch (error) {
             console.error('[getPlan] Handler error:', error);

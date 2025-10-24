@@ -15,11 +15,11 @@ import type { GetPlanRequest, Plan } from "./define";
 
 // === CLIENT HANDLER TYPES ===
 /** Handler type for processing 'showError' events from server */
-export type ShowErrorHandler = (error: Error) => Promise<void>;
+export type ShowErrorHandler = (socket: Socket, error: Error) => Promise<void>;
 /** Handler type for processing 'updateDiscoveriedUrls' events from server */
-export type UpdateDiscoveriedUrlsHandler = (url: string) => Promise<void>;
+export type UpdateDiscoveriedUrlsHandler = (socket: Socket, url: string) => Promise<void>;
 /** Handler type for processing 'getBrowserVersion' events from server */
-export type GetBrowserVersionHandler = () => Promise<string | RpcError>;
+export type GetBrowserVersionHandler = (socket: Socket) => Promise<string | RpcError>;
 
 // === CLIENT CALLING SERVER FUNCTIONS ===
 /**
@@ -62,7 +62,7 @@ export async function getPlan(socket: Socket, request: GetPlanRequest, timeout: 
 export function handleShowError(socket: Socket, handler: ShowErrorHandler): UnsubscribeFunction {
     const listener = async (error: Error) => {
         try {
-            await handler(error);
+            await handler(socket, error);
         } catch (error) {
             console.error('[showError] Handler error:', error);
             socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
@@ -81,7 +81,7 @@ export function handleShowError(socket: Socket, handler: ShowErrorHandler): Unsu
 export function handleUpdateDiscoveriedUrls(socket: Socket, handler: UpdateDiscoveriedUrlsHandler): UnsubscribeFunction {
     const listener = async (url: string) => {
         try {
-            await handler(url);
+            await handler(socket, url);
         } catch (error) {
             console.error('[updateDiscoveriedUrls] Handler error:', error);
             socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
@@ -100,7 +100,7 @@ export function handleUpdateDiscoveriedUrls(socket: Socket, handler: UpdateDisco
 export function handleGetBrowserVersion(socket: Socket, handler: GetBrowserVersionHandler): UnsubscribeFunction {
     const listener = async (callback: (result: string | RpcError) => void) => {
         try {
-            const result = await handler();
+            const result = await handler(socket);
             callback(result);
         } catch (error) {
             console.error('[getBrowserVersion] Handler error:', error);

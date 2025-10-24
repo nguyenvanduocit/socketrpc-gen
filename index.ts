@@ -970,7 +970,7 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
   const config: ResolvedConfig = {
     defaultTimeout: 5000,
     errorLogger: undefined,
-    autoCleanup: false,
+    autoCleanup: true, // v2.0.0: Changed default to true for automatic cleanup
     ...userConfig
   };
 
@@ -1154,9 +1154,8 @@ if (require.main === module) {
       "Custom error logger import path (e.g., '@/lib/logger')"
     )
     .option(
-      "-c, --auto-cleanup",
-      "Automatically cleanup event listeners on socket disconnect",
-      false
+      "--no-auto-cleanup",
+      "Disable automatic cleanup of event listeners on socket disconnect (cleanup is enabled by default in v2.0.0)"
     )
     .option(
       "-w, --watch",

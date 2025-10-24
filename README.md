@@ -251,8 +251,51 @@ socketrpc-gen <path> [options]
 
 -   `-p, --package-name <name>`: The npm package name for the generated RPC code. (Default: "@socket-rpc/rpc")
 -   `-t, --timeout <ms>`: Default timeout in milliseconds for RPC calls that expect a response. This can be overridden per-call. (Default: "5000")
+-   `-l, --error-logger <path>`: Custom error logger import path (e.g., '@/lib/logger'). By default uses `console.error`.
+-   `--no-auto-cleanup`: Disable automatic cleanup of event listeners on socket disconnect. (Cleanup is enabled by default in v2.0.0)
 -   `-w, --watch`: Watch for changes in the definition file and regenerate automatically. (Default: false)
 -   `-h, --help`: Display help for command.
+
+## Migration Guide: v1.x to v2.0.0
+
+### Breaking Changes
+
+**Automatic Cleanup is Now Default**
+
+In v2.0.0, event listeners are **automatically cleaned up** when the socket disconnects. This prevents memory leaks in long-running applications.
+
+**v1.x Behavior:**
+```typescript
+// Event listeners persisted after disconnect
+// Required manual cleanup
+const unsubscribe = handleGenerateText(socket, handler);
+socket.on('disconnect', () => {
+  unsubscribe(); // Manual cleanup needed
+});
+```
+
+**v2.0.0 Behavior:**
+```typescript
+// Event listeners automatically cleaned up on disconnect
+handleGenerateText(socket, handler);
+// No manual cleanup needed!
+```
+
+### If You Need Manual Control
+
+If your application requires manual control over cleanup timing (e.g., reconnection scenarios), use the `--no-auto-cleanup` flag:
+
+```bash
+bunx socketrpc-gen ./define.ts --no-auto-cleanup
+```
+
+This restores the v1.x behavior where you manage cleanup manually.
+
+### Other New Features in v2.0.0
+
+- **Custom Error Logging**: Use `--error-logger` to integrate with your logging system
+- **Improved Type Extraction**: Better support for generics, unions, and nested types
+- **Consistent Error Objects**: All RpcError objects now have consistent structure
 
 ## How It Works
 

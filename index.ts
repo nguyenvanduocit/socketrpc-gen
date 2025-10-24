@@ -79,54 +79,105 @@ function createRpcErrorExpression(errorVar: string): string {
 }
 
 /**
+ * Recursively collects all base interfaces from an interface, including those from imported files
+ */
+function getAllBaseInterfaces(interfaceDeclaration: InterfaceDeclaration): InterfaceDeclaration[] {
+  const baseInterfaces: InterfaceDeclaration[] = [];
+  const visited = new Set<string>();
+
+  function collectBases(iface: InterfaceDeclaration): void {
+    const ifaceName = iface.getName();
+    if (visited.has(ifaceName)) return;
+    visited.add(ifaceName);
+
+    // Get all extends expressions
+    const baseTypes = iface.getBaseTypes();
+
+    baseTypes.forEach(baseType => {
+      const symbol = baseType.getSymbol();
+      if (!symbol) return;
+
+      const declarations = symbol.getDeclarations();
+      declarations.forEach(decl => {
+        if (decl.getKindName() === 'InterfaceDeclaration') {
+          const baseInterface = decl as InterfaceDeclaration;
+          baseInterfaces.push(baseInterface);
+          // Recursively collect bases of this base interface
+          collectBases(baseInterface);
+        }
+      });
+    });
+  }
+
+  collectBases(interfaceDeclaration);
+  return baseInterfaces;
+}
+
+/**
  * Extracts function signatures from a TypeScript interface using ts-morph
+ * Supports interface extension - will extract properties from base interfaces too
  */
 function extractFunctionSignatures(interfaceDeclaration: InterfaceDeclaration): FunctionSignature[] {
   const signatures: FunctionSignature[] = [];
+  const processedNames = new Set<string>();
 
-  interfaceDeclaration.getProperties().forEach(property => {
-    const typeNode = property.getTypeNode();
+  // Collect all interfaces in the inheritance chain (base interfaces first, then the main interface)
+  const baseInterfaces = getAllBaseInterfaces(interfaceDeclaration);
+  const allInterfaces = [...baseInterfaces, interfaceDeclaration];
 
-    if (typeNode && typeNode.getKind() === SyntaxKind.FunctionType) {
+  // Process each interface in the chain
+  allInterfaces.forEach(iface => {
+    iface.getProperties().forEach(property => {
+      const typeNode = property.getTypeNode();
       const name = property.getName();
 
-      // Validate function name is a valid JavaScript identifier
-      if (!isValidJavaScriptIdentifier(name)) {
-        console.error(`Warning: Skipping function '${name}' - not a valid JavaScript identifier`);
+      // Skip if we've already processed this function name (derived class overrides base)
+      if (processedNames.has(name)) {
         return;
       }
-      const functionType = property.getType();
-      const callSignatures = functionType.getCallSignatures();
 
-      if (callSignatures.length > 0) {
-        const signature = callSignatures[0];
-        if (!signature) return;
+      if (typeNode && typeNode.getKind() === SyntaxKind.FunctionType) {
+        // Validate function name is a valid JavaScript identifier
+        if (!isValidJavaScriptIdentifier(name)) {
+          console.error(`Warning: Skipping function '${name}' - not a valid JavaScript identifier`);
+          return;
+        }
 
-        // Extract parameters
-        const params: FunctionParam[] = signature.getParameters().map(param => {
-          const paramType = param.getTypeAtLocation(property);
-          const typeString = paramType.getText(property);
+        const functionType = property.getType();
+        const callSignatures = functionType.getCallSignatures();
 
-          return {
-            name: param.getName(),
-            type: typeString,
-            isOptional: param.isOptional()
-          };
-        });
+        if (callSignatures.length > 0) {
+          const signature = callSignatures[0];
+          if (!signature) return;
 
-        // Extract return type
-        const returnType = signature.getReturnType();
-        const returnTypeString = returnType.getText(property);
-        const isVoid = returnTypeString === 'void';
+          // Extract parameters
+          const params: FunctionParam[] = signature.getParameters().map(param => {
+            const paramType = param.getTypeAtLocation(property);
+            const typeString = paramType.getText(property);
 
-        signatures.push({
-          name,
-          params,
-          returnType: returnTypeString,
-          isVoid
-        });
+            return {
+              name: param.getName(),
+              type: typeString,
+              isOptional: param.isOptional()
+            };
+          });
+
+          // Extract return type
+          const returnType = signature.getReturnType();
+          const returnTypeString = returnType.getText(property);
+          const isVoid = returnTypeString === 'void';
+
+          signatures.push({
+            name,
+            params,
+            returnType: returnTypeString,
+            isVoid
+          });
+
+          processedNames.add(name);
+        }
       }
-    }
+    });
   });
 
   return signatures;
@@ -992,6 +1043,12 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
 
     // Add the input file to the project
     const sourceFile = inputProject.addSourceFileAtPath(inputPath);
+
+    // Resolve all dependencies (imported files)
+    // This ensures that extended interfaces from other files are available
+    sourceFile.getReferencedSourceFiles().forEach(referencedFile => {
+      inputProject.addSourceFileAtPath(referencedFile.getFilePath());
+    });
 
     // Find the interfaces
     const clientFunctionsInterface = sourceFile.getInterface('ClientFunctions');

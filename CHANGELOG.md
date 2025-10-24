@@ -7,6 +7,17 @@
 
 * **generator:** Automatic cleanup of event listeners is now enabled by default. Event listeners will be automatically removed when the socket disconnects, preventing memory leaks in long-running applications.
 
+### Features
+
+* **generator:** make auto-cleanup the default behavior ([66431c8](https://github.com/nguyenvanduocit/socketrpc-gen/commit/66431c8c1d6e4d9daae7234cc3f372b57966d2dd))
+
+## [2.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.11.0...v2.0.0) (2025-10-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **generator:** Automatic cleanup of event listeners is now enabled by default. Event listeners will be automatically removed when the socket disconnects, preventing memory leaks in long-running applications.
+
 **Migration:** If you need the old behavior (manual cleanup control), use the `--no-auto-cleanup` flag when generating code:
 ```bash
 socketrpc-gen ./define.ts --no-auto-cleanup

@@ -1,5 +1,40 @@
 # Changelog
 
+## [3.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v2.0.0...v3.0.0) (2025-10-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **generator:** Automatic cleanup of event listeners is now enabled by default. Event listeners will be automatically removed when the socket disconnects, preventing memory leaks in long-running applications.
+
+### Features
+
+* add exported handler types for better type safety ([c1e5b78](https://github.com/nguyenvanduocit/socketrpc-gen/commit/c1e5b7866adad1a0796abe2460e0a5f3227c7e17))
+* add handleRpcError function for improved RPC error handling with async/await ([fbeaafe](https://github.com/nguyenvanduocit/socketrpc-gen/commit/fbeaafe945763aa4434d4ac3e6012e818cd26c43))
+* add RpcError handling and types for RPC package ([a5e5529](https://github.com/nguyenvanduocit/socketrpc-gen/commit/a5e5529fc11a1574f7d9558c6d92dd94da3b5cb1))
+* bump version ([0615b7d](https://github.com/nguyenvanduocit/socketrpc-gen/commit/0615b7d35469a5c532460f0f5a17b64ea33c91c9))
+* display CLI version on startup and reformat arguments ([7bdff4c](https://github.com/nguyenvanduocit/socketrpc-gen/commit/7bdff4c656c329e86a262abc9651b67fe3693b63))
+* enhance error handling in RPC functions and update callback logic ([b8a1f10](https://github.com/nguyenvanduocit/socketrpc-gen/commit/b8a1f10b3f19e368f3ddaa6edd9f8c61ff4e8638))
+* enhance generated file headers with clear warnings and regeneration instructions ([c468028](https://github.com/nguyenvanduocit/socketrpc-gen/commit/c4680286ca937a9004d55d7267800dcf0675a38e))
+* enhance RpcError interface with additional properties and update type guard ([3582c66](https://github.com/nguyenvanduocit/socketrpc-gen/commit/3582c66749ba223686ec5dbecd5c12113641cc6e))
+* **generator:** add socket parameter to handler types ([a052931](https://github.com/nguyenvanduocit/socketrpc-gen/commit/a052931375f7e347975967b8b0f3ae31443138ae))
+* **generator:** enhance error handling, validation, and configuration options ([1cb80d5](https://github.com/nguyenvanduocit/socketrpc-gen/commit/1cb80d5733d706cf6cfa7a3818b22566e75d4a5a))
+* **generator:** make auto-cleanup the default behavior ([66431c8](https://github.com/nguyenvanduocit/socketrpc-gen/commit/66431c8c1d6e4d9daae7234cc3f372b57966d2dd))
+* improve handler functions with proper event listener cleanup ([035ba61](https://github.com/nguyenvanduocit/socketrpc-gen/commit/035ba614cbbf6cf8ace7c5e509ee4f0cce1c62a3))
+* improve RPC generation with custom type imports and void function handling ([ef89b78](https://github.com/nguyenvanduocit/socketrpc-gen/commit/ef89b78f4819d68fdc4299249fc205992ed9a5fa))
+* improve RpcError handling with enhanced validation and error messaging ([961712f](https://github.com/nguyenvanduocit/socketrpc-gen/commit/961712f21bffa8097ed1f67576b07e402a03a00c))
+* init ([a23c789](https://github.com/nguyenvanduocit/socketrpc-gen/commit/a23c789ea016fa9294b92a3fe5a68d3723dd8abb))
+* init ([2e40902](https://github.com/nguyenvanduocit/socketrpc-gen/commit/2e40902a044f807545aea69c55c0535eba695f9a))
+* migrate RPC generator to use ts-morph ([42f6d1c](https://github.com/nguyenvanduocit/socketrpc-gen/commit/42f6d1ca187bf6809924e0f393385eec3185931e))
+* update generated file names and enhance error handling in RPC package ([e9261e9](https://github.com/nguyenvanduocit/socketrpc-gen/commit/e9261e938d443aee4d49944670c82af9f2adddd6))
+* update version to make it build ([00cdfbe](https://github.com/nguyenvanduocit/socketrpc-gen/commit/00cdfbe1820843d4d5ba5145af20e2da0d6dade0))
+
+
+### Bug Fixes
+
+* error when create tsconfig file ([23649d2](https://github.com/nguyenvanduocit/socketrpc-gen/commit/23649d2460bd825cd5065bd82e15d93b24f14211))
+* remove 'undefined' from argsString in client and server function AST generation for cleaner output ([dd65553](https://github.com/nguyenvanduocit/socketrpc-gen/commit/dd65553fe1e65b2e549f2227c31a34208f3c465c))
+
 ## [2.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.11.0...v2.0.0) (2025-10-24)
 
 

@@ -31,7 +31,19 @@ interface GeneratorConfig {
   packageName: string;
   /** Default timeout for RPC calls in milliseconds */
   defaultTimeout?: number;
+  /** Custom error logger import path (e.g., '@/lib/logger') */
+  errorLogger?: string;
+  /** Automatically cleanup event listeners on socket disconnect */
+  autoCleanup?: boolean;
 }
+
+/**
+ * Internal config with all defaults applied
+ */
+type ResolvedConfig = Required<Omit<GeneratorConfig, 'errorLogger' | 'autoCleanup'>> & {
+  errorLogger: string | undefined;
+  autoCleanup: boolean;
+};
 
 /**
  * Represents a function parameter extracted from TypeScript interface
@@ -53,6 +65,20 @@ interface FunctionSignature {
 }
 
 /**
+ * Validates that a function name is a valid JavaScript identifier
+ */
+function isValidJavaScriptIdentifier(name: string): boolean {
+  return /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name);
+}
+
+/**
+ * Creates a consistent RpcError creation expression for generated code
+ */
+function createRpcErrorExpression(errorVar: string): string {
+  return `{ message: ${errorVar} instanceof Error ? ${errorVar}.message : String(${errorVar}), code: 'INTERNAL_ERROR', data: undefined }`;
+}
+
+/**
  * Extracts function signatures from a TypeScript interface using ts-morph
  */
 function extractFunctionSignatures(interfaceDeclaration: InterfaceDeclaration): FunctionSignature[] {
@@ -63,6 +89,12 @@ function extractFunctionSignatures(interfaceDeclaration: InterfaceDeclaration): 
 
     if (typeNode && typeNode.getKind() === SyntaxKind.FunctionType) {
       const name = property.getName();
+
+      // Validate function name is a valid JavaScript identifier
+      if (!isValidJavaScriptIdentifier(name)) {
+        console.error(`Warning: Skipping function '${name}' - not a valid JavaScript identifier`);
+        return;
+      }
       const functionType = property.getType();
       const callSignatures = functionType.getCallSignatures();
 
@@ -151,7 +183,7 @@ function createJSDoc(
  * @param project The ts-morph project instance.
  * @param outputDir The output directory.
  */
-function generateTypesFile(project: Project, outputDir: string, config: Required<GeneratorConfig>): void {
+function generateTypesFile(project: Project, outputDir: string, config: ResolvedConfig): void {
   const typesFile = project.createSourceFile(
     path.join(outputDir, 'types.generated.ts'),
     '',
@@ -218,7 +250,7 @@ function createFunctionParameters(
   func: FunctionSignature,
   includeSocket: boolean = true,
   includeTimeout: boolean = false,
-  config?: Required<GeneratorConfig>
+  config?: ResolvedConfig
 ): OptionalKind<ParameterDeclarationStructure>[] {
   const params: OptionalKind<ParameterDeclarationStructure>[] = [];
 
@@ -271,7 +303,7 @@ function createRpcFunctionBodyWriter(func: FunctionSignature): (writer: any) => 
       });
       writer.writeLine(`} catch (err) {`);
       writer.indent(() => {
-        writer.writeLine(`return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };`);
+        writer.writeLine(`return ${createRpcErrorExpression('err')};`);
       });
       writer.writeLine(`}`);
     }
@@ -283,7 +315,7 @@ function createRpcFunctionBodyWriter(func: FunctionSignature): (writer: any) => 
  */
 function generateClientFunctionAST(
   func: FunctionSignature,
-  config: Required<GeneratorConfig>
+  config: ResolvedConfig
 ): FunctionDeclarationStructure {
   const params = createFunctionParameters(func, true, !func.isVoid, config);
   const bodyWriter = createRpcFunctionBodyWriter(func);
@@ -314,7 +346,7 @@ function generateClientFunctionAST(
  */
 function generateServerFunctionAST(
   func: FunctionSignature,
-  config: Required<GeneratorConfig>
+  config: ResolvedConfig
 ): FunctionDeclarationStructure {
   const params = createFunctionParameters(func, true, !func.isVoid, config);
   const bodyWriter = createRpcFunctionBodyWriter(func);
@@ -343,8 +375,11 @@ function generateServerFunctionAST(
 /**
  * Creates common handler function body writer (shared between client and server)
  */
-function createHandlerBodyWriter(func: FunctionSignature): (writer: any) => void {
+function createHandlerBodyWriter(func: FunctionSignature, config: ResolvedConfig): (writer: any) => void {
   return (writer: any) => {
+    const loggerCall = config.errorLogger
+      ? `logger.error('[${func.name}] Handler error:', error);`
+      : `console.error('[${func.name}] Handler error:', error);`;
     const paramNames = func.params.map(p => p.name);
     const handlerArgs = paramNames.length > 0 ? `socket, ${paramNames.join(', ')}` : 'socket';
 
@@ -359,14 +394,25 @@ function createHandlerBodyWriter(func: FunctionSignature): (writer: any) => void
         });
         writer.writeLine('} catch (error) {');
         writer.indent(() => {
-          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-          writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);`);
+          writer.writeLine(loggerCall);
         });
         writer.writeLine('}');
       });
       writer.writeLine('};');
       writer.writeLine(`socket.on('${func.name}', listener);`);
-      writer.writeLine(`return () => socket.off('${func.name}', listener);`);
+
+      if (config.autoCleanup) {
+        writer.writeLine(`const cleanup = () => socket.off('${func.name}', listener);`);
+        writer.writeLine(`socket.once('disconnect', cleanup);`);
+        writer.writeLine(`return () => {`);
+        writer.indent(() => {
+          writer.writeLine(`cleanup();`);
+          writer.writeLine(`socket.off('disconnect', cleanup);`);
+        });
+        writer.writeLine(`};`);
+      } else {
+        writer.writeLine(`return () => socket.off('${func.name}', listener);`);
+      }
     } else {
       // For non-void functions, include callback parameter
       const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
@@ -381,15 +427,26 @@ function createHandlerBodyWriter(func: FunctionSignature): (writer: any) => void
         });
         writer.writeLine('} catch (error) {');
         writer.indent(() => {
-          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-          writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);`);
-          writer.writeLine("callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);");
+          writer.writeLine(loggerCall);
+          writer.writeLine(`callback(${createRpcErrorExpression('error')});`);
         });
         writer.writeLine('}');
       });
       writer.writeLine('};');
       writer.writeLine(`socket.on('${func.name}', listener);`);
-      writer.writeLine(`return () => socket.off('${func.name}', listener);`);
+
+      if (config.autoCleanup) {
+        writer.writeLine(`const cleanup = () => socket.off('${func.name}', listener);`);
+        writer.writeLine(`socket.once('disconnect', cleanup);`);
+        writer.writeLine(`return () => {`);
+        writer.indent(() => {
+          writer.writeLine(`cleanup();`);
+          writer.writeLine(`socket.off('disconnect', cleanup);`);
+        });
+        writer.writeLine(`};`);
+      } else {
+        writer.writeLine(`return () => socket.off('${func.name}', listener);`);
+      }
     }
   };
 }
@@ -399,7 +456,7 @@ function createHandlerBodyWriter(func: FunctionSignature): (writer: any) => void
  */
 function generateHandlerAST(
   func: FunctionSignature,
-  config: Required<GeneratorConfig>,
+  config: ResolvedConfig,
   eventSource: 'server' | 'client',
   useExportedType: boolean = false
 ): FunctionDeclarationStructure | null {
@@ -411,7 +468,7 @@ function generateHandlerAST(
       ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`
       : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
 
-  const bodyWriter = createHandlerBodyWriter(func);
+  const bodyWriter = createHandlerBodyWriter(func, config);
 
   const params: OptionalKind<ParameterDeclarationStructure>[] = [
     { name: 'socket', type: 'Socket' },
@@ -435,7 +492,7 @@ function generateHandlerAST(
  */
 function generateClientHandlerAST(
   func: FunctionSignature,
-  config: Required<GeneratorConfig>
+  config: ResolvedConfig
 ): FunctionDeclarationStructure | null {
   return generateHandlerAST(func, config, 'server', true); // Use exported type
 }
@@ -445,7 +502,7 @@ function generateClientHandlerAST(
  */
 function generateServerHandlerAST(
   func: FunctionSignature,
-  config: Required<GeneratorConfig>
+  config: ResolvedConfig
 ): FunctionDeclarationStructure | null {
   return generateHandlerAST(func, config, 'client', true); // Use exported type
 }
@@ -510,6 +567,19 @@ function createStandardImports(sourceFile: any, socketModule: string): void {
 }
 
 /**
+ * Adds custom logger import if specified in config
+ */
+function addLoggerImport(sourceFile: any, config: ResolvedConfig): void {
+  if (config.errorLogger) {
+    sourceFile.addImportDeclaration({
+      moduleSpecifier: config.errorLogger,
+      namedImports: ['logger'],
+      isTypeOnly: false
+    });
+  }
+}
+
+/**
  * Extracts custom types used in function signatures and adds them as type-only imports
  */
 function addCustomTypeImports(
@@ -562,20 +632,79 @@ function addCustomTypeImports(
 
 /**
  * Extracts type names from a TypeScript type string
+ * Handles complex types including generics, unions, and arrays
  */
 function extractTypeNames(typeString: string): string[] {
-  const types: string[] = [];
+  const types = new Set<string>();
 
-  // Simple regex to extract custom type names
-  // This handles cases like: GetPlanRequest, Plan, Plan[], Promise<Plan>, etc.
-  const typeRegex = /\b([A-Z][a-zA-Z0-9]*)\b/g;
-  let match;
+  // Remove array brackets and extract types from arrays
+  let cleanedType = typeString.replace(/\[\]/g, '');
 
-  while ((match = typeRegex.exec(typeString)) !== null) {
-    types.push(match[1]);
+  // Extract types from generics: Map<string, User[]> -> Map, string, User
+  // This improved regex handles nested generics
+  const genericRegex = /([A-Z][a-zA-Z0-9]*)<(.+)>/;
+  const genericMatch = genericRegex.exec(cleanedType);
+
+  if (genericMatch) {
+    // Add the generic type itself (e.g., "Map")
+    types.add(genericMatch[1]);
+
+    // Recursively extract types from generic arguments
+    const genericArgs = genericMatch[2];
+    // Split by comma but respect nested generics
+    const args = splitTypeArguments(genericArgs);
+    args.forEach(arg => {
+      extractTypeNames(arg.trim()).forEach(t => types.add(t));
+    });
+
+    // Process the rest of the type string
+    cleanedType = cleanedType.replace(genericMatch[0], '');
   }
 
-  return types;
+  // Extract types from unions: string | number | User
+  const unionParts = cleanedType.split('|').map(p => p.trim());
+  unionParts.forEach(part => {
+    const typeRegex = /\b([A-Z][a-zA-Z0-9]*)\b/g;
+    let match;
+    while ((match = typeRegex.exec(part)) !== null) {
+      types.add(match[1]);
+    }
+  });
+
+  return Array.from(types);
+}
+
+/**
+ * Splits generic type arguments respecting nested generics
+ * Example: "string, Map<string, User[]>" -> ["string", "Map<string, User[]>"]
+ */
+function splitTypeArguments(args: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let depth = 0;
+
+  for (let i = 0; i < args.length; i++) {
+    const char = args[i];
+
+    if (char === '<') {
+      depth++;
+      current += char;
+    } else if (char === '>') {
+      depth--;
+      current += char;
+    } else if (char === ',' && depth === 0) {
+      result.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+
+  if (current.trim()) {
+    result.push(current.trim());
+  }
+
+  return result;
 }
 
 /**
@@ -640,7 +769,7 @@ function generateClientFile(
   outputDir: string,
   clientFunctions: FunctionSignature[],
   serverFunctions: FunctionSignature[],
-  config: Required<GeneratorConfig>,
+  config: ResolvedConfig,
   inputFile: SourceFile
 ): void {
   const clientFile = project.createSourceFile(
@@ -651,6 +780,9 @@ function generateClientFile(
 
   // Add standard imports using optimized function
   createStandardImports(clientFile, 'socket.io-client');
+
+  // Add logger import if configured
+  addLoggerImport(clientFile, config);
 
   // Add custom type imports from input file
   const inputFilename = path.basename(config.inputPath, path.extname(config.inputPath));
@@ -710,7 +842,7 @@ function generateServerFile(
   outputDir: string,
   clientFunctions: FunctionSignature[],
   serverFunctions: FunctionSignature[],
-  config: Required<GeneratorConfig>,
+  config: ResolvedConfig,
   inputFile: SourceFile
 ): void {
   const serverFile = project.createSourceFile(
@@ -721,6 +853,9 @@ function generateServerFile(
 
   // Add standard imports using optimized function
   createStandardImports(serverFile, 'socket.io');
+
+  // Add logger import if configured
+  addLoggerImport(serverFile, config);
 
   // Add custom type imports from input file
   const inputFilename = path.basename(config.inputPath, path.extname(config.inputPath));
@@ -775,7 +910,7 @@ function generateServerFile(
 /**
  * Generates package.json for the RPC package
  */
-function generatePackageJson(config: Required<GeneratorConfig>): object {
+function generatePackageJson(config: ResolvedConfig): object {
   return {
     name: config.packageName,
     version: "1.0.0",
@@ -832,8 +967,10 @@ function generateTsConfig(): object {
  */
 async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
   // Merge user config with defaults
-  const config: Required<GeneratorConfig> = {
+  const config: ResolvedConfig = {
     defaultTimeout: 5000,
+    errorLogger: undefined,
+    autoCleanup: false,
     ...userConfig
   };
 
@@ -1013,7 +1150,16 @@ if (require.main === module) {
       "5000"
     )
     .option(
-      "-w, --watch", 
+      "-l, --error-logger <path>",
+      "Custom error logger import path (e.g., '@/lib/logger')"
+    )
+    .option(
+      "-c, --auto-cleanup",
+      "Automatically cleanup event listeners on socket disconnect",
+      false
+    )
+    .option(
+      "-w, --watch",
       "Watch for changes and regenerate automatically",
       false
     )
@@ -1037,6 +1183,8 @@ if (require.main === module) {
         outputDir: outputDir,
         packageName: options.packageName,
         defaultTimeout: parseInt(options.timeout, 10),
+        errorLogger: options.errorLogger,
+        autoCleanup: options.autoCleanup,
       };
 
       if (options.watch) {

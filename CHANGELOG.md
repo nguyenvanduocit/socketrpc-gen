@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v2.0.0...v2.0.1) (2025-10-24)
+
+
+### Bug Fixes
+
+* **cli:** read version from package.json instead of hardcoded value ([40c8af2](https://github.com/nguyenvanduocit/socketrpc-gen/commit/40c8af2f0e4b5fc9bce0b30c7aa2559a2550b6ca))
+
 ## [2.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.11.0...v2.0.0) (2025-10-24)
 
 

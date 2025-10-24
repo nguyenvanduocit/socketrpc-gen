@@ -1124,15 +1124,19 @@ async function watchMode(config: GeneratorConfig): Promise<void> {
 
 // Run the generator if this file is executed directly
 if (require.main === module) {
+  // Read version from package.json
+  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf-8'));
+  const version = packageJson.version;
+
   const program = new Command();
 
   program
     .name("socketrpc-gen")
     .description("Generate Socket.IO RPC code from interface definitions.")
-    .version("1.0.0");
+    .version(version);
 
   // Display the current version when the program starts
-  console.log(`🚀 socketrpc-gen v${program.version()}`);
+  console.log(`🚀 socketrpc-gen v${version}`);
 
   program
     .argument(

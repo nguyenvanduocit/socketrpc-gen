@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v2.0.1...v2.1.0) (2025-10-24)
+
+
+### Features
+
+* **generator:** add interface extension support and comprehensive examples ([5abb681](https://github.com/nguyenvanduocit/socketrpc-gen/commit/5abb6810e28782bdd4756af817d8cbedf0442113))
+
 ## [2.0.1](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v2.0.0...v2.0.1) (2025-10-24)
 
 

@@ -65,7 +65,6 @@ export function handleShowError(socket: Socket, handler: ShowErrorHandler): Unsu
             await handler(socket, error);
         } catch (error) {
             console.error('[showError] Handler error:', error);
-            socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
         }
     };
     socket.on('showError', listener);
@@ -84,7 +83,6 @@ export function handleUpdateDiscoveriedUrls(socket: Socket, handler: UpdateDisco
             await handler(socket, url);
         } catch (error) {
             console.error('[updateDiscoveriedUrls] Handler error:', error);
-            socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
         }
     };
     socket.on('updateDiscoveriedUrls', listener);
@@ -104,8 +102,7 @@ export function handleGetBrowserVersion(socket: Socket, handler: GetBrowserVersi
             callback(result);
         } catch (error) {
             console.error('[getBrowserVersion] Handler error:', error);
-            socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
-            callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
+            callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
         }
     };
     socket.on('getBrowserVersion', listener);

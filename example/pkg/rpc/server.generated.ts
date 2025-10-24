@@ -66,8 +66,7 @@ export function handleGenerateText(socket: Socket, handler: GenerateTextHandler)
             callback(result);
         } catch (error) {
             console.error('[generateText] Handler error:', error);
-            socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
-            callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
+            callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
         }
     };
     socket.on('generateText', listener);
@@ -87,8 +86,7 @@ export function handleGetPlan(socket: Socket, handler: GetPlanHandler): Unsubscr
             callback(result);
         } catch (error) {
             console.error('[getPlan] Handler error:', error);
-            socket.emit('rpcError', { message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
-            callback({ message: error instanceof Error ? error.message : 'Unknown error' } as RpcError);
+            callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
         }
     };
     socket.on('getPlan', listener);

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.10.0...v1.11.0) (2025-10-24)
+
+
+### Features
+
+* **generator:** enhance error handling, validation, and configuration options ([1cb80d5](https://github.com/nguyenvanduocit/socketrpc-gen/commit/1cb80d5733d706cf6cfa7a3818b22566e75d4a5a))
+
 ## [1.10.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v1.9.0...v1.10.0) (2025-10-24)
 
 

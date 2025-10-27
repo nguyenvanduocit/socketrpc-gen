@@ -435,17 +435,23 @@ function createHandlerBodyWriter(func: FunctionSignature, config: ResolvedConfig
     const handlerArgs = paramNames.length > 0 ? `socket, ${paramNames.join(', ')}` : 'socket';
 
     if (func.isVoid) {
-      // For void functions, no callback parameter
+      // For void functions, no callback parameter, but can return RpcError
       const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
       writer.writeLine(`const listener = async (${typedParams}) => {`);
       writer.indent(() => {
         writer.writeLine('try {');
         writer.indent(() => {
-          writer.writeLine(`await handler(${handlerArgs});`);
+          writer.writeLine(`const result = await handler(${handlerArgs});`);
+          writer.writeLine('if (result && typeof result === \'object\' && \'code\' in result && \'message\' in result) {');
+          writer.indent(() => {
+            writer.writeLine('socket.emit(\'rpcError\', result);');
+          });
+          writer.writeLine('}');
         });
         writer.writeLine('} catch (error) {');
         writer.indent(() => {
           writer.writeLine(loggerCall);
+          writer.writeLine(`socket.emit('rpcError', ${createRpcErrorExpression('error')});`);
         });
         writer.writeLine('}');
       });
@@ -491,11 +497,11 @@ function generateHandlerAST(
 ): FunctionDeclarationStructure | null {
   const handlerName = `handle${func.name.charAt(0).toUpperCase() + func.name.slice(1)}`;
   const handlerTypeName = `${func.name.charAt(0).toUpperCase() + func.name.slice(1)}Handler`;
-  const handlerParamType = useExportedType 
+  const handlerParamType = useExportedType
     ? handlerTypeName
     : func.params.length > 0
-      ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`
-      : `() => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
+      ? `(${func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ')}) => ${func.isVoid ? 'Promise<void | RpcError>' : `Promise<${func.returnType} | RpcError>`}`
+      : `() => ${func.isVoid ? 'Promise<void | RpcError>' : `Promise<${func.returnType} | RpcError>`}`;
 
   const bodyWriter = createHandlerBodyWriter(func, config);
 
@@ -545,7 +551,7 @@ function generateRpcErrorHandlerAST(): FunctionDeclarationStructure {
     writer.indent(() => {
       writer.writeLine('try {');
       writer.indent(() => {
-        writer.writeLine('await handler(error);');
+        writer.writeLine('await handler(socket, error);');
       });
       writer.writeLine('} catch (handlerError) {');
       writer.indent(() => {
@@ -560,7 +566,7 @@ function generateRpcErrorHandlerAST(): FunctionDeclarationStructure {
 
   const params: OptionalKind<ParameterDeclarationStructure>[] = [
     { name: 'socket', type: 'Socket' },
-    { name: 'handler', type: '(error: RpcError) => Promise<void>' }
+    { name: 'handler', type: '(socket: Socket, error: RpcError) => Promise<void>' }
   ];
 
   const description = `Sets up listener for 'rpcError' events with async/await and try-catch. This handler is called whenever an RPC error occurs during function execution. Returns a function to remove the listener.`;
@@ -752,7 +758,7 @@ function generateClientHandlerTypes(
     const socketParam = 'socket: Socket';
     const funcParams = func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ');
     const allParams = funcParams ? `${socketParam}, ${funcParams}` : socketParam;
-    const handlerType = `(${allParams}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
+    const handlerType = `(${allParams}) => ${func.isVoid ? 'Promise<void | RpcError>' : `Promise<${func.returnType} | RpcError>`}`;
 
     clientFile.addTypeAlias({
       name: handlerName,
@@ -779,7 +785,7 @@ function generateServerHandlerTypes(
     const socketParam = 'socket: Socket';
     const funcParams = func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ');
     const allParams = funcParams ? `${socketParam}, ${funcParams}` : socketParam;
-    const handlerType = `(${allParams}) => ${func.isVoid ? 'Promise<void>' : `Promise<${func.returnType} | RpcError>`}`;
+    const handlerType = `(${allParams}) => ${func.isVoid ? 'Promise<void | RpcError>' : `Promise<${func.returnType} | RpcError>`}`;
 
     serverFile.addTypeAlias({
       name: handlerName,

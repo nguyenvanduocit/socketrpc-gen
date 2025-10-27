@@ -15,9 +15,9 @@ import type { GetPlanRequest, Plan } from "./define";
 
 // === CLIENT HANDLER TYPES ===
 /** Handler type for processing 'showError' events from server */
-export type ShowErrorHandler = (socket: Socket, error: Error) => Promise<void>;
+export type ShowErrorHandler = (socket: Socket, error: Error) => Promise<void | RpcError>;
 /** Handler type for processing 'updateDiscoveriedUrls' events from server */
-export type UpdateDiscoveriedUrlsHandler = (socket: Socket, url: string) => Promise<void>;
+export type UpdateDiscoveriedUrlsHandler = (socket: Socket, url: string) => Promise<void | RpcError>;
 /** Handler type for processing 'getBrowserVersion' events from server */
 export type GetBrowserVersionHandler = (socket: Socket) => Promise<string | RpcError>;
 
@@ -62,9 +62,13 @@ export async function getPlan(socket: Socket, request: GetPlanRequest, timeout: 
 export function handleShowError(socket: Socket, handler: ShowErrorHandler): UnsubscribeFunction {
     const listener = async (error: Error) => {
         try {
-            await handler(socket, error);
+            const result = await handler(socket, error);
+            if (result && typeof result === 'object' && 'code' in result && 'message' in result) {
+                socket.emit('rpcError', result);
+            }
         } catch (error) {
             console.error('[showError] Handler error:', error);
+            socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
         }
     };
     socket.on('showError', listener);
@@ -80,9 +84,13 @@ export function handleShowError(socket: Socket, handler: ShowErrorHandler): Unsu
 export function handleUpdateDiscoveriedUrls(socket: Socket, handler: UpdateDiscoveriedUrlsHandler): UnsubscribeFunction {
     const listener = async (url: string) => {
         try {
-            await handler(socket, url);
+            const result = await handler(socket, url);
+            if (result && typeof result === 'object' && 'code' in result && 'message' in result) {
+                socket.emit('rpcError', result);
+            }
         } catch (error) {
             console.error('[updateDiscoveriedUrls] Handler error:', error);
+            socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
         }
     };
     socket.on('updateDiscoveriedUrls', listener);
@@ -112,13 +120,13 @@ export function handleGetBrowserVersion(socket: Socket, handler: GetBrowserVersi
 /**
  * Sets up listener for 'rpcError' events with async/await and try-catch. This handler is called whenever an RPC error occurs during function execution. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
- * @param {(error: RpcError) => Promise<void>} handler The handler function to process incoming events.
+ * @param {(socket: Socket, error: RpcError) => Promise<void>} handler The handler function to process incoming events.
  * @returns {UnsubscribeFunction} A function that removes the event listener when called
  */
-export function handleRpcError(socket: Socket, handler: (error: RpcError) => Promise<void>): UnsubscribeFunction {
+export function handleRpcError(socket: Socket, handler: (socket: Socket, error: RpcError) => Promise<void>): UnsubscribeFunction {
     const listener = async (error: RpcError) => {
         try {
-            await handler(error);
+            await handler(socket, error);
         } catch (handlerError) {
             console.error('[handleRpcError] Error in RPC error handler:', handlerError);
         }

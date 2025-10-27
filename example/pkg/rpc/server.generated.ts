@@ -96,13 +96,13 @@ export function handleGetPlan(socket: Socket, handler: GetPlanHandler): Unsubscr
 /**
  * Sets up listener for 'rpcError' events with async/await and try-catch. This handler is called whenever an RPC error occurs during function execution. Returns a function to remove the listener.
  * @param {Socket} socket The socket instance for communication.
- * @param {(error: RpcError) => Promise<void>} handler The handler function to process incoming events.
+ * @param {(socket: Socket, error: RpcError) => Promise<void>} handler The handler function to process incoming events.
  * @returns {UnsubscribeFunction} A function that removes the event listener when called
  */
-export function handleRpcError(socket: Socket, handler: (error: RpcError) => Promise<void>): UnsubscribeFunction {
+export function handleRpcError(socket: Socket, handler: (socket: Socket, error: RpcError) => Promise<void>): UnsubscribeFunction {
     const listener = async (error: RpcError) => {
         try {
-            await handler(error);
+            await handler(socket, error);
         } catch (handlerError) {
             console.error('[handleRpcError] Error in RPC error handler:', handlerError);
         }

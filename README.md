@@ -378,6 +378,96 @@ This approach provides a clean and type-safe way to communicate between your cli
 
 ## Common Patterns
 
+### Error Handling with RpcError
+
+**Important:** The generated code automatically handles errors through the `RpcError` type. You **don't need** to create wrapper response types with error fields.
+
+#### ❌ Anti-Pattern: Don't Do This
+
+```typescript
+// ❌ WRONG - Don't create wrapper types with error fields
+export type UpdateRotationResponse = {
+  success: boolean;
+  rotation?: RotationSettings;
+  error?: string;
+};
+
+interface ServerFunctions {
+  updateRotation: (settings: RotationSettings) => UpdateRotationResponse;
+}
+```
+
+#### ✅ Correct Pattern: Use RpcError
+
+```typescript
+// ✅ CORRECT - Return the actual data type, errors are handled by RpcError
+interface ServerFunctions {
+  updateRotation: (settings: RotationSettings) => RotationSettings;
+}
+```
+
+#### Implementation Example
+
+**Server Handler:**
+```typescript
+import { handleUpdateRotation } from './rpc/server.generated';
+import { RpcError } from './rpc/types.generated';
+
+handleUpdateRotation(socket, async (socket, settings): Promise<RotationSettings | RpcError> => {
+  try {
+    // Validate settings
+    if (!settings.interval || settings.interval < 1000) {
+      return {
+        code: 'INVALID_INTERVAL',
+        message: 'Interval must be at least 1000ms',
+        data: { minInterval: 1000 }
+      } as RpcError;
+    }
+
+    // Update rotation settings
+    const updatedRotation = await db.updateRotation(settings);
+
+    // Return success data directly
+    return updatedRotation;
+  } catch (error) {
+    // Handle unexpected errors
+    return {
+      code: 'INTERNAL_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      data: undefined
+    } as RpcError;
+  }
+});
+```
+
+**Client Usage:**
+```typescript
+import { updateRotation } from './rpc/client.generated';
+import { isRpcError } from './rpc/types.generated';
+
+const result = await updateRotation(socket, { interval: 5000, enabled: true });
+
+if (isRpcError(result)) {
+  // Handle error
+  console.error(`Error: ${result.message} (code: ${result.code})`);
+  if (result.data) {
+    console.error('Additional data:', result.data);
+  }
+} else {
+  // Handle success - result is typed as RotationSettings
+  console.log('Rotation updated:', result);
+}
+```
+
+#### Benefits of Using RpcError
+
+✅ **Cleaner Types**: Your function signatures return actual data types, not wrapper objects
+✅ **Built-in Type Guards**: Use `isRpcError()` to check for errors
+✅ **Consistent Error Structure**: All errors have `code`, `message`, and optional `data`
+✅ **Type Safety**: TypeScript knows the exact type after `isRpcError()` check
+✅ **Error Codes**: Attach custom error codes for better error handling
+✅ **Additional Context**: Include extra data in the `data` field for debugging
+
 ### Sync vs Async Communication
 
 **Synchronous Pattern (Request-Response)**

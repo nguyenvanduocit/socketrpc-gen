@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v2.1.0...v2.2.0) (2025-10-27)
+
+
+### Features
+
+* **handler:** allow void handlers to return RpcError and improve error propagation ([#20](https://github.com/nguyenvanduocit/socketrpc-gen/issues/20)) ([c449d37](https://github.com/nguyenvanduocit/socketrpc-gen/commit/c449d37cc1a0e67f2da39378a082cfee1b06a45f))
+
 ## [2.1.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v2.0.1...v2.1.0) (2025-10-24)
 
 

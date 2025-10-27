@@ -17,6 +17,17 @@
 
 The `examples/00-full-app` directory in this repository is a complete working application that can be used as a template to bootstrap your own project. It demonstrates a practical project structure with actual client/server implementation that you can adapt for your needs.
 
+### Examples
+
+Check out the [`examples/`](./examples) directory for comprehensive examples:
+
+- **[00-full-app](./examples/00-full-app/)** - Complete working application with client/server implementation
+- **[01-basic](./examples/01-basic/)** - Simple interface definitions without extension
+- **[02-single-extension](./examples/02-single-extension/)** - Single-level interface inheritance
+- **[03-multi-level-extension](./examples/03-multi-level-extension/)** - Multi-layer architecture patterns
+
+See the [examples README](./examples/README.md) for detailed comparisons and use cases.
+
 ### 1. Define Your RPC Interface
 
 Create a TypeScript file (e.g., `pkg/rpc/define.ts`) that defines the functions your server and client will expose.
@@ -252,50 +263,105 @@ socketrpc-gen <path> [options]
 -   `-p, --package-name <name>`: The npm package name for the generated RPC code. (Default: "@socket-rpc/rpc")
 -   `-t, --timeout <ms>`: Default timeout in milliseconds for RPC calls that expect a response. This can be overridden per-call. (Default: "5000")
 -   `-l, --error-logger <path>`: Custom error logger import path (e.g., '@/lib/logger'). By default uses `console.error`.
--   `--no-auto-cleanup`: Disable automatic cleanup of event listeners on socket disconnect. (Cleanup is enabled by default in v2.0.0)
 -   `-w, --watch`: Watch for changes in the definition file and regenerate automatically. (Default: false)
 -   `-h, --help`: Display help for command.
 
-## Migration Guide: v1.x to v2.0.0
+## Handler Cleanup Best Practices
 
-### Breaking Changes
+**Important:** All handler functions return an unsubscribe function that **MUST** be called to clean up event listeners. Failing to do so will cause memory leaks and `MaxListenersExceededWarning` errors, especially with HMR (Hot Module Replacement) in development.
 
-**Automatic Cleanup is Now Default**
+### Vue 3 Composition API
 
-In v2.0.0, event listeners are **automatically cleaned up** when the socket disconnects. This prevents memory leaks in long-running applications.
-
-**v1.x Behavior:**
 ```typescript
-// Event listeners persisted after disconnect
-// Required manual cleanup
-const unsubscribe = handleGenerateText(socket, handler);
-socket.on('disconnect', () => {
-  unsubscribe(); // Manual cleanup needed
+import { onMounted, onBeforeUnmount } from 'vue';
+import { socket } from './socket';
+import { handleShowError, handleAskQuestion } from './rpc/client.generated';
+
+export default {
+  setup() {
+    const unsubscribers: Array<() => void> = [];
+
+    onMounted(() => {
+      // Register all handlers and store unsubscribe functions
+      unsubscribers.push(
+        handleShowError(socket, async (socket, error) => {
+          console.error('Error:', error);
+        }),
+        handleAskQuestion(socket, async (socket, question) => {
+          return 'blue';
+        })
+      );
+    });
+
+    onBeforeUnmount(() => {
+      // Clean up all handlers when component unmounts
+      unsubscribers.forEach(fn => fn());
+    });
+  }
+}
+```
+
+### React Hooks
+
+```typescript
+import { useEffect } from 'react';
+import { socket } from './socket';
+import { handleShowError, handleAskQuestion } from './rpc/client.generated';
+
+function MyComponent() {
+  useEffect(() => {
+    const unsubscribers: Array<() => void> = [];
+
+    // Register handlers
+    unsubscribers.push(
+      handleShowError(socket, async (socket, error) => {
+        console.error('Error:', error);
+      }),
+      handleAskQuestion(socket, async (socket, question) => {
+        return 'blue';
+      })
+    );
+
+    // Cleanup function
+    return () => {
+      unsubscribers.forEach(fn => fn());
+    };
+  }, []);
+
+  return <div>My Component</div>;
+}
+```
+
+### Plain JavaScript/TypeScript
+
+```typescript
+import { socket } from './socket';
+import { handleShowError } from './rpc/client.generated';
+
+// Register handler and store unsubscribe function
+const unsubscribe = handleShowError(socket, async (socket, error) => {
+  console.error('Error:', error);
 });
+
+// When you want to clean up (e.g., before page navigation)
+function cleanup() {
+  unsubscribe();
+}
 ```
 
-**v2.0.0 Behavior:**
-```typescript
-// Event listeners automatically cleaned up on disconnect
-handleGenerateText(socket, handler);
-// No manual cleanup needed!
-```
+### Why Cleanup is Important
 
-### If You Need Manual Control
+Without proper cleanup:
+- ❌ Event listeners accumulate on every component mount/remount
+- ❌ HMR (Hot Module Replacement) causes listener stacking
+- ❌ You'll see `MaxListenersExceededWarning: Possible EventTarget memory leak detected`
+- ❌ Memory leaks in long-running applications
 
-If your application requires manual control over cleanup timing (e.g., reconnection scenarios), use the `--no-auto-cleanup` flag:
-
-```bash
-bunx socketrpc-gen ./define.ts --no-auto-cleanup
-```
-
-This restores the v1.x behavior where you manage cleanup manually.
-
-### Other New Features in v2.0.0
-
-- **Custom Error Logging**: Use `--error-logger` to integrate with your logging system
-- **Improved Type Extraction**: Better support for generics, unions, and nested types
-- **Consistent Error Objects**: All RpcError objects now have consistent structure
+With proper cleanup:
+- ✅ Handlers are removed when components unmount
+- ✅ No listener accumulation during HMR
+- ✅ No memory leaks
+- ✅ Clean, predictable behavior
 
 ## How It Works
 

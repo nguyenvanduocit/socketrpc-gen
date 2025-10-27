@@ -19,6 +19,10 @@ import type {
 } from 'ts-morph';
 import { Command } from 'commander';
 
+// ============================================
+// TYPES & INTERFACES
+// ============================================
+
 /**
  * Configuration options for the RPC generator
  */
@@ -33,16 +37,13 @@ interface GeneratorConfig {
   defaultTimeout?: number;
   /** Custom error logger import path (e.g., '@/lib/logger') */
   errorLogger?: string;
-  /** Automatically cleanup event listeners on socket disconnect */
-  autoCleanup?: boolean;
 }
 
 /**
  * Internal config with all defaults applied
  */
-type ResolvedConfig = Required<Omit<GeneratorConfig, 'errorLogger' | 'autoCleanup'>> & {
+type ResolvedConfig = Required<Omit<GeneratorConfig, 'errorLogger'>> & {
   errorLogger: string | undefined;
-  autoCleanup: boolean;
 };
 
 /**
@@ -64,6 +65,10 @@ interface FunctionSignature {
   isVoid: boolean;
 }
 
+// ============================================
+// VALIDATION & UTILITY FUNCTIONS
+// ============================================
+
 /**
  * Validates that a function name is a valid JavaScript identifier
  */
@@ -77,6 +82,10 @@ function isValidJavaScriptIdentifier(name: string): boolean {
 function createRpcErrorExpression(errorVar: string): string {
   return `{ message: ${errorVar} instanceof Error ? ${errorVar}.message : String(${errorVar}), code: 'INTERNAL_ERROR', data: undefined }`;
 }
+
+// ============================================
+// INTERFACE EXTRACTION
+// ============================================
 
 /**
  * Recursively collects all base interfaces from an interface, including those from imported files
@@ -114,6 +123,68 @@ function getAllBaseInterfaces(interfaceDeclaration: InterfaceDeclaration): Inter
 }
 
 /**
+ * Extracts signature from a single property if it's a valid function
+ * Returns null if the property should be skipped
+ */
+function extractSignatureFromProperty(
+  property: any,
+  processedNames: Set<string>
+): FunctionSignature | null {
+  const typeNode = property.getTypeNode();
+  const name = property.getName();
+
+  // Skip if already processed (derived class overrides base)
+  if (processedNames.has(name)) {
+    return null;
+  }
+
+  // Must be a function type
+  if (!typeNode || typeNode.getKind() !== SyntaxKind.FunctionType) {
+    return null;
+  }
+
+  // Validate function name
+  if (!isValidJavaScriptIdentifier(name)) {
+    console.error(`Warning: Skipping function '${name}' - not a valid JavaScript identifier`);
+    return null;
+  }
+
+  const functionType = property.getType();
+  const callSignatures = functionType.getCallSignatures();
+
+  if (callSignatures.length === 0) {
+    return null;
+  }
+
+  const signature = callSignatures[0];
+  if (!signature) return null;
+
+  // Extract parameters
+  const params: FunctionParam[] = signature.getParameters().map(param => {
+    const paramType = param.getTypeAtLocation(property);
+    const typeString = paramType.getText(property);
+
+    return {
+      name: param.getName(),
+      type: typeString,
+      isOptional: param.isOptional()
+    };
+  });
+
+  // Extract return type
+  const returnType = signature.getReturnType();
+  const returnTypeString = returnType.getText(property);
+  const isVoid = returnTypeString === 'void';
+
+  return {
+    name,
+    params,
+    returnType: returnTypeString,
+    isVoid
+  };
+}
+
+/**
  * Extracts function signatures from a TypeScript interface using ts-morph
  * Supports interface extension - will extract properties from base interfaces too
  */
@@ -121,61 +192,17 @@ function extractFunctionSignatures(interfaceDeclaration: InterfaceDeclaration): 
   const signatures: FunctionSignature[] = [];
   const processedNames = new Set<string>();
 
-  // Collect all interfaces in the inheritance chain (base interfaces first, then the main interface)
+  // Collect all interfaces in the inheritance chain
   const baseInterfaces = getAllBaseInterfaces(interfaceDeclaration);
   const allInterfaces = [...baseInterfaces, interfaceDeclaration];
 
   // Process each interface in the chain
   allInterfaces.forEach(iface => {
     iface.getProperties().forEach(property => {
-      const typeNode = property.getTypeNode();
-      const name = property.getName();
-
-      // Skip if we've already processed this function name (derived class overrides base)
-      if (processedNames.has(name)) {
-        return;
-      }
-
-      if (typeNode && typeNode.getKind() === SyntaxKind.FunctionType) {
-        // Validate function name is a valid JavaScript identifier
-        if (!isValidJavaScriptIdentifier(name)) {
-          console.error(`Warning: Skipping function '${name}' - not a valid JavaScript identifier`);
-          return;
-        }
-
-        const functionType = property.getType();
-        const callSignatures = functionType.getCallSignatures();
-
-        if (callSignatures.length > 0) {
-          const signature = callSignatures[0];
-          if (!signature) return;
-
-          // Extract parameters
-          const params: FunctionParam[] = signature.getParameters().map(param => {
-            const paramType = param.getTypeAtLocation(property);
-            const typeString = paramType.getText(property);
-
-            return {
-              name: param.getName(),
-              type: typeString,
-              isOptional: param.isOptional()
-            };
-          });
-
-          // Extract return type
-          const returnType = signature.getReturnType();
-          const returnTypeString = returnType.getText(property);
-          const isVoid = returnTypeString === 'void';
-
-          signatures.push({
-            name,
-            params,
-            returnType: returnTypeString,
-            isVoid
-          });
-
-          processedNames.add(name);
-        }
+      const extracted = extractSignatureFromProperty(property, processedNames);
+      if (extracted) {
+        signatures.push(extracted);
+        processedNames.add(extracted.name);
       }
     });
   });
@@ -228,6 +255,10 @@ function createJSDoc(
     tags
   };
 }
+
+// ============================================
+// AST GENERATION - TYPES FILE
+// ============================================
 
 /**
  * Creates a new file types.ts for custom types.
@@ -293,6 +324,10 @@ function generateTypesFile(project: Project, outputDir: string, config: Resolved
 
   typesFile.formatText();
 }
+
+// ============================================
+// AST GENERATION - RPC FUNCTIONS
+// ============================================
 
 /**
  * Creates function parameters structure for ts-morph
@@ -362,22 +397,28 @@ function createRpcFunctionBodyWriter(func: FunctionSignature): (writer: any) => 
 }
 
 /**
- * Generates client function using ts-morph AST with shared body logic
+ * Generates RPC function using ts-morph AST with shared body logic
+ * Works for both client->server and server->client calls
  */
-function generateClientFunctionAST(
+function generateRpcFunctionAST(
   func: FunctionSignature,
-  config: ResolvedConfig
+  config: ResolvedConfig,
+  side: 'client' | 'server'
 ): FunctionDeclarationStructure {
   const params = createFunctionParameters(func, true, !func.isVoid, config);
   const bodyWriter = createRpcFunctionBodyWriter(func);
 
-  const description = `CLIENT calls SERVER: Emits '${func.name}' event to server ${func.isVoid ? 'without' : 'with'
+  const caller = side === 'client' ? 'CLIENT' : 'SERVER';
+  const target = side === 'client' ? 'SERVER' : 'CLIENT';
+  const targetLower = target.toLowerCase();
+
+  const description = `${caller} calls ${target}: Emits '${func.name}' event to ${targetLower} ${func.isVoid ? 'without' : 'with'
     } acknowledgment. Includes built-in error handling.`;
   const returnType = func.isVoid
     ? null
     : {
       type: `Promise<${func.returnType} | RpcError>`,
-      description: 'A promise that resolves with the result from the server, or an RpcError if one occurred.'
+      description: `A promise that resolves with the result from the ${targetLower}, or an RpcError if one occurred.`
     };
 
   return {
@@ -392,98 +433,87 @@ function generateClientFunctionAST(
   };
 }
 
-/**
- * Generates server function using ts-morph AST with shared body logic
- */
-function generateServerFunctionAST(
-  func: FunctionSignature,
-  config: ResolvedConfig
-): FunctionDeclarationStructure {
-  const params = createFunctionParameters(func, true, !func.isVoid, config);
-  const bodyWriter = createRpcFunctionBodyWriter(func);
-
-  const description = `SERVER calls CLIENT: Emits '${func.name}' event to client ${func.isVoid ? 'without' : 'with'
-    } acknowledgment. Includes built-in error handling.`;
-  const returnType = func.isVoid
-    ? null
-    : {
-      type: `Promise<${func.returnType} | RpcError>`,
-      description: 'A promise that resolves with the result from the client, or an RpcError if one occurred.'
-    };
-
-  return {
-    kind: StructureKind.Function,
-    name: func.name,
-    isExported: true,
-    isAsync: !func.isVoid,
-    parameters: params,
-    returnType: func.isVoid ? 'void' : `Promise<${func.returnType} | RpcError>`,
-    statements: bodyWriter,
-    docs: [createJSDoc(description, params, returnType)]
-  };
-}
+// ============================================
+// AST GENERATION - HANDLERS
+// ============================================
 
 /**
- * Creates common handler function body writer (shared between client and server)
+ * Creates body writer for void (fire-and-forget) handlers
  */
-function createHandlerBodyWriter(func: FunctionSignature, config: ResolvedConfig): (writer: any) => void {
+function createVoidHandlerBodyWriter(func: FunctionSignature, config: ResolvedConfig): (writer: any) => void {
   return (writer: any) => {
     const loggerCall = config.errorLogger
       ? `logger.error('[${func.name}] Handler error:', error);`
       : `console.error('[${func.name}] Handler error:', error);`;
     const paramNames = func.params.map(p => p.name);
     const handlerArgs = paramNames.length > 0 ? `socket, ${paramNames.join(', ')}` : 'socket';
+    const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
 
-    if (func.isVoid) {
-      // For void functions, no callback parameter, but can return RpcError
-      const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
-      writer.writeLine(`const listener = async (${typedParams}) => {`);
+    writer.writeLine(`const listener = async (${typedParams}) => {`);
+    writer.indent(() => {
+      writer.writeLine('try {');
       writer.indent(() => {
-        writer.writeLine('try {');
+        writer.writeLine(`const result = await handler(${handlerArgs});`);
+        writer.writeLine('if (result && typeof result === \'object\' && \'code\' in result && \'message\' in result) {');
         writer.indent(() => {
-          writer.writeLine(`const result = await handler(${handlerArgs});`);
-          writer.writeLine('if (result && typeof result === \'object\' && \'code\' in result && \'message\' in result) {');
-          writer.indent(() => {
-            writer.writeLine('socket.emit(\'rpcError\', result);');
-          });
-          writer.writeLine('}');
-        });
-        writer.writeLine('} catch (error) {');
-        writer.indent(() => {
-          writer.writeLine(loggerCall);
-          writer.writeLine(`socket.emit('rpcError', ${createRpcErrorExpression('error')});`);
+          writer.writeLine('socket.emit(\'rpcError\', result);');
         });
         writer.writeLine('}');
       });
-      writer.writeLine('};');
-      writer.writeLine(`socket.on('${func.name}', listener);`);
-
-      writer.writeLine(`return () => socket.off('${func.name}', listener);`);
-    } else {
-      // For non-void functions, include callback parameter
-      const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
-      const callbackType = `(result: ${func.returnType} | RpcError) => void`;
-      const fullParams = typedParams ? `${typedParams}, callback: ${callbackType}` : `callback: ${callbackType}`;
-      writer.writeLine(`const listener = async (${fullParams}) => {`);
+      writer.writeLine('} catch (error) {');
       writer.indent(() => {
-        writer.writeLine('try {');
-        writer.indent(() => {
-          writer.writeLine(`const result = await handler(${handlerArgs});`);
-          writer.writeLine('callback(result);');
-        });
-        writer.writeLine('} catch (error) {');
-        writer.indent(() => {
-          writer.writeLine(loggerCall);
-          writer.writeLine(`callback(${createRpcErrorExpression('error')});`);
-        });
-        writer.writeLine('}');
+        writer.writeLine(loggerCall);
+        writer.writeLine(`socket.emit('rpcError', ${createRpcErrorExpression('error')});`);
       });
-      writer.writeLine('};');
-      writer.writeLine(`socket.on('${func.name}', listener);`);
-
-      writer.writeLine(`return () => socket.off('${func.name}', listener);`);
-    }
+      writer.writeLine('}');
+    });
+    writer.writeLine('};');
+    writer.writeLine(`socket.on('${func.name}', listener);`);
+    writer.writeLine(`return () => socket.off('${func.name}', listener);`);
   };
+}
+
+/**
+ * Creates body writer for handlers that expect acknowledgment
+ */
+function createAckHandlerBodyWriter(func: FunctionSignature, config: ResolvedConfig): (writer: any) => void {
+  return (writer: any) => {
+    const loggerCall = config.errorLogger
+      ? `logger.error('[${func.name}] Handler error:', error);`
+      : `console.error('[${func.name}] Handler error:', error);`;
+    const paramNames = func.params.map(p => p.name);
+    const handlerArgs = paramNames.length > 0 ? `socket, ${paramNames.join(', ')}` : 'socket';
+    const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
+    const callbackType = `(result: ${func.returnType} | RpcError) => void`;
+    const fullParams = typedParams ? `${typedParams}, callback: ${callbackType}` : `callback: ${callbackType}`;
+
+    writer.writeLine(`const listener = async (${fullParams}) => {`);
+    writer.indent(() => {
+      writer.writeLine('try {');
+      writer.indent(() => {
+        writer.writeLine(`const result = await handler(${handlerArgs});`);
+        writer.writeLine('callback(result);');
+      });
+      writer.writeLine('} catch (error) {');
+      writer.indent(() => {
+        writer.writeLine(loggerCall);
+        writer.writeLine(`callback(${createRpcErrorExpression('error')});`);
+      });
+      writer.writeLine('}');
+    });
+    writer.writeLine('};');
+    writer.writeLine(`socket.on('${func.name}', listener);`);
+    writer.writeLine(`return () => socket.off('${func.name}', listener);`);
+  };
+}
+
+/**
+ * Creates handler function body writer - dispatches to void or acknowledgment writer
+ */
+function createHandlerBodyWriter(func: FunctionSignature, config: ResolvedConfig): (writer: any) => void {
+  return func.isVoid
+    ? createVoidHandlerBodyWriter(func, config)
+    : createAckHandlerBodyWriter(func, config);
 }
 
 /**
@@ -520,26 +550,6 @@ function generateHandlerAST(
     statements: bodyWriter,
     docs: [createJSDoc(description, params, { type: 'UnsubscribeFunction', description: 'A function that removes the event listener when called' })]
   };
-}
-
-/**
- * Generates client handler function using shared AST logic
- */
-function generateClientHandlerAST(
-  func: FunctionSignature,
-  config: ResolvedConfig
-): FunctionDeclarationStructure | null {
-  return generateHandlerAST(func, config, 'server', true); // Use exported type
-}
-
-/**
- * Generates server handler function using shared AST logic
- */
-function generateServerHandlerAST(
-  func: FunctionSignature,
-  config: ResolvedConfig
-): FunctionDeclarationStructure | null {
-  return generateHandlerAST(func, config, 'client', true); // Use exported type
 }
 
 /**
@@ -613,6 +623,10 @@ function addLoggerImport(sourceFile: any, config: ResolvedConfig): void {
     });
   }
 }
+
+// ============================================
+// TYPE EXTRACTION & IMPORTS
+// ============================================
 
 /**
  * Extracts custom types used in function signatures and adds them as type-only imports
@@ -742,64 +756,50 @@ function splitTypeArguments(args: string): string[] {
   return result;
 }
 
+// ============================================
+// FILE GENERATION
+// ============================================
+
 /**
- * Generates handler type exports in the client file
+ * Generates handler type exports for a side (client or server)
+ * @param sourceFile - The file to add types to
+ * @param functions - Functions that will be handled
+ * @param side - Which side is handling ('client' or 'server')
  */
-function generateClientHandlerTypes(
-  clientFile: any,
-  serverFunctions: FunctionSignature[]
+function generateHandlerTypes(
+  sourceFile: any,
+  functions: FunctionSignature[],
+  side: 'client' | 'server'
 ): void {
+  const sideName = side.toUpperCase();
+  const eventSource = side === 'client' ? 'server' : 'client';
+
   // Add section comment for handler types
-  clientFile.addStatements('\n// === CLIENT HANDLER TYPES ===');
+  sourceFile.addStatements(`\n// === ${sideName} HANDLER TYPES ===`);
 
   // Generate type alias for each handler
-  serverFunctions.forEach(func => {
+  functions.forEach(func => {
     const handlerName = `${func.name.charAt(0).toUpperCase() + func.name.slice(1)}Handler`;
     const socketParam = 'socket: Socket';
     const funcParams = func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ');
     const allParams = funcParams ? `${socketParam}, ${funcParams}` : socketParam;
     const handlerType = `(${allParams}) => ${func.isVoid ? 'Promise<void | RpcError>' : `Promise<${func.returnType} | RpcError>`}`;
 
-    clientFile.addTypeAlias({
+    sourceFile.addTypeAlias({
       name: handlerName,
       type: handlerType,
       isExported: true,
-      docs: [`Handler type for processing '${func.name}' events from server`]
+      docs: [`Handler type for processing '${func.name}' events from ${eventSource}`]
     });
   });
 }
 
 /**
- * Generates handler type exports in the server file
+ * Generates client.ts or server.ts file using ts-morph
+ * Unified function that works for both sides
  */
-function generateServerHandlerTypes(
-  serverFile: any,
-  clientFunctions: FunctionSignature[]
-): void {
-  // Add section comment for handler types
-  serverFile.addStatements('\n// === SERVER HANDLER TYPES ===');
-
-  // Generate type alias for each handler
-  clientFunctions.forEach(func => {
-    const handlerName = `${func.name.charAt(0).toUpperCase() + func.name.slice(1)}Handler`;
-    const socketParam = 'socket: Socket';
-    const funcParams = func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ');
-    const allParams = funcParams ? `${socketParam}, ${funcParams}` : socketParam;
-    const handlerType = `(${allParams}) => ${func.isVoid ? 'Promise<void | RpcError>' : `Promise<${func.returnType} | RpcError>`}`;
-
-    serverFile.addTypeAlias({
-      name: handlerName,
-      type: handlerType,
-      isExported: true,
-      docs: [`Handler type for processing '${func.name}' events from client`]
-    });
-  });
-}
-
-/**
- * Generates client.ts file using ts-morph
- */
-function generateClientFile(
+function generateSideFile(
+  side: 'client' | 'server',
   project: Project,
   outputDir: string,
   clientFunctions: FunctionSignature[],
@@ -807,29 +807,42 @@ function generateClientFile(
   config: ResolvedConfig,
   inputFile: SourceFile
 ): void {
-  const clientFile = project.createSourceFile(
-    path.join(outputDir, 'client.generated.ts'),
+  const sideName = side.toUpperCase();
+  const targetName = side === 'client' ? 'SERVER' : 'CLIENT';
+  const socketModule = side === 'client' ? 'socket.io-client' : 'socket.io';
+  const fileName = `${side}.generated.ts`;
+
+  // Client calls serverFunctions and handles clientFunctions
+  // Server calls clientFunctions and handles serverFunctions
+  const callFunctions = side === 'client' ? clientFunctions : serverFunctions;
+  const handleFunctions = side === 'client' ? serverFunctions : clientFunctions;
+
+  const sideFile = project.createSourceFile(
+    path.join(outputDir, fileName),
     '',
     { overwrite: true }
   );
 
   // Add standard imports using optimized function
-  createStandardImports(clientFile, 'socket.io-client');
+  createStandardImports(sideFile, socketModule);
 
   // Add logger import if configured
-  addLoggerImport(clientFile, config);
+  addLoggerImport(sideFile, config);
 
   // Add custom type imports from input file
   const inputFilename = path.basename(config.inputPath, path.extname(config.inputPath));
-  addCustomTypeImports(clientFile, [...clientFunctions, ...serverFunctions], inputFile, inputFilename);
+  addCustomTypeImports(sideFile, [...clientFunctions, ...serverFunctions], inputFile, inputFilename);
 
   // Add file header comment
-  clientFile.insertText(0, `/**
+  const targetInterface = side === 'client' ? 'ServerFunctions' : 'ClientFunctions';
+  const handlerInterface = side === 'client' ? 'ClientFunctions' : 'ServerFunctions';
+
+  sideFile.insertText(0, `/**
  * ⚠️  DO NOT EDIT THIS FILE - IT IS AUTO-GENERATED ⚠️
- * 
- * Auto-generated client functions from ${inputFilename}.ts
- * These functions allow CLIENT to call SERVER functions (ServerFunctions interface)
- * and set up handlers for CLIENT functions (ClientFunctions interface)
+ *
+ * Auto-generated ${side} functions from ${inputFilename}.ts
+ * These functions allow ${sideName} to call ${targetName} functions (${targetInterface} interface)
+ * and set up handlers for ${sideName} functions (${handlerInterface} interface)
  *
  * To regenerate this file, run:
  * bunx socketrpc-gen ${config.inputPath}
@@ -838,108 +851,35 @@ function generateClientFile(
 `);
 
   // Generate handler type exports
-  generateClientHandlerTypes(clientFile, serverFunctions);
+  generateHandlerTypes(sideFile, handleFunctions, side);
 
-  // Add section comment for client calling server functions
-  clientFile.addStatements('\n// === CLIENT CALLING SERVER FUNCTIONS ===');
+  // Add section comment for calling functions
+  sideFile.addStatements(`\n// === ${sideName} CALLING ${targetName} FUNCTIONS ===`);
 
-  // Add client call functions
-  clientFunctions.forEach(func => {
-    const functionStructure = generateClientFunctionAST(func, config);
-    clientFile.addFunction(functionStructure);
+  // Add call functions
+  callFunctions.forEach(func => {
+    const functionStructure = generateRpcFunctionAST(func, config, side);
+    sideFile.addFunction(functionStructure);
   });
 
-  // Add section comment for client handler functions
-  clientFile.addStatements('\n// === CLIENT HANDLER FUNCTIONS ===');
+  // Add section comment for handler functions
+  sideFile.addStatements(`\n// === ${sideName} HANDLER FUNCTIONS ===`);
 
-  // Add client handler functions
-  serverFunctions.forEach(func => {
-    const handlerStructure = generateClientHandlerAST(func, config);
+  // Add handler functions
+  handleFunctions.forEach(func => {
+    const handlerStructure = generateHandlerAST(func, config, side === 'client' ? 'server' : 'client', true);
     if (handlerStructure) {
-      clientFile.addFunction(handlerStructure);
+      sideFile.addFunction(handlerStructure);
     }
   });
 
   // Add handleRpcError function
   const rpcErrorHandlerStructure = generateRpcErrorHandlerAST();
-  clientFile.addFunction(rpcErrorHandlerStructure);
+  sideFile.addFunction(rpcErrorHandlerStructure);
 
   // Format and save
-  clientFile.formatText();
-  clientFile.fixMissingImports();
-}
-
-/**
- * Generates server.ts file using ts-morph
- */
-function generateServerFile(
-  project: Project,
-  outputDir: string,
-  clientFunctions: FunctionSignature[],
-  serverFunctions: FunctionSignature[],
-  config: ResolvedConfig,
-  inputFile: SourceFile
-): void {
-  const serverFile = project.createSourceFile(
-    path.join(outputDir, 'server.generated.ts'),
-    '',
-    { overwrite: true }
-  );
-
-  // Add standard imports using optimized function
-  createStandardImports(serverFile, 'socket.io');
-
-  // Add logger import if configured
-  addLoggerImport(serverFile, config);
-
-  // Add custom type imports from input file
-  const inputFilename = path.basename(config.inputPath, path.extname(config.inputPath));
-  addCustomTypeImports(serverFile, [...clientFunctions, ...serverFunctions], inputFile, inputFilename);
-
-  // Add file header comment
-  serverFile.insertText(0, `/**
- * ⚠️  DO NOT EDIT THIS FILE - IT IS AUTO-GENERATED ⚠️
- * 
- * Auto-generated server functions from ${inputFilename}.ts
- * These functions allow SERVER to call CLIENT functions (ClientFunctions interface)
- * and set up handlers for SERVER functions (ServerFunctions interface)
- *
- * To regenerate this file, run:
- * bunx socketrpc-gen ${config.inputPath}
- */
-
-`);
-
-  // Generate handler type exports
-  generateServerHandlerTypes(serverFile, clientFunctions);
-
-  // Add section comment for server calling client functions
-  serverFile.addStatements('\n// === SERVER CALLING CLIENT FUNCTIONS ===');
-
-  // Add server call functions
-  serverFunctions.forEach(func => {
-    const functionStructure = generateServerFunctionAST(func, config);
-    serverFile.addFunction(functionStructure);
-  });
-
-  // Add section comment for server handler functions
-  serverFile.addStatements('\n// === SERVER HANDLER FUNCTIONS ===');
-
-  // Add server handler functions
-  clientFunctions.forEach(func => {
-    const handlerStructure = generateServerHandlerAST(func, config);
-    if (handlerStructure) {
-      serverFile.addFunction(handlerStructure);
-    }
-  });
-
-  // Add handleRpcError function
-  const rpcErrorHandlerStructure = generateRpcErrorHandlerAST();
-  serverFile.addFunction(rpcErrorHandlerStructure);
-
-  // Format and save
-  serverFile.formatText();
-  serverFile.fixMissingImports();
+  sideFile.formatText();
+  sideFile.fixMissingImports();
 }
 
 /**
@@ -997,139 +937,185 @@ function generateTsConfig(): object {
 }
 
 
+// ============================================
+// MAIN GENERATOR
+// ============================================
+
 /**
- * Main generator function that reads input file and generates the entire RPC package using ts-morph
+ * Resolves user config with defaults
  */
-async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
-  // Merge user config with defaults
-  const config: ResolvedConfig = {
+function resolveConfig(userConfig: GeneratorConfig): ResolvedConfig {
+  return {
     defaultTimeout: 5000,
     errorLogger: undefined,
-    autoCleanup: true, // v2.0.0: Changed default to true for automatic cleanup
     ...userConfig
   };
+}
 
-  const { inputPath, outputDir } = config;
-
-  // Validate that input file exists
+/**
+ * Validates that the input file exists
+ */
+function validateInputFile(inputPath: string): void {
   if (!fs.existsSync(inputPath)) {
     console.error('❌ Error: Input file not found at', inputPath);
     console.error('💡 Please create a file with ClientFunctions and ServerFunctions interfaces');
     process.exit(1);
   }
+}
+
+/**
+ * Extracts interfaces and function signatures from the input file
+ */
+async function extractInterfacesFromFile(inputPath: string): Promise<{
+  clientFunctions: FunctionSignature[];
+  serverFunctions: FunctionSignature[];
+  sourceFile: SourceFile;
+}> {
+  // Create a new ts-morph project for reading input
+  const inputProject = new Project({
+    tsConfigFilePath: path.join(__dirname, 'tsconfig.json'),
+    skipAddingFilesFromTsConfig: true
+  });
+
+  // Add the input file to the project
+  const sourceFile = inputProject.addSourceFileAtPath(inputPath);
+
+  // Resolve all dependencies (imported files)
+  // This ensures that extended interfaces from other files are available
+  sourceFile.getReferencedSourceFiles().forEach(referencedFile => {
+    inputProject.addSourceFileAtPath(referencedFile.getFilePath());
+  });
+
+  // Find the interfaces
+  const clientFunctionsInterface = sourceFile.getInterface('ClientFunctions');
+  const serverFunctionsInterface = sourceFile.getInterface('ServerFunctions');
+
+  if (!clientFunctionsInterface || !serverFunctionsInterface) {
+    console.error('❌ Error: Could not find ClientFunctions or ServerFunctions interfaces');
+    process.exit(1);
+  }
+
+  // Extract function signatures
+  const clientFunctions = extractFunctionSignatures(serverFunctionsInterface);
+  const serverFunctions = extractFunctionSignatures(clientFunctionsInterface);
+
+  return { clientFunctions, serverFunctions, sourceFile };
+}
+
+/**
+ * Ensures output directory exists and creates package files if needed
+ */
+async function ensurePackageStructure(outputDir: string, config: ResolvedConfig): Promise<void> {
+  // Ensure output directory exists
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+
+  // Generate package.json if it doesn't exist
+  const packageJsonPath = path.join(outputDir, 'package.json');
+  if (!fs.existsSync(packageJsonPath)) {
+    const packageJson = generatePackageJson(config);
+    fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
+  }
+
+  // Generate tsconfig.json if it doesn't exist
+  const tsConfigPath = path.join(outputDir, 'tsconfig.json');
+  if (!fs.existsSync(tsConfigPath)) {
+    const tsConfig = generateTsConfig();
+    fs.writeFileSync(tsConfigPath, JSON.stringify(tsConfig, null, 2));
+  }
+}
+
+/**
+ * Logs generation summary to console
+ */
+function logGenerationSummary(
+  clientFunctions: FunctionSignature[],
+  serverFunctions: FunctionSignature[],
+  outputDir: string
+): void {
+  console.log('✅ Generated RPC package successfully using ts-morph AST!');
+  console.log(`📦 Package location: ${outputDir}`);
+  console.log(`📄 Generated files:`);
+  console.log(`   - client.generated.ts (${clientFunctions.length} call functions, ${serverFunctions.length} handler functions)`);
+  console.log(`   - server.generated.ts (${serverFunctions.length} call functions, ${clientFunctions.length} handler functions)`);
+  console.log(`   - types.generated.ts`);
+
+  // Log generated functions
+  if (clientFunctions.length > 0) {
+    console.log('\n📋 Generated client->server functions:');
+    clientFunctions.forEach(f => {
+      console.log(`  - ${f.name}(${f.params.map(p => p.name).join(', ')}) -> ${f.returnType}`);
+    });
+  }
+
+  if (serverFunctions.length > 0) {
+    console.log('\n📋 Generated server->client functions:');
+    serverFunctions.forEach(f => {
+      console.log(`  - ${f.name}(${f.params.map(p => p.name).join(', ')}) -> ${f.returnType}`);
+    });
+  }
+
+  if (serverFunctions.length > 0) {
+    console.log('\n📋 Generated client handler functions:');
+    serverFunctions.forEach(f => {
+      const handlerName = `handle${f.name.charAt(0).toUpperCase() + f.name.slice(1)}`;
+      console.log(`  - ${handlerName}(socket, handler)`);
+    });
+  }
+
+  if (clientFunctions.length > 0) {
+    console.log('\n📋 Generated server handler functions:');
+    clientFunctions.forEach(f => {
+      const handlerName = `handle${f.name.charAt(0).toUpperCase() + f.name.slice(1)}`;
+      console.log(`  - ${handlerName}(socket, handler)`);
+    });
+  }
+
+  console.log('\n📋 Generated default handler functions (always included):');
+  console.log('  - handleRpcError(socket, handler) - handles RPC errors from both client and server');
+}
+
+/**
+ * Main generator function that orchestrates the entire RPC package generation
+ */
+async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
+  const config = resolveConfig(userConfig);
+  validateInputFile(config.inputPath);
 
   try {
-    // Create a new ts-morph project for reading input
-    const inputProject = new Project({
-      tsConfigFilePath: path.join(__dirname, 'tsconfig.json'),
-      skipAddingFilesFromTsConfig: true
-    });
-
-    // Add the input file to the project
-    const sourceFile = inputProject.addSourceFileAtPath(inputPath);
-
-    // Resolve all dependencies (imported files)
-    // This ensures that extended interfaces from other files are available
-    sourceFile.getReferencedSourceFiles().forEach(referencedFile => {
-      inputProject.addSourceFileAtPath(referencedFile.getFilePath());
-    });
-
-    // Find the interfaces
-    const clientFunctionsInterface = sourceFile.getInterface('ClientFunctions');
-    const serverFunctionsInterface = sourceFile.getInterface('ServerFunctions');
-
-    if (!clientFunctionsInterface || !serverFunctionsInterface) {
-      console.error('❌ Error: Could not find ClientFunctions or ServerFunctions interfaces');
-      process.exit(1);
-    }
-
-    // Extract function signatures
-    const clientFunctions = extractFunctionSignatures(serverFunctionsInterface);
-    const serverFunctions = extractFunctionSignatures(clientFunctionsInterface);
-
-    // Ensure output directory exists
-    if (!fs.existsSync(outputDir)) {
-      fs.mkdirSync(outputDir, { recursive: true });
-    }
-
-    // Generate package.json if it doesn't exist
-    const packageJsonPath = path.join(outputDir, 'package.json');
-    if (!fs.existsSync(packageJsonPath)) {
-      const packageJson = generatePackageJson(config);
-      fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
-    }
-
-    // Generate tsconfig.json if it doesn't exist
-    const tsConfigPath = path.join(outputDir, 'tsconfig.json');
-    if (!fs.existsSync(tsConfigPath)) {
-      const tsConfig = generateTsConfig();
-      fs.writeFileSync(tsConfigPath, JSON.stringify(tsConfig, null, 2));
-    }
+    const { clientFunctions, serverFunctions, sourceFile } = await extractInterfacesFromFile(config.inputPath);
+    await ensurePackageStructure(config.outputDir, config);
 
     // Create a new ts-morph project for generating output files
     const outputProject = new Project({
       useInMemoryFileSystem: false,
-      tsConfigFilePath: path.join(outputDir, 'tsconfig.json'),
+      tsConfigFilePath: path.join(config.outputDir, 'tsconfig.json'),
       compilerOptions: {
-        outDir: path.join(outputDir, 'dist'),
-        rootDir: outputDir
+        outDir: path.join(config.outputDir, 'dist'),
+        rootDir: config.outputDir
       }
     });
 
     // Generate files using ts-morph
-    generateTypesFile(outputProject, outputDir, config);
-    generateClientFile(outputProject, outputDir, clientFunctions, serverFunctions, config, sourceFile);
-    generateServerFile(outputProject, outputDir, clientFunctions, serverFunctions, config, sourceFile);
+    generateTypesFile(outputProject, config.outputDir, config);
+    generateSideFile('client', outputProject, config.outputDir, clientFunctions, serverFunctions, config, sourceFile);
+    generateSideFile('server', outputProject, config.outputDir, clientFunctions, serverFunctions, config, sourceFile);
 
     // Save all generated files
     await outputProject.save();
 
-    console.log('✅ Generated RPC package successfully using ts-morph AST!');
-    console.log(`📦 Package location: ${outputDir}`);
-    console.log(`📄 Generated files:`);
-    console.log(`   - client.generated.ts (${clientFunctions.length} call functions, ${serverFunctions.length} handler functions)`);
-    console.log(`   - server.generated.ts (${serverFunctions.length} call functions, ${clientFunctions.length} handler functions)`);
-    console.log(`   - types.generated.ts`);
-
-    // Log generated functions
-    if (clientFunctions.length > 0) {
-      console.log('\n📋 Generated client->server functions:');
-      clientFunctions.forEach(f => {
-        console.log(`  - ${f.name}(${f.params.map(p => p.name).join(', ')}) -> ${f.returnType}`);
-      });
-    }
-
-    if (serverFunctions.length > 0) {
-      console.log('\n📋 Generated server->client functions:');
-      serverFunctions.forEach(f => {
-        console.log(`  - ${f.name}(${f.params.map(p => p.name).join(', ')}) -> ${f.returnType}`);
-      });
-    }
-
-    if (serverFunctions.length > 0) {
-      console.log('\n📋 Generated client handler functions:');
-      serverFunctions.forEach(f => {
-        const handlerName = `handle${f.name.charAt(0).toUpperCase() + f.name.slice(1)}`;
-        console.log(`  - ${handlerName}(socket, handler)`);
-      });
-    }
-
-    if (clientFunctions.length > 0) {
-      console.log('\n📋 Generated server handler functions:');
-      clientFunctions.forEach(f => {
-        const handlerName = `handle${f.name.charAt(0).toUpperCase() + f.name.slice(1)}`;
-        console.log(`  - ${handlerName}(socket, handler)`);
-      });
-    }
-
-    console.log('\n📋 Generated default handler functions (always included):');
-    console.log('  - handleRpcError(socket, handler) - handles RPC errors from both client and server');
+    logGenerationSummary(clientFunctions, serverFunctions, config.outputDir);
 
   } catch (error) {
     console.error('❌ Error generating RPC package:', error);
     process.exit(1);
   }
 }
+
+// ============================================
+// WATCH MODE & CLI
+// ============================================
 
 /**
  * Watches the input file for changes and regenerates on modification
@@ -1199,10 +1185,6 @@ if (require.main === module) {
       "Custom error logger import path (e.g., '@/lib/logger')"
     )
     .option(
-      "--no-auto-cleanup",
-      "Disable automatic cleanup of event listeners on socket disconnect (cleanup is enabled by default in v2.0.0)"
-    )
-    .option(
       "-w, --watch",
       "Watch for changes and regenerate automatically",
       false
@@ -1228,7 +1210,6 @@ if (require.main === module) {
         packageName: options.packageName,
         defaultTimeout: parseInt(options.timeout, 10),
         errorLogger: options.errorLogger,
-        autoCleanup: options.autoCleanup,
       };
 
       if (options.watch) {

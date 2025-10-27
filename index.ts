@@ -452,18 +452,7 @@ function createHandlerBodyWriter(func: FunctionSignature, config: ResolvedConfig
       writer.writeLine('};');
       writer.writeLine(`socket.on('${func.name}', listener);`);
 
-      if (config.autoCleanup) {
-        writer.writeLine(`const cleanup = () => socket.off('${func.name}', listener);`);
-        writer.writeLine(`socket.once('disconnect', cleanup);`);
-        writer.writeLine(`return () => {`);
-        writer.indent(() => {
-          writer.writeLine(`cleanup();`);
-          writer.writeLine(`socket.off('disconnect', cleanup);`);
-        });
-        writer.writeLine(`};`);
-      } else {
-        writer.writeLine(`return () => socket.off('${func.name}', listener);`);
-      }
+      writer.writeLine(`return () => socket.off('${func.name}', listener);`);
     } else {
       // For non-void functions, include callback parameter
       const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
@@ -486,18 +475,7 @@ function createHandlerBodyWriter(func: FunctionSignature, config: ResolvedConfig
       writer.writeLine('};');
       writer.writeLine(`socket.on('${func.name}', listener);`);
 
-      if (config.autoCleanup) {
-        writer.writeLine(`const cleanup = () => socket.off('${func.name}', listener);`);
-        writer.writeLine(`socket.once('disconnect', cleanup);`);
-        writer.writeLine(`return () => {`);
-        writer.indent(() => {
-          writer.writeLine(`cleanup();`);
-          writer.writeLine(`socket.off('disconnect', cleanup);`);
-        });
-        writer.writeLine(`};`);
-      } else {
-        writer.writeLine(`return () => socket.off('${func.name}', listener);`);
-      }
+      writer.writeLine(`return () => socket.off('${func.name}', listener);`);
     }
   };
 }

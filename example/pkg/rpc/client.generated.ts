@@ -68,12 +68,7 @@ export function handleShowError(socket: Socket, handler: ShowErrorHandler): Unsu
         }
     };
     socket.on('showError', listener);
-    const cleanup = () => socket.off('showError', listener);
-    socket.once('disconnect', cleanup);
-    return () => {
-        cleanup();
-        socket.off('disconnect', cleanup);
-    };
+    return () => socket.off('showError', listener);
 }
 
 /**
@@ -91,12 +86,7 @@ export function handleUpdateDiscoveriedUrls(socket: Socket, handler: UpdateDisco
         }
     };
     socket.on('updateDiscoveriedUrls', listener);
-    const cleanup = () => socket.off('updateDiscoveriedUrls', listener);
-    socket.once('disconnect', cleanup);
-    return () => {
-        cleanup();
-        socket.off('disconnect', cleanup);
-    };
+    return () => socket.off('updateDiscoveriedUrls', listener);
 }
 
 /**
@@ -116,12 +106,7 @@ export function handleGetBrowserVersion(socket: Socket, handler: GetBrowserVersi
         }
     };
     socket.on('getBrowserVersion', listener);
-    const cleanup = () => socket.off('getBrowserVersion', listener);
-    socket.once('disconnect', cleanup);
-    return () => {
-        cleanup();
-        socket.off('disconnect', cleanup);
-    };
+    return () => socket.off('getBrowserVersion', listener);
 }
 
 /**

@@ -48,6 +48,76 @@ This is a TypeScript code generator for Socket.IO RPC packages. The tool generat
 - Use `void` for fire-and-forget functions
 - Non-void functions automatically get acknowledgment handling and timeout support
 
+### Proper Handler Cleanup (Vue/React Components)
+
+**Important:** Handler functions return an unsubscribe function that MUST be called to clean up event listeners. Failing to do so will cause memory leaks and `MaxListenersExceededWarning` errors, especially with HMR (Hot Module Replacement).
+
+**Vue 3 Composition API Example:**
+```typescript
+import { onMounted, onBeforeUnmount } from 'vue';
+import { socket } from './socket';
+import { handleShowError, handleOnResyncProgress } from './rpc/client.generated';
+
+export default {
+  setup() {
+    const unsubscribers: Array<() => void> = [];
+
+    onMounted(() => {
+      // Register all handlers and store unsubscribe functions
+      unsubscribers.push(
+        handleShowError(socket, async (socket, error) => {
+          console.error('Error:', error);
+        }),
+        handleOnResyncProgress(socket, async (socket, msg, current, total) => {
+          console.log(`Progress: ${current}/${total}`);
+        })
+      );
+    });
+
+    onBeforeUnmount(() => {
+      // Clean up all handlers when component unmounts
+      unsubscribers.forEach(fn => fn());
+    });
+  }
+}
+```
+
+**React Example:**
+```typescript
+import { useEffect } from 'react';
+import { socket } from './socket';
+import { handleShowError, handleOnResyncProgress } from './rpc/client.generated';
+
+function MyComponent() {
+  useEffect(() => {
+    const unsubscribers: Array<() => void> = [];
+
+    // Register handlers
+    unsubscribers.push(
+      handleShowError(socket, async (socket, error) => {
+        console.error('Error:', error);
+      }),
+      handleOnResyncProgress(socket, async (socket, msg, current, total) => {
+        console.log(`Progress: ${current}/${total}`);
+      })
+    );
+
+    // Cleanup function
+    return () => {
+      unsubscribers.forEach(fn => fn());
+    };
+  }, []);
+
+  return <div>My Component</div>;
+}
+```
+
+**Key Points:**
+- Always store the unsubscribe functions returned by handlers
+- Call all unsubscribe functions in cleanup hooks (`onBeforeUnmount`, `useEffect` return, etc.)
+- This prevents listener accumulation during HMR and component remounting
+- Without proper cleanup, you'll see `MaxListenersExceededWarning` errors
+
 ### Example Structure
 ```
 pkg/rpc/

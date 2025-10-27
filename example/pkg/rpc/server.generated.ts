@@ -70,12 +70,7 @@ export function handleGenerateText(socket: Socket, handler: GenerateTextHandler)
         }
     };
     socket.on('generateText', listener);
-    const cleanup = () => socket.off('generateText', listener);
-    socket.once('disconnect', cleanup);
-    return () => {
-        cleanup();
-        socket.off('disconnect', cleanup);
-    };
+    return () => socket.off('generateText', listener);
 }
 
 /**
@@ -95,12 +90,7 @@ export function handleGetPlan(socket: Socket, handler: GetPlanHandler): Unsubscr
         }
     };
     socket.on('getPlan', listener);
-    const cleanup = () => socket.off('getPlan', listener);
-    socket.once('disconnect', cleanup);
-    return () => {
-        cleanup();
-        socket.off('disconnect', cleanup);
-    };
+    return () => socket.off('getPlan', listener);
 }
 
 /**

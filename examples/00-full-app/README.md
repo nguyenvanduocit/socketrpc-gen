@@ -1,11 +1,11 @@
-# Socket RPC Example
+# Full Application Example
 
-This example demonstrates how to use the generated Socket.IO RPC code.
+This is a complete working application demonstrating how to use the generated Socket.IO RPC code in a real-world scenario. Unlike the other examples that only show interface definitions, this includes actual client and server implementations.
 
 ## Structure
 
 ```
-example/pkg/
+examples/00-full-app/pkg/
 ├── rpc/
 │   ├── define.ts              # Interface definitions (input)
 │   ├── client.generated.ts    # Generated client RPC functions
@@ -13,14 +13,18 @@ example/pkg/
 │   └── types.generated.ts     # Generated types
 ├── client/
 │   └── index.ts               # Client implementation
-└── server/
-    └── index.ts               # Server implementation
+├── server/
+│   └── index.ts               # Server implementation
+└── webapp/
+    └── main.ts                # Web application entry point
 ```
 
 ## Generate RPC Code
 
+From the project root:
+
 ```bash
-bun run index.ts ./example/pkg/rpc/define.ts
+bun run index.ts ./examples/00-full-app/pkg/rpc/define.ts
 ```
 
 ## Important: Proper Handler Cleanup

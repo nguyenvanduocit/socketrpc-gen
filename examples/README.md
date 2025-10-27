@@ -13,6 +13,25 @@ bun run ../../index.ts ./define.ts
 
 ## Examples Overview
 
+### [00-full-app](./00-full-app/) - Complete Working Application
+
+**What it demonstrates:**
+- Complete client/server implementation (not just interfaces)
+- Actual usage of generated RPC code in a real application
+- Project structure with webapp, client, and server packages
+- Practical patterns for production use
+
+**Complexity:** ⭐⭐ Intermediate
+
+**Use when:**
+- You want to see a complete working example
+- You're starting a new project and need a template
+- You want to understand how all pieces fit together
+
+**Note:** This is the most comprehensive example with actual implementation code.
+
+---
+
 ### [01-basic](./01-basic/) - Basic RPC Interfaces
 
 **What it demonstrates:**
@@ -84,13 +103,15 @@ framework.define.ts → platform.define.ts → define.ts
 
 ## Feature Comparison
 
-| Feature | Example 01 | Example 02 | Example 03 |
-|---------|-----------|-----------|-----------|
-| Interface Extension | ❌ | ✅ Single-level | ✅ Multi-level |
-| Multiple Files | ❌ | ✅ 2 files | ✅ 3 files |
-| Layered Architecture | ❌ | ✅ 2 layers | ✅ 3 layers |
-| Complexity | Low | Medium | High |
-| Real-world Use | Simple apps | Frameworks | Enterprise |
+| Feature | Example 00 | Example 01 | Example 02 | Example 03 |
+|---------|-----------|-----------|-----------|-----------|
+| Full Implementation | ✅ | ❌ | ❌ | ❌ |
+| Interface Extension | ✅ Multi-level | ❌ | ✅ Single-level | ✅ Multi-level |
+| Multiple Files | ✅ 3 files | ❌ | ✅ 2 files | ✅ 3 files |
+| Layered Architecture | ✅ 3 layers | ❌ | ✅ 2 layers | ✅ 3 layers |
+| Client/Server Code | ✅ | ❌ | ❌ | ❌ |
+| Complexity | Medium | Low | Medium | High |
+| Real-world Use | Production app | Simple apps | Frameworks | Enterprise |
 
 ## Common Patterns
 

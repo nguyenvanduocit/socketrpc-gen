@@ -10,8 +10,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `bun run index.ts <path> --watch` - Watch mode for automatic regeneration
 
 ### CLI Usage Examples
-- `bun run index.ts ./example/pkg/rpc/define.ts` - Generate RPC package from example
-- `bun run index.ts ./example/pkg/rpc/define.ts --package-name "my-rpc" --timeout 3000`
+- `bun run index.ts ./examples/00-full-app/pkg/rpc/define.ts` - Generate from full app example (complete working application)
+- `bun run index.ts ./examples/01-basic/define.ts` - Generate from basic example (simple interfaces)
+- `bun run index.ts ./examples/00-full-app/pkg/rpc/define.ts --package-name "my-rpc" --timeout 3000`
 
 ## Architecture
 

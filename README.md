@@ -15,7 +15,7 @@
 
 ## Getting Started
 
-The `example` directory in this repository is a great starting point and can be used as a template to bootstrap your own project. It demonstrates a practical project structure that you can adapt for your needs.
+The `examples/00-full-app` directory in this repository is a complete working application that can be used as a template to bootstrap your own project. It demonstrates a practical project structure with actual client/server implementation that you can adapt for your needs.
 
 ### 1. Define Your RPC Interface
 
@@ -67,10 +67,10 @@ bunx socketrpc-gen <path-to-your-interface-file> [options]
 For example:
 
 ```bash
-bunx socketrpc-gen ./example/pkg/rpc/define.ts
+bunx socketrpc-gen ./examples/00-full-app/pkg/rpc/define.ts
 ```
 
-This will generate a new package in the `example/pkg/rpc` directory containing the generated client and server code.
+This will generate a new package in the `examples/00-full-app/pkg/rpc` directory containing the generated client and server code.
 
 ## Example Usage
 

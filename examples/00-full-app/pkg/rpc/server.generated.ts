@@ -6,7 +6,7 @@
  * and set up handlers for SERVER functions (ServerFunctions interface)
  *
  * To regenerate this file, run:
- * bunx socketrpc-gen /Volumes/Data/Projects/socket-rpc/example/pkg/rpc/define.ts
+ * bunx socketrpc-gen /Volumes/Data/Projects/socket-rpc/examples/00-full-app/pkg/rpc/define.ts
  */
 
 import type { Socket } from "socket.io";

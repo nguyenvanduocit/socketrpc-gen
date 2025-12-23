@@ -5,8 +5,8 @@
  *
  * Usage:
  *   const client = createRpcClient(socket);
- *   client.on.eventName(async (data) => { ... });
- *   client.call.methodName(args);
+ *   client.handle.eventName(async (data) => { ... });
+ *   client.server.methodName(args);
  *   client.dispose();
  *
  * To regenerate: bunx socketrpc-gen /Volumes/Data/Projects/socket-rpc/examples/00-full-app/pkg/rpc/define.ts
@@ -17,20 +17,20 @@ import type { RpcError } from "./types.generated";
 import type { GetPlanRequest, Plan } from "./define";
 
 // === RPCCLIENT INTERFACE ===
-/** Handler registration methods for client */
-export interface RpcClientOn {
-    /** Register handler for 'showError' events from server */
+/** Handler registration methods - implement these to handle calls from server */
+export interface RpcClientHandle {
+    /** Register handler for 'showError' - called by server */
     showError: (handler: (error: Error) => Promise<void | RpcError>) => void;
-    /** Register handler for 'updateDiscoveriedUrls' events from server */
+    /** Register handler for 'updateDiscoveriedUrls' - called by server */
     updateDiscoveriedUrls: (handler: (url: string) => Promise<void | RpcError>) => void;
-    /** Register handler for 'getBrowserVersion' events from server */
+    /** Register handler for 'getBrowserVersion' - called by server */
     getBrowserVersion: (handler: () => Promise<string | RpcError>) => void;
     /** Register handler for RPC errors */
     rpcError: (handler: (error: RpcError) => void) => void;
 }
 
-/** RPC call methods for client to call server */
-export interface RpcClientCall {
+/** Methods to call server */
+export interface RpcClientServer {
     /** Call server's 'generateText' method */
     generateText: (prompt: string, timeout?: number) => Promise<string | RpcError>;
     /** Call server's 'getPlan' method */
@@ -38,12 +38,12 @@ export interface RpcClientCall {
 }
 
 /** Client RPC interface with ergonomic API. */
-/** Use `.on` to register handlers, `.call` to make RPC calls, and `.dispose()` to cleanup. */
+/** Use `.handle` to register handlers, `.server` to call server methods, and `.dispose()` to cleanup. */
 export interface RpcClient {
-    /** Register handlers for incoming events */
-    readonly on: RpcClientOn;
+    /** Register handlers for calls from server */
+    readonly handle: RpcClientHandle;
     /** Call server methods */
-    readonly call: RpcClientCall;
+    readonly server: RpcClientServer;
     /** The underlying socket instance */
     readonly socket: Socket;
     /** Whether this instance has been disposed */
@@ -60,19 +60,19 @@ export interface RpcClient {
  * ```typescript
  * const client = createRpcClient(socket);
  *
- * // Register handlers
- * client.on.showError(async (error) => {
+ * // Register handlers for calls from server
+ * client.handle.showError(async (error) => {
  *   // handle event
  * });
  *
- * // Make calls
- * const result = await client.call.generateText(...);
+ * // Call server methods
+ * const result = await client.server.generateText(...);
  *
  * // Cleanup when done
  * client.dispose();
  * ```
  * @param socket The socket instance
- * @returns RpcClient instance with .on, .call, and .dispose()
+ * @returns RpcClient instance with .handle, .server, and .dispose()
  */
 export function createRpcClient(socket: Socket): RpcClient {
     const unsubscribers: Array<() => void> = [];
@@ -82,7 +82,7 @@ export function createRpcClient(socket: Socket): RpcClient {
         if (_disposed) throw new Error('RpcClient has been disposed');
     };
 
-    const on: RpcClientOn = {
+    const handle: RpcClientHandle = {
         showError(handler: (error: Error) => Promise<void | RpcError>) {
             checkDisposed();
             const listener = async (error: Error) => {
@@ -137,7 +137,7 @@ export function createRpcClient(socket: Socket): RpcClient {
         }
     };
 
-    const call: RpcClientCall = {
+    const server: RpcClientServer = {
         async generateText(prompt: string, timeout: number = 5000): Promise<string | RpcError> {
             try {
                 return await socket.timeout(timeout).emitWithAck('generateText', prompt);
@@ -155,8 +155,8 @@ export function createRpcClient(socket: Socket): RpcClient {
     };
 
     return {
-        on,
-        call,
+        handle,
+        server,
         get socket() { return socket; },
         get disposed() { return _disposed; },
         dispose() {

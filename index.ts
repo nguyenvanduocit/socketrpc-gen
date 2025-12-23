@@ -799,7 +799,7 @@ function generateHandlerTypes(
 // ============================================
 
 /**
- * Generates the RpcClient or RpcServer interface with .on and .call namespaces
+ * Generates the RpcClient or RpcServer interface with .handle and .client/.server namespaces
  */
 function generateFactoryInterface(
   sourceFile: any,
@@ -810,38 +810,39 @@ function generateFactoryInterface(
 ): void {
   const interfaceName = side === 'client' ? 'RpcClient' : 'RpcServer';
   const targetSide = side === 'client' ? 'server' : 'client';
+  const targetSideCapitalized = targetSide.charAt(0).toUpperCase() + targetSide.slice(1);
 
   sourceFile.addStatements(`\n// === ${interfaceName.toUpperCase()} INTERFACE ===`);
 
-  // Generate the On handlers interface
-  const onInterfaceName = `${interfaceName}On`;
-  const onProperties = handleFunctions.map(func => {
+  // Generate the Handle interface (for registering handlers)
+  const handleInterfaceName = `${interfaceName}Handle`;
+  const handleProperties = handleFunctions.map(func => {
     const funcParams = func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ');
     const returnType = func.isVoid ? 'void | RpcError' : `${func.returnType} | RpcError`;
     const handlerType = `(handler: (${funcParams}) => Promise<${returnType}>) => void`;
     return {
       name: func.name,
       type: handlerType,
-      docs: [`Register handler for '${func.name}' events from ${targetSide}`]
+      docs: [`Register handler for '${func.name}' - called by ${targetSide}`]
     };
   });
 
-  // Add rpcError handler to On interface
-  onProperties.push({
+  // Add rpcError handler to Handle interface
+  handleProperties.push({
     name: 'rpcError',
     type: '(handler: (error: RpcError) => void) => void',
     docs: ['Register handler for RPC errors']
   });
 
   sourceFile.addInterface({
-    name: onInterfaceName,
+    name: handleInterfaceName,
     isExported: true,
-    docs: [`Handler registration methods for ${side}`],
-    properties: onProperties
+    docs: [`Handler registration methods - implement these to handle calls from ${targetSide}`],
+    properties: handleProperties
   });
 
-  // Generate the Call interface
-  const callInterfaceName = `${interfaceName}Call`;
+  // Generate the target-side Call interface (e.g., RpcClientServer or RpcServerClient)
+  const callInterfaceName = `${interfaceName}${targetSideCapitalized}`;
   const callProperties = callFunctions.map(func => {
     const funcParams = func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ');
     const timeoutParam = !func.isVoid ? (funcParams ? ', timeout?: number' : 'timeout?: number') : '';
@@ -857,7 +858,7 @@ function generateFactoryInterface(
   sourceFile.addInterface({
     name: callInterfaceName,
     isExported: true,
-    docs: [`RPC call methods for ${side} to call ${targetSide}`],
+    docs: [`Methods to call ${targetSide}`],
     properties: callProperties
   });
 
@@ -867,17 +868,17 @@ function generateFactoryInterface(
     isExported: true,
     docs: [
       `${side === 'client' ? 'Client' : 'Server'} RPC interface with ergonomic API.`,
-      `Use \`.on\` to register handlers, \`.call\` to make RPC calls, and \`.dispose()\` to cleanup.`
+      `Use \`.handle\` to register handlers, \`.${targetSide}\` to call ${targetSide} methods, and \`.dispose()\` to cleanup.`
     ],
     properties: [
       {
-        name: 'on',
-        type: onInterfaceName,
+        name: 'handle',
+        type: handleInterfaceName,
         isReadonly: true,
-        docs: ['Register handlers for incoming events']
+        docs: [`Register handlers for calls from ${targetSide}`]
       },
       {
-        name: 'call',
+        name: targetSide,
         type: callInterfaceName,
         isReadonly: true,
         docs: [`Call ${targetSide} methods`]
@@ -918,6 +919,8 @@ function generateFactoryFunction(
 ): void {
   const factoryName = side === 'client' ? 'createRpcClient' : 'createRpcServer';
   const interfaceName = side === 'client' ? 'RpcClient' : 'RpcServer';
+  const targetSide = side === 'client' ? 'server' : 'client';
+  const targetSideCapitalized = targetSide.charAt(0).toUpperCase() + targetSide.slice(1);
 
   sourceFile.addStatements(`\n// === FACTORY FUNCTION ===`);
 
@@ -935,8 +938,8 @@ function generateFactoryFunction(
     writer.writeLine('};');
     writer.writeLine('');
 
-    // Build the on object with inlined handler logic
-    writer.writeLine('const on: ' + interfaceName + 'On = {');
+    // Build the handle object with inlined handler logic
+    writer.writeLine('const handle: ' + interfaceName + 'Handle = {');
     writer.indent(() => {
       handleFunctions.forEach((func, index) => {
         const funcParams = func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ');
@@ -1010,8 +1013,8 @@ function generateFactoryFunction(
     writer.writeLine('};');
     writer.writeLine('');
 
-    // Build the call object with inlined call logic
-    writer.writeLine('const call: ' + interfaceName + 'Call = {');
+    // Build the target-side call object (e.g., "server" for client, "client" for server)
+    writer.writeLine(`const ${targetSide}: ` + interfaceName + targetSideCapitalized + ' = {');
     writer.indent(() => {
       callFunctions.forEach((func, index) => {
         const funcParams = func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`);
@@ -1053,8 +1056,8 @@ function generateFactoryFunction(
     // Return the interface object
     writer.writeLine('return {');
     writer.indent(() => {
-      writer.writeLine('on,');
-      writer.writeLine('call,');
+      writer.writeLine('handle,');
+      writer.writeLine(`${targetSide},`);
       writer.writeLine('get socket() { return socket; },');
       writer.writeLine('get disposed() { return _disposed; },');
       writer.writeLine('dispose() {');
@@ -1077,10 +1080,10 @@ function generateFactoryFunction(
     statements: bodyWriter,
     docs: [{
       kind: StructureKind.JSDoc,
-      description: `Create a ${side} RPC instance.\n\nUsage:\n\`\`\`typescript\nconst ${side} = ${factoryName}(socket);\n\n// Register handlers\n${side}.on.${handleFunctions[0]?.name || 'eventName'}(async (${handleFunctions[0]?.params.map(p => p.name).join(', ') || 'data'}) => {\n  // handle event\n});\n\n// Make calls\n${callFunctions[0] ? (callFunctions[0].isVoid ? `${side}.call.${callFunctions[0].name}(${callFunctions[0].params.map(p => '...').join(', ')});` : `const result = await ${side}.call.${callFunctions[0].name}(${callFunctions[0].params.map(p => '...').join(', ')});`) : '// ...'}\n\n// Cleanup when done\n${side}.dispose();\n\`\`\``,
+      description: `Create a ${side} RPC instance.\n\nUsage:\n\`\`\`typescript\nconst ${side} = ${factoryName}(socket);\n\n// Register handlers for calls from ${targetSide}\n${side}.handle.${handleFunctions[0]?.name || 'eventName'}(async (${handleFunctions[0]?.params.map(p => p.name).join(', ') || 'data'}) => {\n  // handle event\n});\n\n// Call ${targetSide} methods\n${callFunctions[0] ? (callFunctions[0].isVoid ? `${side}.${targetSide}.${callFunctions[0].name}(${callFunctions[0].params.map(p => '...').join(', ')});` : `const result = await ${side}.${targetSide}.${callFunctions[0].name}(${callFunctions[0].params.map(p => '...').join(', ')});`) : '// ...'}\n\n// Cleanup when done\n${side}.dispose();\n\`\`\``,
       tags: [
         { kind: StructureKind.JSDocTag, tagName: 'param', text: 'socket The socket instance' },
-        { kind: StructureKind.JSDocTag, tagName: 'returns', text: `${interfaceName} instance with .on, .call, and .dispose()` }
+        { kind: StructureKind.JSDocTag, tagName: 'returns', text: `${interfaceName} instance with .handle, .${targetSide}, and .dispose()` }
       ]
     }]
   });
@@ -1131,6 +1134,8 @@ function generateSideFile(
   const inputFilename = path.basename(config.inputPath, path.extname(config.inputPath));
   addCustomTypeImports(sideFile, [...clientFunctions, ...serverFunctions], inputFile, inputFilename);
 
+  const targetSide = side === 'client' ? 'server' : 'client';
+
   // Add file header comment
   sideFile.insertText(0, `/**
  * ⚠️  DO NOT EDIT THIS FILE - IT IS AUTO-GENERATED ⚠️
@@ -1139,8 +1144,8 @@ function generateSideFile(
  *
  * Usage:
  *   const ${side} = create${side === 'client' ? 'RpcClient' : 'RpcServer'}(socket);
- *   ${side}.on.eventName(async (data) => { ... });
- *   ${side}.call.methodName(args);
+ *   ${side}.handle.eventName(async (data) => { ... });
+ *   ${side}.${targetSide}.methodName(args);
  *   ${side}.dispose();
  *
  * To regenerate: bunx socketrpc-gen ${config.inputPath}
@@ -1314,13 +1319,13 @@ function logGenerationSummary(
 
   console.log('\n📋 Client API (createRpcClient):');
   if (serverFunctions.length > 0) {
-    console.log('   .on handlers:');
+    console.log('   .handle (from server):');
     serverFunctions.forEach(f => {
       console.log(`     - ${f.name}(${f.params.map(p => p.name).join(', ')})`);
     });
   }
   if (clientFunctions.length > 0) {
-    console.log('   .call methods:');
+    console.log('   .server (to server):');
     clientFunctions.forEach(f => {
       console.log(`     - ${f.name}(${f.params.map(p => p.name).join(', ')}) -> ${f.returnType}`);
     });
@@ -1328,13 +1333,13 @@ function logGenerationSummary(
 
   console.log('\n📋 Server API (createRpcServer):');
   if (clientFunctions.length > 0) {
-    console.log('   .on handlers:');
+    console.log('   .handle (from client):');
     clientFunctions.forEach(f => {
       console.log(`     - ${f.name}(${f.params.map(p => p.name).join(', ')})`);
     });
   }
   if (serverFunctions.length > 0) {
-    console.log('   .call methods:');
+    console.log('   .client (to client):');
     serverFunctions.forEach(f => {
       console.log(`     - ${f.name}(${f.params.map(p => p.name).join(', ')}) -> ${f.returnType}`);
     });

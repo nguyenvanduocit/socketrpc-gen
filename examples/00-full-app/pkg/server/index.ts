@@ -7,10 +7,7 @@ import { join } from "path"; // Added for getAppVersion
 // import '@shopify/shopify-api/adapters/node';
 import type { ExtendedSocket } from "./type.d";
 import { authMiddleware } from "./auth";
-import {
-  handleGenerateText,
-  showError,
-} from "@socket-rpc/rpc/server.generated";
+import { createRpcServer } from "@socket-rpc/rpc/server.generated";
 import type { RpcError } from "@socket-rpc/rpc";
 
 // === UTILITY FUNCTIONS ===
@@ -170,12 +167,16 @@ io.on("connection", async (socket: ExtendedSocket) => {
     // Log successful client connection with user context
     console.log(`Client connected: ${socket.id} (User: ${socket.data.userId})`);
 
+    // Create RPC server instance with new ergonomic API
+    const server = createRpcServer(socket);
+
     /**
      * Handle client disconnection
-     * Logs when a client disconnects for monitoring purposes
+     * Logs when a client disconnects and cleans up RPC handlers
      */
     socket.on("disconnect", (reason) => {
       console.log(`Client disconnected: ${socket.id} (Reason: ${reason})`);
+      server.dispose(); // Clean up RPC handlers
     });
 
     /**
@@ -194,34 +195,28 @@ io.on("connection", async (socket: ExtendedSocket) => {
      * @param prompt - Input text prompt from the client
      * @returns Promise<string> - Generated text response
      */
-    handleGenerateText(
-      socket,
-      async (prompt: string): Promise<string | RpcError> => {
-        try {
-          if (prompt === "error") {
-            return { message: "expected error" } as RpcError;
-          } else if (prompt === "throw") {
-            throw new Error("unexpected error");
-          }
-          return "test success";
-        } catch (rpcError) {
-          logError(
-            `RPC handleGenerateText (Socket: ${socket.id}, User: ${socket.data.userId})`,
-            rpcError
-          );
-          // Optionally, send a generic error back to the client via showError or similar
-          showError(
-            socket,
-            new Error("An unexpected error occurred processing your request.")
-          );
-          // Re-throw if you want the RPC framework to potentially handle it further or if it's critical
-          // For now, we'll return an RpcError structure if possible or just log.
-          return {
-            message: "Internal server error during text generation.",
-          } as RpcError;
+    server.handle.generateText(async (prompt): Promise<string | RpcError> => {
+      try {
+        if (prompt === "error") {
+          return { message: "expected error" } as RpcError;
+        } else if (prompt === "throw") {
+          throw new Error("unexpected error");
         }
+        return "test success";
+      } catch (rpcError) {
+        logError(
+          `RPC generateText (Socket: ${socket.id}, User: ${socket.data.userId})`,
+          rpcError
+        );
+        // Notify the client about the error via server.client.showError
+        server.client.showError(
+          new Error("An unexpected error occurred processing your request.")
+        );
+        return {
+          message: "Internal server error during text generation.",
+        } as RpcError;
       }
-    );
+    });
   } catch (connectionError) {
     logError(
       `Socket connection event handler (Socket: ${socket.id})`,

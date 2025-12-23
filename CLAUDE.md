@@ -39,7 +39,7 @@ This is a TypeScript code generator for Socket.IO RPC packages. The tool generat
 
 ### Generated Code Structure
 - **Factory functions** - `createRpcClient()` / `createRpcServer()` for ergonomic API
-- **Client/Server interfaces** - `RpcClient`, `RpcServer` with `.on`, `.call`, `.dispose()`
+- **Client/Server interfaces** - `RpcClient`, `RpcServer` with `.handle`, `.server`/`.client`, `.dispose()`
 - **Error handling** - Built-in `RpcError` type and `isRpcError()` guard
 - **Type safety** - Full TypeScript support with generated type imports
 
@@ -59,17 +59,17 @@ import { createRpcClient } from './rpc/client.generated';
 
 const client = createRpcClient(socket);
 
-// Register handlers with client.on.*
-client.on.showError(async (error) => {
+// Register handlers with client.handle.* (for calls FROM server)
+client.handle.showError(async (error) => {
   console.error('Error:', error);
 });
 
-client.on.onProgress(async (current, total) => {
+client.handle.onProgress(async (current, total) => {
   console.log(`Progress: ${current}/${total}`);
 });
 
-// Make RPC calls with client.call.*
-const result = await client.call.generateText("Hello!");
+// Make RPC calls with client.server.* (calls TO server)
+const result = await client.server.generateText("Hello!");
 
 // Single cleanup call
 client.dispose();
@@ -82,10 +82,10 @@ import { createRpcServer } from './rpc/server.generated';
 io.on('connection', (socket) => {
   const server = createRpcServer(socket);
 
-  // Register handlers with server.on.*
-  server.on.generateText(async (prompt) => {
-    // Can call client methods via server.call.*
-    server.call.showError(new Error("Something happened"));
+  // Register handlers with server.handle.* (for calls FROM client)
+  server.handle.generateText(async (prompt) => {
+    // Call client methods via server.client.* (calls TO client)
+    server.client.showError(new Error("Something happened"));
     return "Generated: " + prompt;
   });
 
@@ -106,11 +106,11 @@ export default {
     const client = createRpcClient(socket);
 
     // Register handlers - no manual tracking needed
-    client.on.showError(async (error) => {
+    client.handle.showError(async (error) => {
       console.error('Error:', error);
     });
 
-    client.on.onProgress(async (current, total) => {
+    client.handle.onProgress(async (current, total) => {
       console.log(`Progress: ${current}/${total}`);
     });
 
@@ -136,7 +136,7 @@ function MyComponent() {
     const client = createRpcClient(socket);
     clientRef.current = client;
 
-    client.on.showError(async (error) => {
+    client.handle.showError(async (error) => {
       console.error('Error:', error);
     });
 
@@ -150,17 +150,35 @@ function MyComponent() {
 ### API Structure
 
 ```typescript
-// RpcClient / RpcServer interface
+// RpcClient interface
 interface RpcClient {
-  on: {
-    // Register handlers for server-to-client events
+  handle: {
+    // Register handlers for server-to-client calls
     showError: (handler: (error: Error) => Promise<void>) => void;
     askQuestion: (handler: (question: string) => Promise<string>) => void;
     // ...
   };
-  call: {
+  server: {
     // Call server methods
     generateText: (prompt: string, timeout?: number) => Promise<string | RpcError>;
+    // ...
+  };
+  socket: Socket;      // Underlying socket
+  disposed: boolean;   // Whether disposed
+  dispose(): void;     // Cleanup all handlers
+}
+
+// RpcServer interface
+interface RpcServer {
+  handle: {
+    // Register handlers for client-to-server calls
+    generateText: (handler: (prompt: string) => Promise<string>) => void;
+    // ...
+  };
+  client: {
+    // Call client methods
+    showError: (error: Error) => void;
+    askQuestion: (question: string, timeout?: number) => Promise<string | RpcError>;
     // ...
   };
   socket: Socket;      // Underlying socket

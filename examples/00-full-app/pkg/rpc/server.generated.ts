@@ -5,8 +5,8 @@
  *
  * Usage:
  *   const server = createRpcServer(socket);
- *   server.on.eventName(async (data) => { ... });
- *   server.call.methodName(args);
+ *   server.handle.eventName(async (data) => { ... });
+ *   server.client.methodName(args);
  *   server.dispose();
  *
  * To regenerate: bunx socketrpc-gen /Volumes/Data/Projects/socket-rpc/examples/00-full-app/pkg/rpc/define.ts
@@ -17,18 +17,18 @@ import type { RpcError } from "./types.generated";
 import type { GetPlanRequest, Plan } from "./define";
 
 // === RPCSERVER INTERFACE ===
-/** Handler registration methods for server */
-export interface RpcServerOn {
-    /** Register handler for 'generateText' events from client */
+/** Handler registration methods - implement these to handle calls from client */
+export interface RpcServerHandle {
+    /** Register handler for 'generateText' - called by client */
     generateText: (handler: (prompt: string) => Promise<string | RpcError>) => void;
-    /** Register handler for 'getPlan' events from client */
+    /** Register handler for 'getPlan' - called by client */
     getPlan: (handler: (request: GetPlanRequest) => Promise<Plan | RpcError>) => void;
     /** Register handler for RPC errors */
     rpcError: (handler: (error: RpcError) => void) => void;
 }
 
-/** RPC call methods for server to call client */
-export interface RpcServerCall {
+/** Methods to call client */
+export interface RpcServerClient {
     /** Call client's 'showError' method */
     showError: (error: Error) => void;
     /** Call client's 'updateDiscoveriedUrls' method */
@@ -38,12 +38,12 @@ export interface RpcServerCall {
 }
 
 /** Server RPC interface with ergonomic API. */
-/** Use `.on` to register handlers, `.call` to make RPC calls, and `.dispose()` to cleanup. */
+/** Use `.handle` to register handlers, `.client` to call client methods, and `.dispose()` to cleanup. */
 export interface RpcServer {
-    /** Register handlers for incoming events */
-    readonly on: RpcServerOn;
+    /** Register handlers for calls from client */
+    readonly handle: RpcServerHandle;
     /** Call client methods */
-    readonly call: RpcServerCall;
+    readonly client: RpcServerClient;
     /** The underlying socket instance */
     readonly socket: Socket;
     /** Whether this instance has been disposed */
@@ -60,19 +60,19 @@ export interface RpcServer {
  * ```typescript
  * const server = createRpcServer(socket);
  *
- * // Register handlers
- * server.on.generateText(async (prompt) => {
+ * // Register handlers for calls from client
+ * server.handle.generateText(async (prompt) => {
  *   // handle event
  * });
  *
- * // Make calls
- * server.call.showError(...);
+ * // Call client methods
+ * server.client.showError(...);
  *
  * // Cleanup when done
  * server.dispose();
  * ```
  * @param socket The socket instance
- * @returns RpcServer instance with .on, .call, and .dispose()
+ * @returns RpcServer instance with .handle, .client, and .dispose()
  */
 export function createRpcServer(socket: Socket): RpcServer {
     const unsubscribers: Array<() => void> = [];
@@ -82,7 +82,7 @@ export function createRpcServer(socket: Socket): RpcServer {
         if (_disposed) throw new Error('RpcServer has been disposed');
     };
 
-    const on: RpcServerOn = {
+    const handle: RpcServerHandle = {
         generateText(handler: (prompt: string) => Promise<string | RpcError>) {
             checkDisposed();
             const listener = async (prompt: string, callback: (result: string | RpcError) => void) => {
@@ -119,7 +119,7 @@ export function createRpcServer(socket: Socket): RpcServer {
         }
     };
 
-    const call: RpcServerCall = {
+    const client: RpcServerClient = {
         showError(error: Error) {
             socket.emit('showError', error);
         },
@@ -136,8 +136,8 @@ export function createRpcServer(socket: Socket): RpcServer {
     };
 
     return {
-        on,
-        call,
+        handle,
+        client,
         get socket() { return socket; },
         get disposed() { return _disposed; },
         dispose() {

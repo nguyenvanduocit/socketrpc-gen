@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v2.2.0...v3.0.0) (2025-12-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* Standalone functions removed. Use factory pattern instead.
+
+### Features
+
+* ergonomic factory API with .on/.call/.dispose pattern ([37c117d](https://github.com/nguyenvanduocit/socketrpc-gen/commit/37c117d8c85d39b14adc8d230e18b373d4f6b7b6))
+* **examples:** add Zod integration example for AI framework compatibility ([045b379](https://github.com/nguyenvanduocit/socketrpc-gen/commit/045b379fa6750477ed76f3249e5db8415975c8cf))
+
 ## [2.2.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v2.1.0...v2.2.0) (2025-10-27)
 
 

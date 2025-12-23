@@ -617,4 +617,52 @@ socket.on("connect", () => {
 });
 ```
 
-This pattern enables real-time data streaming while maintaining type safety. The server uses fire-and-forget functions to initiate streams, then uses client callback functions to progressively send data chunks. 
+This pattern enables real-time data streaming while maintaining type safety. The server uses fire-and-forget functions to initiate streams, then uses client callback functions to progressively send data chunks.
+
+### Using with Zod (AI Framework Compatibility)
+
+Many AI frameworks like [Claude Agent SDK](https://github.com/anthropics/anthropic-sdk-python) use [Zod](https://zod.dev/) for structured outputs. If you're already using Zod schemas in your AI workflow, you can reuse them with socket-rpc by inferring TypeScript types from your schemas.
+
+**Example: Reusing Zod Schemas from AI Framework**
+
+```typescript
+// pkg/rpc/define.ts
+import { z } from 'zod';
+
+// Your existing Zod schemas (already defined for AI structured outputs)
+export const PlanSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string()
+});
+
+export const GenerateRequestSchema = z.object({
+  prompt: z.string(),
+  maxTokens: z.number().optional()
+});
+
+export const GenerateResponseSchema = z.object({
+  text: z.string(),
+  usage: z.object({
+    inputTokens: z.number(),
+    outputTokens: z.number()
+  })
+});
+
+// Infer TypeScript types from Zod schemas
+export type Plan = z.infer<typeof PlanSchema>;
+export type GenerateRequest = z.infer<typeof GenerateRequestSchema>;
+export type GenerateResponse = z.infer<typeof GenerateResponseSchema>;
+
+// Use inferred types in your interfaces
+interface ServerFunctions {
+  generate: (request: GenerateRequest) => GenerateResponse;
+  getPlan: (planId: string) => Plan;
+}
+
+interface ClientFunctions {
+  onProgress: (progress: number) => void;
+}
+```
+
+This approach gives you a single source of truth: your Zod schemas define the structure, and TypeScript types are derived from them. No duplication, full compatibility with both your AI framework and socket-rpc

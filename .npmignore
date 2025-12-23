@@ -1,4 +1,16 @@
-example
+# Examples (keep light - no node_modules)
+examples/**/node_modules/
+examples/**/bun.lock
+
+# Dev files
+.claude/
+.cursor*
+.github/
+.vscode/
 .gitignore
-.github
-.vscode
+*.log
+.DS_Store
+
+# Build artifacts
+dist/
+*.tgz

@@ -101,17 +101,55 @@ framework.define.ts → platform.define.ts → define.ts
 
 ---
 
+### [04-zod-integration](./04-zod-integration/) - Zod Schema Compatibility
+
+**What it demonstrates:**
+- Using Zod schemas with socket-rpc
+- Inferring TypeScript types from Zod using `z.infer<>`
+- Compatibility with AI frameworks (Claude Agent SDK, etc.)
+- Single source of truth: Zod schemas define structure, types are derived
+
+**Complexity:** ⭐⭐ Intermediate
+
+**Use when:**
+- Integrating with AI frameworks that use Zod for structured outputs
+- You already have Zod schemas and want to reuse them
+- You prefer schema-first development
+
+**Functions generated:** 8 total (5 server, 3 client)
+
+**Key pattern:**
+```typescript
+// Define schema once
+export const TaskSchema = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  status: z.enum(['pending', 'completed'])
+});
+
+// Infer type from schema
+export type Task = z.infer<typeof TaskSchema>;
+
+// Use in interface
+interface ServerFunctions {
+  getTask: (id: string) => Task;
+}
+```
+
+---
+
 ## Feature Comparison
 
-| Feature | Example 00 | Example 01 | Example 02 | Example 03 |
-|---------|-----------|-----------|-----------|-----------|
-| Full Implementation | ✅ | ❌ | ❌ | ❌ |
-| Interface Extension | ✅ Multi-level | ❌ | ✅ Single-level | ✅ Multi-level |
-| Multiple Files | ✅ 3 files | ❌ | ✅ 2 files | ✅ 3 files |
-| Layered Architecture | ✅ 3 layers | ❌ | ✅ 2 layers | ✅ 3 layers |
-| Client/Server Code | ✅ | ❌ | ❌ | ❌ |
-| Complexity | Medium | Low | Medium | High |
-| Real-world Use | Production app | Simple apps | Frameworks | Enterprise |
+| Feature | Example 00 | Example 01 | Example 02 | Example 03 | Example 04 |
+|---------|-----------|-----------|-----------|-----------|-----------|
+| Full Implementation | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Interface Extension | ✅ Multi-level | ❌ | ✅ Single-level | ✅ Multi-level | ❌ |
+| Zod Schemas | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Multiple Files | ✅ 3 files | ❌ | ✅ 2 files | ✅ 3 files | ❌ |
+| Layered Architecture | ✅ 3 layers | ❌ | ✅ 2 layers | ✅ 3 layers | ❌ |
+| Client/Server Code | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Complexity | Medium | Low | Medium | High | Medium |
+| Real-world Use | Production app | Simple apps | Frameworks | Enterprise | AI Integration |
 
 ## Common Patterns
 
@@ -164,6 +202,12 @@ bun run ../../index.ts ./define.ts
 # Test example 03
 cd ../03-multi-level-extension
 bun run ../../index.ts ./define.ts
+
+# Test example 04 (requires zod)
+cd ../04-zod-integration
+bun add zod  # if not already installed
+bun run ../../index.ts ./define.ts
+bun run test.ts  # verify types work
 ```
 
 Each should generate without errors and produce `client.generated.ts`, `server.generated.ts`, and `types.generated.ts`.

@@ -1,5 +1,16 @@
 # Changelog
 
+## [4.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v3.0.0...v4.0.0) (2025-12-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* API naming changed for clarity
+
+### Features
+
+* rename API from .on/.call to .handle/.server/.client ([195d24a](https://github.com/nguyenvanduocit/socketrpc-gen/commit/195d24a58839dc48c120221309823a16e2dd5ed2))
+
 ## [3.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v2.2.0...v3.0.0) (2025-12-23)
 
 

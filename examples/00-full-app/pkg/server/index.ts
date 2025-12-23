@@ -168,7 +168,7 @@ io.on("connection", async (socket: ExtendedSocket) => {
     console.log(`Client connected: ${socket.id} (User: ${socket.data.userId})`);
 
     // Create RPC server instance with new ergonomic API
-    const server = createRpcServer(socket);
+    const rpc = createRpcServer(socket);
 
     /**
      * Handle client disconnection
@@ -176,7 +176,7 @@ io.on("connection", async (socket: ExtendedSocket) => {
      */
     socket.on("disconnect", (reason) => {
       console.log(`Client disconnected: ${socket.id} (Reason: ${reason})`);
-      server.dispose(); // Clean up RPC handlers
+      rpc.dispose(); // Clean up RPC handlers
     });
 
     /**
@@ -195,7 +195,7 @@ io.on("connection", async (socket: ExtendedSocket) => {
      * @param prompt - Input text prompt from the client
      * @returns Promise<string> - Generated text response
      */
-    server.handle.generateText(async (prompt): Promise<string | RpcError> => {
+    rpc.handle.generateText(async (prompt): Promise<string | RpcError> => {
       try {
         if (prompt === "error") {
           return { message: "expected error" } as RpcError;
@@ -208,8 +208,8 @@ io.on("connection", async (socket: ExtendedSocket) => {
           `RPC generateText (Socket: ${socket.id}, User: ${socket.data.userId})`,
           rpcError
         );
-        // Notify the client about the error via server.client.showError
-        server.client.showError(
+        // Notify the client about the error via rpc.client.showError
+        rpc.client.showError(
           new Error("An unexpected error occurred processing your request.")
         );
         return {

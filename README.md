@@ -95,7 +95,7 @@ sequenceDiagram
 
     title socket-rpc: Bidirectional Communication Flow
 
-    ClientApp->>GenClient: 1. Calls `client.server.generateText("hello")`
+    ClientApp->>GenClient: 1. Calls `rpc.server.generateText("hello")`
     activate GenClient
     GenClient->>GenServer: 2. Emits "rpc:generateText" event over network
     deactivate GenClient
@@ -106,7 +106,7 @@ sequenceDiagram
 
     Note over ServerApp: Server logic decides to<br/>call a function on the client
 
-    ServerApp->>GenServer: 4. Calls `server.client.askQuestion("Favorite color?")`
+    ServerApp->>GenServer: 4. Calls `rpc.client.askQuestion("Favorite color?")`
     GenServer->>GenClient: 5. Emits "rpc:askQuestion" event over network
     deactivate GenServer
 
@@ -149,12 +149,12 @@ const httpServer = createServer();
 const io = new Server(httpServer);
 
 io.on("connection", async (socket) => {
-  const server = createRpcServer(socket);
+  const rpc = createRpcServer(socket);
 
   // Handle the `generateText` RPC call from the client
-  server.handle.generateText(async (prompt): Promise<string | RpcError> => {
+  rpc.handle.generateText(async (prompt): Promise<string | RpcError> => {
     // Example of server calling a client function and waiting for a response
-    const clientResponse = await server.client.askQuestion("What is your favorite color?");
+    const clientResponse = await rpc.client.askQuestion("What is your favorite color?");
 
     if (isRpcError(clientResponse)) {
       console.error("Client returned an error:", clientResponse.message);
@@ -163,7 +163,7 @@ io.on("connection", async (socket) => {
     }
 
     // Example of server calling a fire-and-forget client function
-    server.client.showError(new Error("This is a test error from the server!"));
+    rpc.client.showError(new Error("This is a test error from the server!"));
 
     if (prompt === "error") {
       return {
@@ -195,23 +195,23 @@ import { createRpcClient } from "@socket-rpc/rpc/client.generated";
 import { isRpcError } from "@socket-rpc/rpc";
 
 const socket = io("http://localhost:8080");
-const client = createRpcClient(socket);
+const rpc = createRpcClient(socket);
 
-// Register handlers using client.handle.* (for calls FROM server)
-client.handle.showError(async (error) => {
+// Register handlers using rpc.handle.* (for calls FROM server)
+rpc.handle.showError(async (error) => {
   console.error("Server sent an error:", error.message);
 });
 
-client.handle.askQuestion(async (question) => {
+rpc.handle.askQuestion(async (question) => {
   console.log(`Server asked: ${question}`);
   return "blue"; // Answer the server's question
 });
 
-// Make RPC calls using client.server.* (calls TO server)
+// Make RPC calls using rpc.server.* (calls TO server)
 socket.on("connect", async () => {
   console.log("Connected to the server!");
 
-  const response = await client.server.generateText("Hello, server!");
+  const response = await rpc.server.generateText("Hello, server!");
 
   if (isRpcError(response)) {
     console.error("RPC Error:", response);
@@ -222,7 +222,7 @@ socket.on("connect", async () => {
 
 // Clean up when done (e.g., on page unload)
 window.addEventListener("beforeunload", () => {
-  client.dispose();
+  rpc.dispose();
 });
 ```
 
@@ -263,21 +263,21 @@ import { createRpcClient } from './rpc/client.generated';
 
 export default {
   setup() {
-    const client = createRpcClient(socket);
+    const rpc = createRpcClient(socket);
 
     // Register handlers - no manual cleanup tracking needed!
-    client.handle.showError(async (error) => {
+    rpc.handle.showError(async (error) => {
       console.error('Error:', error);
     });
 
-    client.handle.askQuestion(async (question) => {
+    rpc.handle.askQuestion(async (question) => {
       return 'blue';
     });
 
     // Single cleanup call handles everything
-    onBeforeUnmount(() => client.dispose());
+    onBeforeUnmount(() => rpc.dispose());
 
-    return { client };
+    return { rpc };
   }
 }
 ```
@@ -290,23 +290,23 @@ import { socket } from './socket';
 import { createRpcClient, RpcClient } from './rpc/client.generated';
 
 function MyComponent() {
-  const clientRef = useRef<RpcClient>();
+  const rpcRef = useRef<RpcClient>();
 
   useEffect(() => {
-    const client = createRpcClient(socket);
-    clientRef.current = client;
+    const rpc = createRpcClient(socket);
+    rpcRef.current = rpc;
 
     // Register handlers
-    client.handle.showError(async (error) => {
+    rpc.handle.showError(async (error) => {
       console.error('Error:', error);
     });
 
-    client.handle.askQuestion(async (question) => {
+    rpc.handle.askQuestion(async (question) => {
       return 'blue';
     });
 
     // Cleanup on unmount
-    return () => client.dispose();
+    return () => rpc.dispose();
   }, []);
 
   return <div>My Component</div>;
@@ -319,18 +319,18 @@ function MyComponent() {
 import { socket } from './socket';
 import { createRpcClient } from './rpc/client.generated';
 
-const client = createRpcClient(socket);
+const rpc = createRpcClient(socket);
 
 // Register handlers (for calls FROM server)
-client.handle.showError(async (error) => {
+rpc.handle.showError(async (error) => {
   console.error('Error:', error);
 });
 
 // Make calls (TO server)
-const result = await client.server.generateText("Hello!");
+const result = await rpc.server.generateText("Hello!");
 
 // Clean up when done
-client.dispose();
+rpc.dispose();
 ```
 
 ## API Reference
@@ -368,11 +368,11 @@ Creates an ergonomic server RPC interface.
 The `socket-rpc` tool works by parsing your TypeScript interface file and generating a set of functions and handlers that wrap the `socket.io` communication layer.
 
 -   For each function in your `ServerFunctions` interface, it generates:
-    -   A handler registration method on `server.handle.<functionName>`
-    -   A call method on `client.server.<functionName>`
+    -   A handler registration method on `rpc.handle.<functionName>` (server-side)
+    -   A call method on `rpc.server.<functionName>` (client-side)
 -   For each function in your `ClientFunctions` interface, it generates:
-    -   A handler registration method on `client.handle.<functionName>`
-    -   A call method on `server.client.<functionName>`
+    -   A handler registration method on `rpc.handle.<functionName>` (client-side)
+    -   A call method on `rpc.client.<functionName>` (server-side)
 
 This approach provides a clean and type-safe way to communicate between your client and server, without having to write any boilerplate `socket.io` code yourself. It automatically handles acknowledgments for functions that return values and uses fire-and-forget for `void` functions.
 
@@ -413,9 +413,9 @@ interface ServerFunctions {
 import { createRpcServer } from './rpc/server.generated';
 import { RpcError } from './rpc/types.generated';
 
-const server = createRpcServer(socket);
+const rpc = createRpcServer(socket);
 
-server.handle.updateRotation(async (settings): Promise<RotationSettings | RpcError> => {
+rpc.handle.updateRotation(async (settings): Promise<RotationSettings | RpcError> => {
   // Validate settings
   if (!settings.interval || settings.interval < 1000) {
     return {
@@ -438,9 +438,9 @@ server.handle.updateRotation(async (settings): Promise<RotationSettings | RpcErr
 import { createRpcClient } from './rpc/client.generated';
 import { isRpcError } from './rpc/types.generated';
 
-const client = createRpcClient(socket);
+const rpc = createRpcClient(socket);
 
-const result = await client.server.updateRotation({ interval: 5000, enabled: true });
+const result = await rpc.server.updateRotation({ interval: 5000, enabled: true });
 
 if (isRpcError(result)) {
   // Handle error
@@ -475,7 +475,7 @@ interface ServerFunctions {
 }
 
 // client usage
-const data = await client.server.getData("user-123");
+const data = await rpc.server.getData("user-123");
 ```
 
 **Asynchronous Pattern (Fire-and-Forget with Callback)**
@@ -524,11 +524,11 @@ interface ClientFunctions {
 import { createRpcServer } from "@socket-rpc/rpc/server.generated";
 
 io.on("connection", (socket) => {
-  const server = createRpcServer(socket);
+  const rpc = createRpcServer(socket);
   let streamInterval: NodeJS.Timeout | null = null;
 
   // Handle stream start request
-  server.handle.startDataStream(async (topic) => {
+  rpc.handle.startDataStream(async (topic) => {
     console.log(`Starting stream for topic: ${topic}`);
 
     let chunkId = 0;
@@ -540,12 +540,12 @@ io.on("connection", (socket) => {
         streamInterval = null;
 
         // Notify client that stream is complete
-        server.client.onStreamComplete(maxChunks);
+        rpc.client.onStreamComplete(maxChunks);
         return;
       }
 
       // Send stream chunk to client
-      server.client.onStreamChunk({
+      rpc.client.onStreamChunk({
         id: chunkId++,
         content: `Data chunk for ${topic} #${chunkId}`,
         timestamp: Date.now()
@@ -554,7 +554,7 @@ io.on("connection", (socket) => {
   });
 
   // Handle stream stop request
-  server.handle.stopDataStream(async () => {
+  rpc.handle.stopDataStream(async () => {
     if (streamInterval) {
       clearInterval(streamInterval);
       streamInterval = null;
@@ -565,7 +565,7 @@ io.on("connection", (socket) => {
   // Clean up on disconnect
   socket.on("disconnect", () => {
     if (streamInterval) clearInterval(streamInterval);
-    server.dispose();
+    rpc.dispose();
   });
 });
 ```
@@ -576,33 +576,33 @@ io.on("connection", (socket) => {
 import { createRpcClient } from "@socket-rpc/rpc/client.generated";
 
 const socket = io("http://localhost:8080");
-const client = createRpcClient(socket);
+const rpc = createRpcClient(socket);
 
 // Set up stream handlers (for calls FROM server)
-client.handle.onStreamChunk(async (chunk) => {
+rpc.handle.onStreamChunk(async (chunk) => {
   console.log(`Received chunk ${chunk.id}: ${chunk.content}`);
 });
 
-client.handle.onStreamComplete(async (totalChunks) => {
+rpc.handle.onStreamComplete(async (totalChunks) => {
   console.log(`Stream completed! Received ${totalChunks} chunks total.`);
 });
 
-client.handle.onStreamError(async (error) => {
+rpc.handle.onStreamError(async (error) => {
   console.error("Stream error:", error);
 });
 
 socket.on("connect", () => {
   // Start streaming data (call TO server)
-  client.server.startDataStream("user-activity");
+  rpc.server.startDataStream("user-activity");
 
   // Stop stream after 8 seconds
   setTimeout(() => {
-    client.server.stopDataStream();
+    rpc.server.stopDataStream();
   }, 8000);
 });
 
 // Cleanup
-window.addEventListener("beforeunload", () => client.dispose());
+window.addEventListener("beforeunload", () => rpc.dispose());
 ```
 
 This pattern enables real-time data streaming while maintaining type safety. The server uses fire-and-forget functions to initiate streams, then uses client callback functions to progressively send data chunks.

@@ -57,22 +57,22 @@ The generator creates `createRpcClient()` and `createRpcServer()` factory functi
 ```typescript
 import { createRpcClient } from './rpc/client.generated';
 
-const client = createRpcClient(socket);
+const rpc = createRpcClient(socket);
 
-// Register handlers with client.handle.* (for calls FROM server)
-client.handle.showError(async (error) => {
+// Register handlers with rpc.handle.* (for calls FROM server)
+rpc.handle.showError(async (error) => {
   console.error('Error:', error);
 });
 
-client.handle.onProgress(async (current, total) => {
+rpc.handle.onProgress(async (current, total) => {
   console.log(`Progress: ${current}/${total}`);
 });
 
-// Make RPC calls with client.server.* (calls TO server)
-const result = await client.server.generateText("Hello!");
+// Make RPC calls with rpc.server.* (calls TO server)
+const result = await rpc.server.generateText("Hello!");
 
 // Single cleanup call
-client.dispose();
+rpc.dispose();
 ```
 
 **Server Side:**
@@ -80,17 +80,17 @@ client.dispose();
 import { createRpcServer } from './rpc/server.generated';
 
 io.on('connection', (socket) => {
-  const server = createRpcServer(socket);
+  const rpc = createRpcServer(socket);
 
-  // Register handlers with server.handle.* (for calls FROM client)
-  server.handle.generateText(async (prompt) => {
-    // Call client methods via server.client.* (calls TO client)
-    server.client.showError(new Error("Something happened"));
+  // Register handlers with rpc.handle.* (for calls FROM client)
+  rpc.handle.generateText(async (prompt) => {
+    // Call client methods via rpc.client.* (calls TO client)
+    rpc.client.showError(new Error("Something happened"));
     return "Generated: " + prompt;
   });
 
   // Cleanup on disconnect
-  socket.on('disconnect', () => server.dispose());
+  socket.on('disconnect', () => rpc.dispose());
 });
 ```
 
@@ -103,21 +103,21 @@ import { createRpcClient } from './rpc/client.generated';
 
 export default {
   setup() {
-    const client = createRpcClient(socket);
+    const rpc = createRpcClient(socket);
 
     // Register handlers - no manual tracking needed
-    client.handle.showError(async (error) => {
+    rpc.handle.showError(async (error) => {
       console.error('Error:', error);
     });
 
-    client.handle.onProgress(async (current, total) => {
+    rpc.handle.onProgress(async (current, total) => {
       console.log(`Progress: ${current}/${total}`);
     });
 
     // Single cleanup call handles everything
-    onBeforeUnmount(() => client.dispose());
+    onBeforeUnmount(() => rpc.dispose());
 
-    return { client };
+    return { rpc };
   }
 }
 ```
@@ -130,17 +130,17 @@ import { socket } from './socket';
 import { createRpcClient, RpcClient } from './rpc/client.generated';
 
 function MyComponent() {
-  const clientRef = useRef<RpcClient>();
+  const rpcRef = useRef<RpcClient>();
 
   useEffect(() => {
-    const client = createRpcClient(socket);
-    clientRef.current = client;
+    const rpc = createRpcClient(socket);
+    rpcRef.current = rpc;
 
-    client.handle.showError(async (error) => {
+    rpc.handle.showError(async (error) => {
       console.error('Error:', error);
     });
 
-    return () => client.dispose();
+    return () => rpc.dispose();
   }, []);
 
   return <div>My Component</div>;

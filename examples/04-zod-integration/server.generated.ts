@@ -173,3 +173,128 @@ export function handleRpcError(socket: Socket, handler: (socket: Socket, error: 
     socket.on('rpcError', listener);
     return () => socket.off('rpcError', listener);
 }
+
+// === RPCSERVER INTERFACE ===
+/** Handler registration methods for server */
+export interface RpcServerOn {
+    /** Register handler for 'generate' events from client */
+    generate: (handler: (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }) => Promise<{ text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; } | RpcError>) => void;
+    /** Register handler for 'createTask' events from client */
+    createTask: (handler: (request: { title: string; description?: string | undefined; }) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError>) => void;
+    /** Register handler for 'getTask' events from client */
+    getTask: (handler: (taskId: string) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError>) => void;
+    /** Register handler for 'listTasks' events from client */
+    listTasks: (handler: () => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[] | RpcError>) => void;
+    /** Register handler for 'cancelTask' events from client */
+    cancelTask: (handler: (taskId: string) => Promise<void | RpcError>) => void;
+    /** Register handler for RPC errors */
+    rpcError: (handler: (error: RpcError) => void) => void;
+}
+
+/** RPC call methods for server to call client */
+export interface RpcServerCall {
+    /** Call client's 'onProgress' method */
+    onProgress: (update: { taskId: string; progress: number; message?: string | undefined; }) => void;
+    /** Call client's 'onTaskComplete' method */
+    onTaskComplete: (task: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }) => void;
+    /** Call client's 'onError' method */
+    onError: (message: string, code: string) => void;
+}
+
+/** Server RPC interface with ergonomic API. */
+/** Use `.on` to register handlers, `.call` to make RPC calls, and `.dispose()` to cleanup. */
+export interface RpcServer {
+    /** Register handlers for incoming events */
+    readonly on: RpcServerOn;
+    /** Call client methods */
+    readonly call: RpcServerCall;
+    /** The underlying socket instance */
+    readonly socket: Socket;
+    /** Whether this instance has been disposed */
+    readonly disposed: boolean;
+    /** Cleanup all registered handlers. Call this when done (e.g., in onBeforeUnmount or useEffect cleanup). */
+    dispose(): void;
+}
+
+// === FACTORY FUNCTION ===
+/**
+ * Create an ergonomic server RPC interface.
+ *
+ * Usage:
+ * ```typescript
+ * const server = createRpcServer(socket);
+ *
+ * // Register handlers
+ * server.on.generate((request) => {
+ *   // handle event
+ * });
+ *
+ * // Make calls
+ * server.call.onProgress(...);
+ *
+ * // Cleanup when done
+ * server.dispose();
+ * ```
+ * @param socket The socket instance
+ * @returns RpcServer instance with .on, .call, and .dispose()
+ */
+export function createRpcServer(socket: Socket): RpcServer {
+    const unsubscribers: Array<() => void> = [];
+    let _disposed = false;
+
+    const checkDisposed = () => {
+        if (_disposed) throw new Error('RpcServer has been disposed');
+    };
+
+    const on = {
+        generate(handler: (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }) => Promise<{ text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; } | RpcError>) {
+            checkDisposed();
+            unsubscribers.push(handleGenerate(socket, async (socket, request) => handler(request)));
+        },
+        createTask(handler: (request: { title: string; description?: string | undefined; }) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError>) {
+            checkDisposed();
+            unsubscribers.push(handleCreateTask(socket, async (socket, request) => handler(request)));
+        },
+        getTask(handler: (taskId: string) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError>) {
+            checkDisposed();
+            unsubscribers.push(handleGetTask(socket, async (socket, taskId) => handler(taskId)));
+        },
+        listTasks(handler: () => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[] | RpcError>) {
+            checkDisposed();
+            unsubscribers.push(handleListTasks(socket, async (socket) => handler()));
+        },
+        cancelTask(handler: (taskId: string) => Promise<void | RpcError>) {
+            checkDisposed();
+            unsubscribers.push(handleCancelTask(socket, async (socket, taskId) => handler(taskId)));
+        },
+        rpcError(handler: (error: RpcError) => void) {
+            checkDisposed();
+            unsubscribers.push(handleRpcError(socket, async (_socket, error) => handler(error)));
+        }
+    };
+
+    const call = {
+        onProgress(update: { taskId: string; progress: number; message?: string | undefined; }) {
+            onProgress(socket, update);
+        },
+        onTaskComplete(task: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }) {
+            onTaskComplete(socket, task);
+        },
+        onError(message: string, code: string) {
+            onError(socket, message, code);
+        }
+    };
+
+    return {
+        on,
+        call,
+        get socket() { return socket; },
+        get disposed() { return _disposed; },
+        dispose() {
+            if (_disposed) return;
+            _disposed = true;
+            unsubscribers.forEach(fn => fn());
+            unsubscribers.length = 0;
+        }
+    };
+}

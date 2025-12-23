@@ -8,6 +8,7 @@
 
 -   **Type-Safe:** Full static type checking for your RPC calls, powered by TypeScript.
 -   **Auto-generation:** Automatically generates client and server code from a single TypeScript interface definition.
+-   **Ergonomic API:** Clean `client.on.*` / `client.call.*` pattern with automatic cleanup.
 -   **Unopinionated:** Generates only the type-safe bindings, leaving you in full control of your `socket.io` setup.
 -   **Bidirectional Communication:** Supports both client-to-server and server-to-client RPC calls.
 -   **Simple to Use:** Get started with a single command.
@@ -94,18 +95,18 @@ sequenceDiagram
 
     title socket-rpc: Bidirectional Communication Flow
 
-    ClientApp->>GenClient: 1. Calls `generateText("hello")`
+    ClientApp->>GenClient: 1. Calls `client.call.generateText("hello")`
     activate GenClient
     GenClient->>GenServer: 2. Emits "rpc:generateText" event over network
     deactivate GenClient
-    
+
     activate GenServer
     GenServer->>ServerApp: 3. Invokes your `generateText` handler
     activate ServerApp
 
     Note over ServerApp: Server logic decides to<br/>call a function on the client
-    
-    ServerApp->>GenServer: 4. Calls `askQuestion("Favorite color?")`
+
+    ServerApp->>GenServer: 4. Calls `server.call.askQuestion("Favorite color?")`
     GenServer->>GenClient: 5. Emits "rpc:askQuestion" event over network
     deactivate GenServer
 
@@ -114,15 +115,15 @@ sequenceDiagram
     activate ClientApp
     ClientApp-->>GenClient: 7. Returns answer: "blue"
     deactivate ClientApp
-    
+
     GenClient-->>GenServer: 8. Sends response ("blue") back to server
     deactivate GenClient
 
     activate GenServer
     GenServer-->>ServerApp: 9. `askQuestion` promise resolves with "blue"
-    
+
     Note over ServerApp: Server finishes its logic and<br/>returns the final result
-    
+
     ServerApp-->>GenServer: 10. Returns final result for `generateText`
     deactivate ServerApp
     GenServer-->>GenClient: 11. Sends final result back to client
@@ -135,58 +136,47 @@ sequenceDiagram
 
 ### Server
 
-Implement the server-side functions and use the generated handlers to process client requests.
+Use `createRpcServer()` to create an ergonomic server instance with `.on` for handlers and `.call` for client methods.
 
 ```typescript
 // pkg/server/index.ts
 import { createServer } from "http";
 import { Server } from "socket.io";
-import {
-  handleGenerateText,
-  showError,
-  askQuestion,
-} from "@socket-rpc/rpc/server.generated";
-import { RpcError, isRpcError } from "@socket-rpc/rpc";
+import { createRpcServer } from "@socket-rpc/rpc/server.generated";
+import { isRpcError, RpcError } from "@socket-rpc/rpc";
 
 const httpServer = createServer();
 const io = new Server(httpServer);
 
 io.on("connection", async (socket) => {
+  const server = createRpcServer(socket);
+
   // Handle the `generateText` RPC call from the client
-  handleGenerateText(
-    socket,
-    async (prompt: string): Promise<string | RpcError> => {
-      // Example of server calling a client function and waiting for a response
-      try {
-        const clientResponse = await askQuestion(
-          socket,
-          "What is your favorite color?",
-          3000
-        ); // 3s timeout
-        if (isRpcError(clientResponse)) {
-          console.error("Client returned an error:", clientResponse.message);
-        } else {
-          console.log(`Client's favorite color is: ${clientResponse}`);
-        }
-      } catch (e) {
-        console.error("Did not get a response from client for askQuestion", e);
-      }
+  server.on.generateText(async (prompt): Promise<string | RpcError> => {
+    // Example of server calling a client function and waiting for a response
+    const clientResponse = await server.call.askQuestion("What is your favorite color?");
 
-      // Example of server calling a fire-and-forget client function
-      showError(socket, new Error("This is a test error from the server!"));
-
-      if (prompt === "error") {
-        return {
-          code: "custom_error",
-          message: "This is a custom error",
-          data: { a: 1 },
-        } as RpcError;
-      } else if (prompt === "throw") {
-        throw new Error("This is a thrown error");
-      }
-      return `Server received: ${prompt}`;
+    if (isRpcError(clientResponse)) {
+      console.error("Client returned an error:", clientResponse.message);
+    } else {
+      console.log(`Client's favorite color is: ${clientResponse}`);
     }
-  );
+
+    // Example of server calling a fire-and-forget client function
+    server.call.showError(new Error("This is a test error from the server!"));
+
+    if (prompt === "error") {
+      return {
+        code: "custom_error",
+        message: "This is a custom error",
+        data: { a: 1 },
+      } as RpcError;
+    } else if (prompt === "throw") {
+      throw new Error("This is a thrown error");
+    }
+
+    return `Server received: ${prompt}`;
+  });
 });
 
 httpServer.listen(8080, () => {
@@ -196,40 +186,33 @@ httpServer.listen(8080, () => {
 
 ### Client
 
-Use the generated functions to call server methods and handle server-initiated calls.
+Use `createRpcClient()` to create an ergonomic client instance. Call `.dispose()` to clean up all handlers.
 
 ```typescript
 // pkg/client/index.ts
 import { io } from "socket.io-client";
-import {
-  generateText,
-  handleShowError,
-  handleAskQuestion,
-} from "@socket-rpc/rpc/client.generated";
+import { createRpcClient } from "@socket-rpc/rpc/client.generated";
 import { isRpcError } from "@socket-rpc/rpc";
 
 const socket = io("http://localhost:8080");
+const client = createRpcClient(socket);
 
-// --- Best Practice: Đăng ký các trình xử lý sự kiện MỘT LẦN ở đây ---
-
-// Xử lý RPC `showError` từ server
-handleShowError(socket, async (error: Error): Promise<void> => {
+// Register handlers using client.on.*
+client.on.showError(async (error) => {
   console.error("Server sent an error:", error.message);
 });
 
-// Xử lý RPC `askQuestion` từ server (và gửi trả lời)
-handleAskQuestion(socket, async (question: string) => {
+client.on.askQuestion(async (question) => {
   console.log(`Server asked: ${question}`);
-  return "blue"; // Trả lời câu hỏi của server
+  return "blue"; // Answer the server's question
 });
 
-
-// --- Logic chạy mỗi khi kết nối thành công (hoặc kết nối lại) sẽ nằm trong này ---
+// Make RPC calls using client.call.*
 socket.on("connect", async () => {
   console.log("Connected to the server!");
 
-  // Gọi hàm `generateText` trên server
-  const response = await generateText(socket, "Hello, server!", 10000); // 10s timeout
+  const response = await client.call.generateText("Hello, server!");
+
   if (isRpcError(response)) {
     console.error("RPC Error:", response);
   } else {
@@ -237,8 +220,9 @@ socket.on("connect", async () => {
   }
 });
 
-socket.on("disconnect", (reason) => {
-    console.log(`Disconnected from server: ${reason}`);
+// Clean up when done (e.g., on page unload)
+window.addEventListener("beforeunload", () => {
+  client.dispose();
 });
 ```
 
@@ -266,37 +250,34 @@ socketrpc-gen <path> [options]
 -   `-w, --watch`: Watch for changes in the definition file and regenerate automatically. (Default: false)
 -   `-h, --help`: Display help for command.
 
-## Handler Cleanup Best Practices
+## Framework Integration
 
-**Important:** All handler functions return an unsubscribe function that **MUST** be called to clean up event listeners. Failing to do so will cause memory leaks and `MaxListenersExceededWarning` errors, especially with HMR (Hot Module Replacement) in development.
+The generated `createRpcClient()` / `createRpcServer()` returns an object with a `.dispose()` method that cleans up all handlers. Integrate this with your framework's lifecycle hooks.
 
 ### Vue 3 Composition API
 
 ```typescript
-import { onMounted, onBeforeUnmount } from 'vue';
+import { onBeforeUnmount } from 'vue';
 import { socket } from './socket';
-import { handleShowError, handleAskQuestion } from './rpc/client.generated';
+import { createRpcClient } from './rpc/client.generated';
 
 export default {
   setup() {
-    const unsubscribers: Array<() => void> = [];
+    const client = createRpcClient(socket);
 
-    onMounted(() => {
-      // Register all handlers and store unsubscribe functions
-      unsubscribers.push(
-        handleShowError(socket, async (socket, error) => {
-          console.error('Error:', error);
-        }),
-        handleAskQuestion(socket, async (socket, question) => {
-          return 'blue';
-        })
-      );
+    // Register handlers - no manual cleanup tracking needed!
+    client.on.showError(async (error) => {
+      console.error('Error:', error);
     });
 
-    onBeforeUnmount(() => {
-      // Clean up all handlers when component unmounts
-      unsubscribers.forEach(fn => fn());
+    client.on.askQuestion(async (question) => {
+      return 'blue';
     });
+
+    // Single cleanup call handles everything
+    onBeforeUnmount(() => client.dispose());
+
+    return { client };
   }
 }
 ```
@@ -304,28 +285,28 @@ export default {
 ### React Hooks
 
 ```typescript
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { socket } from './socket';
-import { handleShowError, handleAskQuestion } from './rpc/client.generated';
+import { createRpcClient, RpcClient } from './rpc/client.generated';
 
 function MyComponent() {
+  const clientRef = useRef<RpcClient>();
+
   useEffect(() => {
-    const unsubscribers: Array<() => void> = [];
+    const client = createRpcClient(socket);
+    clientRef.current = client;
 
     // Register handlers
-    unsubscribers.push(
-      handleShowError(socket, async (socket, error) => {
-        console.error('Error:', error);
-      }),
-      handleAskQuestion(socket, async (socket, question) => {
-        return 'blue';
-      })
-    );
+    client.on.showError(async (error) => {
+      console.error('Error:', error);
+    });
 
-    // Cleanup function
-    return () => {
-      unsubscribers.forEach(fn => fn());
-    };
+    client.on.askQuestion(async (question) => {
+      return 'blue';
+    });
+
+    // Cleanup on unmount
+    return () => client.dispose();
   }, []);
 
   return <div>My Component</div>;
@@ -336,43 +317,62 @@ function MyComponent() {
 
 ```typescript
 import { socket } from './socket';
-import { handleShowError } from './rpc/client.generated';
+import { createRpcClient } from './rpc/client.generated';
 
-// Register handler and store unsubscribe function
-const unsubscribe = handleShowError(socket, async (socket, error) => {
+const client = createRpcClient(socket);
+
+// Register handlers
+client.on.showError(async (error) => {
   console.error('Error:', error);
 });
 
-// When you want to clean up (e.g., before page navigation)
-function cleanup() {
-  unsubscribe();
-}
+// Make calls
+const result = await client.call.generateText("Hello!");
+
+// Clean up when done
+client.dispose();
 ```
 
-### Why Cleanup is Important
+## API Reference
 
-Without proper cleanup:
-- ❌ Event listeners accumulate on every component mount/remount
-- ❌ HMR (Hot Module Replacement) causes listener stacking
-- ❌ You'll see `MaxListenersExceededWarning: Possible EventTarget memory leak detected`
-- ❌ Memory leaks in long-running applications
+### `createRpcClient(socket)`
 
-With proper cleanup:
-- ✅ Handlers are removed when components unmount
-- ✅ No listener accumulation during HMR
-- ✅ No memory leaks
-- ✅ Clean, predictable behavior
+Creates an ergonomic client RPC interface.
+
+**Returns:** `RpcClient` with the following properties:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `on` | `RpcClientOn` | Register handlers for server-to-client events |
+| `call` | `RpcClientCall` | Call server methods |
+| `socket` | `Socket` | The underlying socket instance |
+| `disposed` | `boolean` | Whether this instance has been disposed |
+| `dispose()` | `() => void` | Cleanup all registered handlers |
+
+### `createRpcServer(socket)`
+
+Creates an ergonomic server RPC interface.
+
+**Returns:** `RpcServer` with the following properties:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `on` | `RpcServerOn` | Register handlers for client-to-server events |
+| `call` | `RpcServerCall` | Call client methods |
+| `socket` | `Socket` | The underlying socket instance |
+| `disposed` | `boolean` | Whether this instance has been disposed |
+| `dispose()` | `() => void` | Cleanup all registered handlers |
 
 ## How It Works
 
 The `socket-rpc` tool works by parsing your TypeScript interface file and generating a set of functions and handlers that wrap the `socket.io` communication layer.
 
 -   For each function in your `ServerFunctions` interface, it generates:
-    -   A `handle<FunctionName>` function for the server to process incoming requests.
-    -   A `<functionName>` function for the client to call the server method.
+    -   A handler registration method on `server.on.<functionName>`
+    -   A call method on `client.call.<functionName>`
 -   For each function in your `ClientFunctions` interface, it generates:
-    -   A `handle<FunctionName>` function for the client to process incoming requests from the server.
-    -   A `<functionName>` function for the server to call the client method.
+    -   A handler registration method on `client.on.<functionName>`
+    -   A call method on `server.call.<functionName>`
 
 This approach provides a clean and type-safe way to communicate between your client and server, without having to write any boilerplate `socket.io` code yourself. It automatically handles acknowledgments for functions that return values and uses fire-and-forget for `void` functions.
 
@@ -382,10 +382,10 @@ This approach provides a clean and type-safe way to communicate between your cli
 
 **Important:** The generated code automatically handles errors through the `RpcError` type. You **don't need** to create wrapper response types with error fields.
 
-#### ❌ Anti-Pattern: Don't Do This
+#### Bad: Don't Do This
 
 ```typescript
-// ❌ WRONG - Don't create wrapper types with error fields
+// WRONG - Don't create wrapper types with error fields
 export type UpdateRotationResponse = {
   success: boolean;
   rotation?: RotationSettings;
@@ -397,10 +397,10 @@ interface ServerFunctions {
 }
 ```
 
-#### ✅ Correct Pattern: Use RpcError
+#### Good: Use RpcError
 
 ```typescript
-// ✅ CORRECT - Return the actual data type, errors are handled by RpcError
+// CORRECT - Return the actual data type, errors are handled by RpcError
 interface ServerFunctions {
   updateRotation: (settings: RotationSettings) => RotationSettings;
 }
@@ -410,42 +410,37 @@ interface ServerFunctions {
 
 **Server Handler:**
 ```typescript
-import { handleUpdateRotation } from './rpc/server.generated';
+import { createRpcServer } from './rpc/server.generated';
 import { RpcError } from './rpc/types.generated';
 
-handleUpdateRotation(socket, async (socket, settings): Promise<RotationSettings | RpcError> => {
-  try {
-    // Validate settings
-    if (!settings.interval || settings.interval < 1000) {
-      return {
-        code: 'INVALID_INTERVAL',
-        message: 'Interval must be at least 1000ms',
-        data: { minInterval: 1000 }
-      } as RpcError;
-    }
+const server = createRpcServer(socket);
 
-    // Update rotation settings
-    const updatedRotation = await db.updateRotation(settings);
-
-    // Return success data directly
-    return updatedRotation;
-  } catch (error) {
-    // Handle unexpected errors
+server.on.updateRotation(async (settings): Promise<RotationSettings | RpcError> => {
+  // Validate settings
+  if (!settings.interval || settings.interval < 1000) {
     return {
-      code: 'INTERNAL_ERROR',
-      message: error instanceof Error ? error.message : 'Unknown error',
-      data: undefined
+      code: 'INVALID_INTERVAL',
+      message: 'Interval must be at least 1000ms',
+      data: { minInterval: 1000 }
     } as RpcError;
   }
+
+  // Update rotation settings
+  const updatedRotation = await db.updateRotation(settings);
+
+  // Return success data directly
+  return updatedRotation;
 });
 ```
 
 **Client Usage:**
 ```typescript
-import { updateRotation } from './rpc/client.generated';
+import { createRpcClient } from './rpc/client.generated';
 import { isRpcError } from './rpc/types.generated';
 
-const result = await updateRotation(socket, { interval: 5000, enabled: true });
+const client = createRpcClient(socket);
+
+const result = await client.call.updateRotation({ interval: 5000, enabled: true });
 
 if (isRpcError(result)) {
   // Handle error
@@ -461,12 +456,12 @@ if (isRpcError(result)) {
 
 #### Benefits of Using RpcError
 
-✅ **Cleaner Types**: Your function signatures return actual data types, not wrapper objects
-✅ **Built-in Type Guards**: Use `isRpcError()` to check for errors
-✅ **Consistent Error Structure**: All errors have `code`, `message`, and optional `data`
-✅ **Type Safety**: TypeScript knows the exact type after `isRpcError()` check
-✅ **Error Codes**: Attach custom error codes for better error handling
-✅ **Additional Context**: Include extra data in the `data` field for debugging
+- **Cleaner Types**: Your function signatures return actual data types, not wrapper objects
+- **Built-in Type Guards**: Use `isRpcError()` to check for errors
+- **Consistent Error Structure**: All errors have `code`, `message`, and optional `data`
+- **Type Safety**: TypeScript knows the exact type after `isRpcError()` check
+- **Error Codes**: Attach custom error codes for better error handling
+- **Additional Context**: Include extra data in the `data` field for debugging
 
 ### Sync vs Async Communication
 
@@ -478,6 +473,9 @@ Use this pattern when you need to wait for a response:
 interface ServerFunctions {
   getData: (id: string) => UserData;
 }
+
+// client usage
+const data = await client.call.getData("user-123");
 ```
 
 **Asynchronous Pattern (Fire-and-Forget with Callback)**
@@ -523,59 +521,51 @@ interface ClientFunctions {
 **2. Server Implementation**
 
 ```typescript
-import { 
-  handleStartDataStream, 
-  handleStopDataStream,
-  onStreamChunk,
-  onStreamComplete,
-  onStreamError 
-} from "@socket-rpc/rpc/server.generated";
+import { createRpcServer } from "@socket-rpc/rpc/server.generated";
 
 io.on("connection", (socket) => {
+  const server = createRpcServer(socket);
   let streamInterval: NodeJS.Timeout | null = null;
-  
+
   // Handle stream start request
-  handleStartDataStream(socket, async (topic: string) => {
+  server.on.startDataStream(async (topic) => {
     console.log(`Starting stream for topic: ${topic}`);
-    
+
     let chunkId = 0;
     const maxChunks = 10;
-    
-    streamInterval = setInterval(async () => {
+
+    streamInterval = setInterval(() => {
       if (chunkId >= maxChunks) {
         clearInterval(streamInterval!);
         streamInterval = null;
-        
+
         // Notify client that stream is complete
-        onStreamComplete(socket, maxChunks);
+        server.call.onStreamComplete(maxChunks);
         return;
       }
-      
+
       // Send stream chunk to client
-      const chunk: StreamChunk = {
+      server.call.onStreamChunk({
         id: chunkId++,
         content: `Data chunk for ${topic} #${chunkId}`,
         timestamp: Date.now()
-      };
-      
-      onStreamChunk(socket, chunk);
-    }, 500); // Send chunk every 500ms
+      });
+    }, 500);
   });
-  
+
   // Handle stream stop request
-  handleStopDataStream(socket, async () => {
+  server.on.stopDataStream(async () => {
     if (streamInterval) {
       clearInterval(streamInterval);
       streamInterval = null;
       console.log("Stream stopped by client request");
     }
   });
-  
+
   // Clean up on disconnect
   socket.on("disconnect", () => {
-    if (streamInterval) {
-      clearInterval(streamInterval);
-    }
+    if (streamInterval) clearInterval(streamInterval);
+    server.dispose();
   });
 });
 ```
@@ -583,38 +573,36 @@ io.on("connection", (socket) => {
 **3. Client Implementation**
 
 ```typescript
-import { 
-  startDataStream, 
-  stopDataStream,
-  handleOnStreamChunk,
-  handleOnStreamComplete,
-  handleOnStreamError 
-} from "@socket-rpc/rpc/client.generated";
+import { createRpcClient } from "@socket-rpc/rpc/client.generated";
 
 const socket = io("http://localhost:8080");
+const client = createRpcClient(socket);
 
 // Set up stream handlers
-handleOnStreamChunk(socket, async (chunk: StreamChunk) => {
-  console.log(`Received chunk ${chunk.id}: ${chunk.content} at ${new Date(chunk.timestamp).toISOString()}`);
+client.on.onStreamChunk(async (chunk) => {
+  console.log(`Received chunk ${chunk.id}: ${chunk.content}`);
 });
 
-handleOnStreamComplete(socket, async (totalChunks: number) => {
+client.on.onStreamComplete(async (totalChunks) => {
   console.log(`Stream completed! Received ${totalChunks} chunks total.`);
 });
 
-handleOnStreamError(socket, async (error: string) => {
+client.on.onStreamError(async (error) => {
   console.error("Stream error:", error);
 });
 
 socket.on("connect", () => {
   // Start streaming data
-  startDataStream(socket, "user-activity");
-  
+  client.call.startDataStream("user-activity");
+
   // Stop stream after 8 seconds
   setTimeout(() => {
-    stopDataStream(socket);
+    client.call.stopDataStream();
   }, 8000);
 });
+
+// Cleanup
+window.addEventListener("beforeunload", () => client.dispose());
 ```
 
 This pattern enables real-time data streaming while maintaining type safety. The server uses fire-and-forget functions to initiate streams, then uses client callback functions to progressively send data chunks.
@@ -665,4 +653,5 @@ interface ClientFunctions {
 }
 ```
 
-This approach gives you a single source of truth: your Zod schemas define the structure, and TypeScript types are derived from them. No duplication, full compatibility with both your AI framework and socket-rpc
+This approach gives you a single source of truth: your Zod schemas define the structure, and TypeScript types are derived from them. No duplication, full compatibility with both your AI framework and socket-rpc.
+

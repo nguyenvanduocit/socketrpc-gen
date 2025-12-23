@@ -173,3 +173,126 @@ export function handleRpcError(socket: Socket, handler: (socket: Socket, error: 
     socket.on('rpcError', listener);
     return () => socket.off('rpcError', listener);
 }
+
+// === RPCCLIENT INTERFACE ===
+/** Handler registration methods for client */
+export interface RpcClientOn {
+    /** Register handler for 'onProgress' events from server */
+    onProgress: (handler: (update: { taskId: string; progress: number; message?: string | undefined; }) => Promise<void | RpcError>) => void;
+    /** Register handler for 'onTaskComplete' events from server */
+    onTaskComplete: (handler: (task: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }) => Promise<void | RpcError>) => void;
+    /** Register handler for 'onError' events from server */
+    onError: (handler: (message: string, code: string) => Promise<void | RpcError>) => void;
+    /** Register handler for RPC errors */
+    rpcError: (handler: (error: RpcError) => void) => void;
+}
+
+/** RPC call methods for client to call server */
+export interface RpcClientCall {
+    /** Call server's 'generate' method */
+    generate: (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }, timeout?: number) => Promise<{ text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; } | RpcError>;
+    /** Call server's 'createTask' method */
+    createTask: (request: { title: string; description?: string | undefined; }, timeout?: number) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError>;
+    /** Call server's 'getTask' method */
+    getTask: (taskId: string, timeout?: number) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError>;
+    /** Call server's 'listTasks' method */
+    listTasks: (timeout?: number) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[] | RpcError>;
+    /** Call server's 'cancelTask' method */
+    cancelTask: (taskId: string) => void;
+}
+
+/** Client RPC interface with ergonomic API. */
+/** Use `.on` to register handlers, `.call` to make RPC calls, and `.dispose()` to cleanup. */
+export interface RpcClient {
+    /** Register handlers for incoming events */
+    readonly on: RpcClientOn;
+    /** Call server methods */
+    readonly call: RpcClientCall;
+    /** The underlying socket instance */
+    readonly socket: Socket;
+    /** Whether this instance has been disposed */
+    readonly disposed: boolean;
+    /** Cleanup all registered handlers. Call this when done (e.g., in onBeforeUnmount or useEffect cleanup). */
+    dispose(): void;
+}
+
+// === FACTORY FUNCTION ===
+/**
+ * Create an ergonomic client RPC interface.
+ *
+ * Usage:
+ * ```typescript
+ * const client = createRpcClient(socket);
+ *
+ * // Register handlers
+ * client.on.onProgress((update) => {
+ *   // handle event
+ * });
+ *
+ * // Make calls
+ * const result = await client.call.generate(...);
+ *
+ * // Cleanup when done
+ * client.dispose();
+ * ```
+ * @param socket The socket instance
+ * @returns RpcClient instance with .on, .call, and .dispose()
+ */
+export function createRpcClient(socket: Socket): RpcClient {
+    const unsubscribers: Array<() => void> = [];
+    let _disposed = false;
+
+    const checkDisposed = () => {
+        if (_disposed) throw new Error('RpcClient has been disposed');
+    };
+
+    const on = {
+        onProgress(handler: (update: { taskId: string; progress: number; message?: string | undefined; }) => Promise<void | RpcError>) {
+            checkDisposed();
+            unsubscribers.push(handleOnProgress(socket, async (socket, update) => handler(update)));
+        },
+        onTaskComplete(handler: (task: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }) => Promise<void | RpcError>) {
+            checkDisposed();
+            unsubscribers.push(handleOnTaskComplete(socket, async (socket, task) => handler(task)));
+        },
+        onError(handler: (message: string, code: string) => Promise<void | RpcError>) {
+            checkDisposed();
+            unsubscribers.push(handleOnError(socket, async (socket, message, code) => handler(message, code)));
+        },
+        rpcError(handler: (error: RpcError) => void) {
+            checkDisposed();
+            unsubscribers.push(handleRpcError(socket, async (_socket, error) => handler(error)));
+        }
+    };
+
+    const call = {
+        generate(request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }, timeout: number = 5000) {
+            return generate(socket, request, timeout);
+        },
+        createTask(request: { title: string; description?: string | undefined; }, timeout: number = 5000) {
+            return createTask(socket, request, timeout);
+        },
+        getTask(taskId: string, timeout: number = 5000) {
+            return getTask(socket, taskId, timeout);
+        },
+        listTasks(timeout: number = 5000) {
+            return listTasks(socket, timeout);
+        },
+        cancelTask(taskId: string) {
+            cancelTask(socket, taskId);
+        }
+    };
+
+    return {
+        on,
+        call,
+        get socket() { return socket; },
+        get disposed() { return _disposed; },
+        dispose() {
+            if (_disposed) return;
+            _disposed = true;
+            unsubscribers.forEach(fn => fn());
+            unsubscribers.length = 0;
+        }
+    };
+}

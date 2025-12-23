@@ -794,6 +794,298 @@ function generateHandlerTypes(
   });
 }
 
+// ============================================
+// FACTORY PATTERN GENERATION (Ergonomic API)
+// ============================================
+
+/**
+ * Generates the RpcClient or RpcServer interface with .on and .call namespaces
+ */
+function generateFactoryInterface(
+  sourceFile: any,
+  callFunctions: FunctionSignature[],
+  handleFunctions: FunctionSignature[],
+  side: 'client' | 'server',
+  config: ResolvedConfig
+): void {
+  const interfaceName = side === 'client' ? 'RpcClient' : 'RpcServer';
+  const targetSide = side === 'client' ? 'server' : 'client';
+
+  sourceFile.addStatements(`\n// === ${interfaceName.toUpperCase()} INTERFACE ===`);
+
+  // Generate the On handlers interface
+  const onInterfaceName = `${interfaceName}On`;
+  const onProperties = handleFunctions.map(func => {
+    const funcParams = func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ');
+    const returnType = func.isVoid ? 'void | RpcError' : `${func.returnType} | RpcError`;
+    const handlerType = `(handler: (${funcParams}) => Promise<${returnType}>) => void`;
+    return {
+      name: func.name,
+      type: handlerType,
+      docs: [`Register handler for '${func.name}' events from ${targetSide}`]
+    };
+  });
+
+  // Add rpcError handler to On interface
+  onProperties.push({
+    name: 'rpcError',
+    type: '(handler: (error: RpcError) => void) => void',
+    docs: ['Register handler for RPC errors']
+  });
+
+  sourceFile.addInterface({
+    name: onInterfaceName,
+    isExported: true,
+    docs: [`Handler registration methods for ${side}`],
+    properties: onProperties
+  });
+
+  // Generate the Call interface
+  const callInterfaceName = `${interfaceName}Call`;
+  const callProperties = callFunctions.map(func => {
+    const funcParams = func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ');
+    const timeoutParam = !func.isVoid ? (funcParams ? ', timeout?: number' : 'timeout?: number') : '';
+    const allParams = funcParams + timeoutParam;
+    const returnType = func.isVoid ? 'void' : `Promise<${func.returnType} | RpcError>`;
+    return {
+      name: func.name,
+      type: `(${allParams}) => ${returnType}`,
+      docs: [`Call ${targetSide}'s '${func.name}' method`]
+    };
+  });
+
+  sourceFile.addInterface({
+    name: callInterfaceName,
+    isExported: true,
+    docs: [`RPC call methods for ${side} to call ${targetSide}`],
+    properties: callProperties
+  });
+
+  // Generate main interface
+  sourceFile.addInterface({
+    name: interfaceName,
+    isExported: true,
+    docs: [
+      `${side === 'client' ? 'Client' : 'Server'} RPC interface with ergonomic API.`,
+      `Use \`.on\` to register handlers, \`.call\` to make RPC calls, and \`.dispose()\` to cleanup.`
+    ],
+    properties: [
+      {
+        name: 'on',
+        type: onInterfaceName,
+        isReadonly: true,
+        docs: ['Register handlers for incoming events']
+      },
+      {
+        name: 'call',
+        type: callInterfaceName,
+        isReadonly: true,
+        docs: [`Call ${targetSide} methods`]
+      },
+      {
+        name: 'socket',
+        type: 'Socket',
+        isReadonly: true,
+        docs: ['The underlying socket instance']
+      },
+      {
+        name: 'disposed',
+        type: 'boolean',
+        isReadonly: true,
+        docs: ['Whether this instance has been disposed']
+      }
+    ],
+    methods: [
+      {
+        name: 'dispose',
+        returnType: 'void',
+        docs: ['Cleanup all registered handlers. Call this when done (e.g., in onBeforeUnmount or useEffect cleanup).']
+      }
+    ]
+  });
+}
+
+/**
+ * Generates the createRpcClient or createRpcServer factory function
+ * This is the main API - all socket logic is inlined here
+ */
+function generateFactoryFunction(
+  sourceFile: any,
+  callFunctions: FunctionSignature[],
+  handleFunctions: FunctionSignature[],
+  side: 'client' | 'server',
+  config: ResolvedConfig
+): void {
+  const factoryName = side === 'client' ? 'createRpcClient' : 'createRpcServer';
+  const interfaceName = side === 'client' ? 'RpcClient' : 'RpcServer';
+
+  sourceFile.addStatements(`\n// === FACTORY FUNCTION ===`);
+
+  const bodyWriter = (writer: any) => {
+    // Track unsubscribers
+    writer.writeLine('const unsubscribers: Array<() => void> = [];');
+    writer.writeLine('let _disposed = false;');
+    writer.writeLine('');
+
+    // Helper to check disposed
+    writer.writeLine('const checkDisposed = () => {');
+    writer.indent(() => {
+      writer.writeLine(`if (_disposed) throw new Error('${interfaceName} has been disposed');`);
+    });
+    writer.writeLine('};');
+    writer.writeLine('');
+
+    // Build the on object with inlined handler logic
+    writer.writeLine('const on: ' + interfaceName + 'On = {');
+    writer.indent(() => {
+      handleFunctions.forEach((func, index) => {
+        const funcParams = func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`).join(', ');
+        const returnType = func.isVoid ? 'void | RpcError' : `${func.returnType} | RpcError`;
+        const handlerParams = func.params.map(p => p.name).join(', ');
+        const typedParams = func.params.map(p => `${p.name}: ${p.type}`).join(', ');
+
+        writer.writeLine(`${func.name}(handler: (${funcParams}) => Promise<${returnType}>) {`);
+        writer.indent(() => {
+          writer.writeLine('checkDisposed();');
+
+          // Inline the listener logic
+          if (func.isVoid) {
+            // Fire-and-forget handler
+            writer.writeLine(`const listener = async (${typedParams}) => {`);
+            writer.indent(() => {
+              writer.writeLine('try {');
+              writer.indent(() => {
+                writer.writeLine(`const result = await handler(${handlerParams});`);
+                writer.writeLine(`if (result && typeof result === 'object' && 'code' in result && 'message' in result) {`);
+                writer.indent(() => {
+                  writer.writeLine(`socket.emit('rpcError', result);`);
+                });
+                writer.writeLine('}');
+              });
+              writer.writeLine('} catch (error) {');
+              writer.indent(() => {
+                writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
+                writer.writeLine(`socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });`);
+              });
+              writer.writeLine('}');
+            });
+            writer.writeLine('};');
+          } else {
+            // Acknowledgment handler
+            const callbackType = `(result: ${func.returnType} | RpcError) => void`;
+            const fullParams = typedParams ? `${typedParams}, callback: ${callbackType}` : `callback: ${callbackType}`;
+            writer.writeLine(`const listener = async (${fullParams}) => {`);
+            writer.indent(() => {
+              writer.writeLine('try {');
+              writer.indent(() => {
+                writer.writeLine(`const result = await handler(${handlerParams});`);
+                writer.writeLine('callback(result);');
+              });
+              writer.writeLine('} catch (error) {');
+              writer.indent(() => {
+                writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
+                writer.writeLine(`callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });`);
+              });
+              writer.writeLine('}');
+            });
+            writer.writeLine('};');
+          }
+
+          writer.writeLine(`socket.on('${func.name}', listener);`);
+          writer.writeLine(`unsubscribers.push(() => socket.off('${func.name}', listener));`);
+        });
+        writer.writeLine('}' + (index < handleFunctions.length - 1 ? ',' : ','));
+      });
+
+      // Add rpcError handler
+      writer.writeLine('rpcError(handler: (error: RpcError) => void) {');
+      writer.indent(() => {
+        writer.writeLine('checkDisposed();');
+        writer.writeLine('const listener = (error: RpcError) => handler(error);');
+        writer.writeLine(`socket.on('rpcError', listener);`);
+        writer.writeLine(`unsubscribers.push(() => socket.off('rpcError', listener));`);
+      });
+      writer.writeLine('}');
+    });
+    writer.writeLine('};');
+    writer.writeLine('');
+
+    // Build the call object with inlined call logic
+    writer.writeLine('const call: ' + interfaceName + 'Call = {');
+    writer.indent(() => {
+      callFunctions.forEach((func, index) => {
+        const funcParams = func.params.map(p => `${p.name}${p.isOptional ? '?' : ''}: ${p.type}`);
+        if (!func.isVoid) {
+          funcParams.push(`timeout: number = ${config.defaultTimeout}`);
+        }
+        const paramsString = funcParams.join(', ');
+        const argsArray = func.params.map(p => p.name);
+        const argsString = argsArray.length > 0 ? `, ${argsArray.join(', ')}` : '';
+
+        if (func.isVoid) {
+          // Fire-and-forget call
+          writer.writeLine(`${func.name}(${paramsString}) {`);
+          writer.indent(() => {
+            writer.writeLine(`socket.emit('${func.name}'${argsString});`);
+          });
+          writer.writeLine('}' + (index < callFunctions.length - 1 ? ',' : ''));
+        } else {
+          // Acknowledgment call
+          writer.writeLine(`async ${func.name}(${paramsString}): Promise<${func.returnType} | RpcError> {`);
+          writer.indent(() => {
+            writer.writeLine('try {');
+            writer.indent(() => {
+              writer.writeLine(`return await socket.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
+            });
+            writer.writeLine('} catch (err) {');
+            writer.indent(() => {
+              writer.writeLine(`return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };`);
+            });
+            writer.writeLine('}');
+          });
+          writer.writeLine('}' + (index < callFunctions.length - 1 ? ',' : ''));
+        }
+      });
+    });
+    writer.writeLine('};');
+    writer.writeLine('');
+
+    // Return the interface object
+    writer.writeLine('return {');
+    writer.indent(() => {
+      writer.writeLine('on,');
+      writer.writeLine('call,');
+      writer.writeLine('get socket() { return socket; },');
+      writer.writeLine('get disposed() { return _disposed; },');
+      writer.writeLine('dispose() {');
+      writer.indent(() => {
+        writer.writeLine('if (_disposed) return;');
+        writer.writeLine('_disposed = true;');
+        writer.writeLine('unsubscribers.forEach(fn => fn());');
+        writer.writeLine('unsubscribers.length = 0;');
+      });
+      writer.writeLine('}');
+    });
+    writer.writeLine('};');
+  };
+
+  sourceFile.addFunction({
+    name: factoryName,
+    isExported: true,
+    parameters: [{ name: 'socket', type: 'Socket' }],
+    returnType: interfaceName,
+    statements: bodyWriter,
+    docs: [{
+      kind: StructureKind.JSDoc,
+      description: `Create a ${side} RPC instance.\n\nUsage:\n\`\`\`typescript\nconst ${side} = ${factoryName}(socket);\n\n// Register handlers\n${side}.on.${handleFunctions[0]?.name || 'eventName'}(async (${handleFunctions[0]?.params.map(p => p.name).join(', ') || 'data'}) => {\n  // handle event\n});\n\n// Make calls\n${callFunctions[0] ? (callFunctions[0].isVoid ? `${side}.call.${callFunctions[0].name}(${callFunctions[0].params.map(p => '...').join(', ')});` : `const result = await ${side}.call.${callFunctions[0].name}(${callFunctions[0].params.map(p => '...').join(', ')});`) : '// ...'}\n\n// Cleanup when done\n${side}.dispose();\n\`\`\``,
+      tags: [
+        { kind: StructureKind.JSDocTag, tagName: 'param', text: 'socket The socket instance' },
+        { kind: StructureKind.JSDocTag, tagName: 'returns', text: `${interfaceName} instance with .on, .call, and .dispose()` }
+      ]
+    }]
+  });
+}
+
 /**
  * Generates client.ts or server.ts file using ts-morph
  * Unified function that works for both sides
@@ -807,8 +1099,6 @@ function generateSideFile(
   config: ResolvedConfig,
   inputFile: SourceFile
 ): void {
-  const sideName = side.toUpperCase();
-  const targetName = side === 'client' ? 'SERVER' : 'CLIENT';
   const socketModule = side === 'client' ? 'socket.io-client' : 'socket.io';
   const fileName = `${side}.generated.ts`;
 
@@ -823,63 +1113,47 @@ function generateSideFile(
     { overwrite: true }
   );
 
-  // Add standard imports using optimized function
-  createStandardImports(sideFile, socketModule);
+  // Add Socket import (not type-only since we use it at runtime)
+  sideFile.addImportDeclaration({
+    moduleSpecifier: socketModule,
+    namedImports: ['Socket'],
+    isTypeOnly: true
+  });
 
-  // Add logger import if configured
-  addLoggerImport(sideFile, config);
+  // Add RpcError import from types
+  sideFile.addImportDeclaration({
+    moduleSpecifier: './types.generated',
+    namedImports: ['RpcError'],
+    isTypeOnly: true
+  });
 
   // Add custom type imports from input file
   const inputFilename = path.basename(config.inputPath, path.extname(config.inputPath));
   addCustomTypeImports(sideFile, [...clientFunctions, ...serverFunctions], inputFile, inputFilename);
 
   // Add file header comment
-  const targetInterface = side === 'client' ? 'ServerFunctions' : 'ClientFunctions';
-  const handlerInterface = side === 'client' ? 'ClientFunctions' : 'ServerFunctions';
-
   sideFile.insertText(0, `/**
  * ⚠️  DO NOT EDIT THIS FILE - IT IS AUTO-GENERATED ⚠️
  *
- * Auto-generated ${side} functions from ${inputFilename}.ts
- * These functions allow ${sideName} to call ${targetName} functions (${targetInterface} interface)
- * and set up handlers for ${sideName} functions (${handlerInterface} interface)
+ * Auto-generated ${side} RPC from ${inputFilename}.ts
  *
- * To regenerate this file, run:
- * bunx socketrpc-gen ${config.inputPath}
+ * Usage:
+ *   const ${side} = create${side === 'client' ? 'RpcClient' : 'RpcServer'}(socket);
+ *   ${side}.on.eventName(async (data) => { ... });
+ *   ${side}.call.methodName(args);
+ *   ${side}.dispose();
+ *
+ * To regenerate: bunx socketrpc-gen ${config.inputPath}
  */
 
 `);
 
-  // Generate handler type exports
-  generateHandlerTypes(sideFile, handleFunctions, side);
-
-  // Add section comment for calling functions
-  sideFile.addStatements(`\n// === ${sideName} CALLING ${targetName} FUNCTIONS ===`);
-
-  // Add call functions
-  callFunctions.forEach(func => {
-    const functionStructure = generateRpcFunctionAST(func, config, side);
-    sideFile.addFunction(functionStructure);
-  });
-
-  // Add section comment for handler functions
-  sideFile.addStatements(`\n// === ${sideName} HANDLER FUNCTIONS ===`);
-
-  // Add handler functions
-  handleFunctions.forEach(func => {
-    const handlerStructure = generateHandlerAST(func, config, side === 'client' ? 'server' : 'client', true);
-    if (handlerStructure) {
-      sideFile.addFunction(handlerStructure);
-    }
-  });
-
-  // Add handleRpcError function
-  const rpcErrorHandlerStructure = generateRpcErrorHandlerAST();
-  sideFile.addFunction(rpcErrorHandlerStructure);
+  // Generate interfaces and factory function
+  generateFactoryInterface(sideFile, callFunctions, handleFunctions, side, config);
+  generateFactoryFunction(sideFile, callFunctions, handleFunctions, side, config);
 
   // Format and save
   sideFile.formatText();
-  sideFile.fixMissingImports();
 }
 
 /**
@@ -1034,46 +1308,37 @@ function logGenerationSummary(
   serverFunctions: FunctionSignature[],
   outputDir: string
 ): void {
-  console.log('✅ Generated RPC package successfully using ts-morph AST!');
-  console.log(`📦 Package location: ${outputDir}`);
-  console.log(`📄 Generated files:`);
-  console.log(`   - client.generated.ts (${clientFunctions.length} call functions, ${serverFunctions.length} handler functions)`);
-  console.log(`   - server.generated.ts (${serverFunctions.length} call functions, ${clientFunctions.length} handler functions)`);
-  console.log(`   - types.generated.ts`);
+  console.log('✅ Generated RPC package successfully!');
+  console.log(`📦 Output: ${outputDir}`);
+  console.log(`📄 Files: client.generated.ts, server.generated.ts, types.generated.ts`);
 
-  // Log generated functions
-  if (clientFunctions.length > 0) {
-    console.log('\n📋 Generated client->server functions:');
-    clientFunctions.forEach(f => {
-      console.log(`  - ${f.name}(${f.params.map(p => p.name).join(', ')}) -> ${f.returnType}`);
-    });
-  }
-
+  console.log('\n📋 Client API (createRpcClient):');
   if (serverFunctions.length > 0) {
-    console.log('\n📋 Generated server->client functions:');
+    console.log('   .on handlers:');
     serverFunctions.forEach(f => {
-      console.log(`  - ${f.name}(${f.params.map(p => p.name).join(', ')}) -> ${f.returnType}`);
+      console.log(`     - ${f.name}(${f.params.map(p => p.name).join(', ')})`);
     });
   }
-
-  if (serverFunctions.length > 0) {
-    console.log('\n📋 Generated client handler functions:');
-    serverFunctions.forEach(f => {
-      const handlerName = `handle${f.name.charAt(0).toUpperCase() + f.name.slice(1)}`;
-      console.log(`  - ${handlerName}(socket, handler)`);
-    });
-  }
-
   if (clientFunctions.length > 0) {
-    console.log('\n📋 Generated server handler functions:');
+    console.log('   .call methods:');
     clientFunctions.forEach(f => {
-      const handlerName = `handle${f.name.charAt(0).toUpperCase() + f.name.slice(1)}`;
-      console.log(`  - ${handlerName}(socket, handler)`);
+      console.log(`     - ${f.name}(${f.params.map(p => p.name).join(', ')}) -> ${f.returnType}`);
     });
   }
 
-  console.log('\n📋 Generated default handler functions (always included):');
-  console.log('  - handleRpcError(socket, handler) - handles RPC errors from both client and server');
+  console.log('\n📋 Server API (createRpcServer):');
+  if (clientFunctions.length > 0) {
+    console.log('   .on handlers:');
+    clientFunctions.forEach(f => {
+      console.log(`     - ${f.name}(${f.params.map(p => p.name).join(', ')})`);
+    });
+  }
+  if (serverFunctions.length > 0) {
+    console.log('   .call methods:');
+    serverFunctions.forEach(f => {
+      console.log(`     - ${f.name}(${f.params.map(p => p.name).join(', ')}) -> ${f.returnType}`);
+    });
+  }
 }
 
 /**

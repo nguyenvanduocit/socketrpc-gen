@@ -33,14 +33,14 @@ This is a TypeScript code generator for Socket.IO RPC packages. The tool generat
    - Client functions call server methods
    - Server functions call client methods
    - Handler functions set up event listeners
-4. Generate error handling with `RpcError` type
-5. Output complete package with TypeScript declarations
+4. Generate factory functions (`createRpcClient`, `createRpcServer`) for ergonomic API
+5. Generate error handling with `RpcError` type
+6. Output complete package with TypeScript declarations
 
 ### Generated Code Structure
-- **Client functions** - Allow client to call server methods
-- **Server functions** - Allow server to call client methods  
-- **Handler functions** - Set up event listeners with pattern `handle<FunctionName>`
-- **Error handling** - Built-in `handleRpcError` function and `RpcError` type
+- **Factory functions** - `createRpcClient()` / `createRpcServer()` for ergonomic API
+- **Client/Server interfaces** - `RpcClient`, `RpcServer` with `.on`, `.call`, `.dispose()`
+- **Error handling** - Built-in `RpcError` type and `isRpcError()` guard
 - **Type safety** - Full TypeScript support with generated type imports
 
 ### Interface Requirements
@@ -49,82 +49,132 @@ This is a TypeScript code generator for Socket.IO RPC packages. The tool generat
 - Use `void` for fire-and-forget functions
 - Non-void functions automatically get acknowledgment handling and timeout support
 
-### Proper Handler Cleanup (Vue/React Components)
+### Ergonomic API Usage (Recommended)
 
-**Important:** Handler functions return an unsubscribe function that MUST be called to clean up event listeners. Failing to do so will cause memory leaks and `MaxListenersExceededWarning` errors, especially with HMR (Hot Module Replacement).
+The generator creates `createRpcClient()` and `createRpcServer()` factory functions that provide a clean API with automatic cleanup.
 
-**Vue 3 Composition API Example:**
+**Client Side:**
 ```typescript
-import { onMounted, onBeforeUnmount } from 'vue';
+import { createRpcClient } from './rpc/client.generated';
+
+const client = createRpcClient(socket);
+
+// Register handlers with client.on.*
+client.on.showError(async (error) => {
+  console.error('Error:', error);
+});
+
+client.on.onProgress(async (current, total) => {
+  console.log(`Progress: ${current}/${total}`);
+});
+
+// Make RPC calls with client.call.*
+const result = await client.call.generateText("Hello!");
+
+// Single cleanup call
+client.dispose();
+```
+
+**Server Side:**
+```typescript
+import { createRpcServer } from './rpc/server.generated';
+
+io.on('connection', (socket) => {
+  const server = createRpcServer(socket);
+
+  // Register handlers with server.on.*
+  server.on.generateText(async (prompt) => {
+    // Can call client methods via server.call.*
+    server.call.showError(new Error("Something happened"));
+    return "Generated: " + prompt;
+  });
+
+  // Cleanup on disconnect
+  socket.on('disconnect', () => server.dispose());
+});
+```
+
+### Vue 3 Integration
+
+```typescript
+import { onBeforeUnmount } from 'vue';
 import { socket } from './socket';
-import { handleShowError, handleOnResyncProgress } from './rpc/client.generated';
+import { createRpcClient } from './rpc/client.generated';
 
 export default {
   setup() {
-    const unsubscribers: Array<() => void> = [];
+    const client = createRpcClient(socket);
 
-    onMounted(() => {
-      // Register all handlers and store unsubscribe functions
-      unsubscribers.push(
-        handleShowError(socket, async (socket, error) => {
-          console.error('Error:', error);
-        }),
-        handleOnResyncProgress(socket, async (socket, msg, current, total) => {
-          console.log(`Progress: ${current}/${total}`);
-        })
-      );
+    // Register handlers - no manual tracking needed
+    client.on.showError(async (error) => {
+      console.error('Error:', error);
     });
 
-    onBeforeUnmount(() => {
-      // Clean up all handlers when component unmounts
-      unsubscribers.forEach(fn => fn());
+    client.on.onProgress(async (current, total) => {
+      console.log(`Progress: ${current}/${total}`);
     });
+
+    // Single cleanup call handles everything
+    onBeforeUnmount(() => client.dispose());
+
+    return { client };
   }
 }
 ```
 
-**React Example:**
+### React Integration
+
 ```typescript
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { socket } from './socket';
-import { handleShowError, handleOnResyncProgress } from './rpc/client.generated';
+import { createRpcClient, RpcClient } from './rpc/client.generated';
 
 function MyComponent() {
+  const clientRef = useRef<RpcClient>();
+
   useEffect(() => {
-    const unsubscribers: Array<() => void> = [];
+    const client = createRpcClient(socket);
+    clientRef.current = client;
 
-    // Register handlers
-    unsubscribers.push(
-      handleShowError(socket, async (socket, error) => {
-        console.error('Error:', error);
-      }),
-      handleOnResyncProgress(socket, async (socket, msg, current, total) => {
-        console.log(`Progress: ${current}/${total}`);
-      })
-    );
+    client.on.showError(async (error) => {
+      console.error('Error:', error);
+    });
 
-    // Cleanup function
-    return () => {
-      unsubscribers.forEach(fn => fn());
-    };
+    return () => client.dispose();
   }, []);
 
   return <div>My Component</div>;
 }
 ```
 
-**Key Points:**
-- Always store the unsubscribe functions returned by handlers
-- Call all unsubscribe functions in cleanup hooks (`onBeforeUnmount`, `useEffect` return, etc.)
-- This prevents listener accumulation during HMR and component remounting
-- Without proper cleanup, you'll see `MaxListenersExceededWarning` errors
+### API Structure
+
+```typescript
+// RpcClient / RpcServer interface
+interface RpcClient {
+  on: {
+    // Register handlers for server-to-client events
+    showError: (handler: (error: Error) => Promise<void>) => void;
+    askQuestion: (handler: (question: string) => Promise<string>) => void;
+    // ...
+  };
+  call: {
+    // Call server methods
+    generateText: (prompt: string, timeout?: number) => Promise<string | RpcError>;
+    // ...
+  };
+  socket: Socket;      // Underlying socket
+  disposed: boolean;   // Whether disposed
+  dispose(): void;     // Cleanup all handlers
+}
+```
 
 ### Example Structure
 ```
 pkg/rpc/
 ├── define.ts              # Interface definitions (input)
-├── client.generated.ts    # Generated client RPC functions
-├── server.generated.ts    # Generated server RPC functions  
+├── client.generated.ts    # Generated client RPC (includes createRpcClient)
+├── server.generated.ts    # Generated server RPC (includes createRpcServer)
 ├── types.generated.ts     # Generated types and error handling
 ├── index.ts              # Package entry point
 ├── package.json          # Generated package config

@@ -8,7 +8,7 @@ import { join } from "path"; // Added for getAppVersion
 import type { ExtendedSocket } from "./type.d";
 import { authMiddleware } from "./auth";
 import { createRpcServer } from "@socket-rpc/rpc/server.generated";
-import type { RpcError } from "@socket-rpc/rpc";
+import type { RpcError } from "@socket-rpc/rpc/types.generated";
 
 // === UTILITY FUNCTIONS ===
 /**
@@ -85,7 +85,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           services: {
             socket_io: !!io,
           },
-        })
+        }),
       );
     } catch (error) {
       logError("Health check endpoint", error);
@@ -98,7 +98,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           status: "unhealthy",
           timestamp: new Date().toISOString(),
           error: "Health check failed processing request",
-        })
+        }),
       );
     }
     return;
@@ -204,34 +204,23 @@ io.on("connection", async (socket: ExtendedSocket) => {
         }
         return "test success";
       } catch (rpcError) {
-        logError(
-          `RPC generateText (Socket: ${socket.id}, User: ${socket.data.userId})`,
-          rpcError
-        );
+        logError(`RPC generateText (Socket: ${socket.id}, User: ${socket.data.userId})`, rpcError);
         // Notify the client about the error via rpc.client.showError
-        rpc.client.showError(
-          new Error("An unexpected error occurred processing your request.")
-        );
+        rpc.client.showError(new Error("An unexpected error occurred processing your request."));
         return {
           message: "Internal server error during text generation.",
         } as RpcError;
       }
     });
   } catch (connectionError) {
-    logError(
-      `Socket connection event handler (Socket: ${socket.id})`,
-      connectionError
-    );
+    logError(`Socket connection event handler (Socket: ${socket.id})`, connectionError);
     // Try to notify the client about the connection error if the socket is still valid
     try {
       socket.emit("error", {
         message: "Connection setup failed due to server error.",
       });
     } catch (emitError) {
-      logError(
-        `Socket error emission during connection_error (Socket: ${socket.id})`,
-        emitError
-      );
+      logError(`Socket error emission during connection_error (Socket: ${socket.id})`, emitError);
     }
   }
 });
@@ -254,10 +243,7 @@ process.on("SIGTERM", () => {
 
   // Force shutdown if not closed within a timeout
   setTimeout(() => {
-    logError(
-      "Graceful shutdown timeout",
-      new Error("Forcing exit after SIGTERM timeout")
-    );
+    logError("Graceful shutdown timeout", new Error("Forcing exit after SIGTERM timeout"));
     process.exit(1);
   }, 10000); // 10 seconds timeout
 });
@@ -279,10 +265,7 @@ process.on("SIGINT", () => {
 
   // Force shutdown if not closed within a timeout
   setTimeout(() => {
-    logError(
-      "Graceful shutdown timeout",
-      new Error("Forcing exit after SIGINT timeout")
-    );
+    logError("Graceful shutdown timeout", new Error("Forcing exit after SIGINT timeout"));
     process.exit(1);
   }, 10000); // 10 seconds timeout
 });
@@ -307,7 +290,7 @@ httpServer.on("error", (error: NodeJS.ErrnoException) => {
     console.error(`❌ Address http://localhost:${PORT} is already in use.`);
   } else if (error.code === "EACCES") {
     console.error(
-      `❌ Permission denied to use port ${PORT}. Try running with sudo or using a different port.`
+      `❌ Permission denied to use port ${PORT}. Try running with sudo or using a different port.`,
     );
   }
   process.exit(1);

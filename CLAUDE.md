@@ -96,30 +96,26 @@ io.on('connection', (socket) => {
 
 ### Vue 3 Integration
 
-```typescript
+```vue
+<script setup lang="ts">
 import { onBeforeUnmount } from 'vue';
 import { socket } from './socket';
 import { createRpcClient } from './rpc/client.generated';
 
-export default {
-  setup() {
-    const rpc = createRpcClient(socket);
+const rpc = createRpcClient(socket);
 
-    // Register handlers - no manual tracking needed
-    rpc.handle.showError(async (error) => {
-      console.error('Error:', error);
-    });
+// Register handlers - no manual tracking needed
+rpc.handle.showError(async (error) => {
+  console.error('Error:', error);
+});
 
-    rpc.handle.onProgress(async (current, total) => {
-      console.log(`Progress: ${current}/${total}`);
-    });
+rpc.handle.onProgress(async (current, total) => {
+  console.log(`Progress: ${current}/${total}`);
+});
 
-    // Single cleanup call handles everything
-    onBeforeUnmount(() => rpc.dispose());
-
-    return { rpc };
-  }
-}
+// Single cleanup call handles everything
+onBeforeUnmount(() => rpc.dispose());
+</script>
 ```
 
 ### React Integration

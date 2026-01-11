@@ -4,7 +4,7 @@
  * This example demonstrates extending base interfaces with application-specific functions.
  */
 
-import { BaseClientFunctions, BaseServerFunctions } from './base.define';
+import type { BaseClientFunctions, BaseServerFunctions } from "./base.define";
 
 /**
  * Product entity

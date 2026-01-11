@@ -5,14 +5,14 @@
  * Inheritance chain: Framework -> Platform -> Application
  */
 
-import { PlatformClientFunctions, PlatformServerFunctions } from './platform.define';
+import type { PlatformClientFunctions, PlatformServerFunctions } from "./platform.define";
 
 export type Order = {
   id: string;
   userId: string;
   items: string[];
   total: number;
-  status: 'pending' | 'processing' | 'completed' | 'cancelled';
+  status: "pending" | "processing" | "completed" | "cancelled";
 };
 
 export type CreateOrderRequest = {
@@ -21,7 +21,7 @@ export type CreateOrderRequest = {
 
 export type OrderStatusUpdate = {
   orderId: string;
-  status: Order['status'];
+  status: Order["status"];
   message?: string;
 };
 

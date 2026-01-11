@@ -4,7 +4,7 @@
  * This is the middle level - platform-specific functionality that builds on the framework
  */
 
-import { FrameworkClientFunctions, FrameworkServerFunctions } from './framework.define';
+import type { FrameworkClientFunctions, FrameworkServerFunctions } from "./framework.define";
 
 export type AuthToken = {
   token: string;
@@ -14,7 +14,7 @@ export type AuthToken = {
 export type User = {
   id: string;
   username: string;
-  role: 'admin' | 'user';
+  role: "admin" | "user";
 };
 
 /**

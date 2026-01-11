@@ -5,8 +5,8 @@
  *
  * Usage:
  *   const server = createRpcServer(socket);
- *   server.on.eventName(async (data) => { ... });
- *   server.call.methodName(args);
+ *   server.handle.eventName(async (data) => { ... });
+ *   server.client.methodName(args);
  *   server.dispose();
  *
  * To regenerate: bunx socketrpc-gen /Volumes/Data/Projects/socket-rpc/examples/01-basic/define.ts
@@ -17,20 +17,20 @@ import type { RpcError } from "./types.generated";
 import type { User } from "./define";
 
 // === RPCSERVER INTERFACE ===
-/** Handler registration methods for server */
-export interface RpcServerOn {
-    /** Register handler for 'getUser' events from client */
+/** Handler registration methods - implement these to handle calls from client */
+export interface RpcServerHandle {
+    /** Register handler for 'getUser' - called by client */
     getUser: (handler: (userId: string) => Promise<User | RpcError>) => void;
-    /** Register handler for 'createUser' events from client */
+    /** Register handler for 'createUser' - called by client */
     createUser: (handler: (name: string, email: string) => Promise<User | RpcError>) => void;
-    /** Register handler for 'deleteUser' events from client */
+    /** Register handler for 'deleteUser' - called by client */
     deleteUser: (handler: (userId: string) => Promise<void | RpcError>) => void;
     /** Register handler for RPC errors */
     rpcError: (handler: (error: RpcError) => void) => void;
 }
 
-/** RPC call methods for server to call client */
-export interface RpcServerCall {
+/** Methods to call client */
+export interface RpcServerClient {
     /** Call client's 'onMessage' method */
     onMessage: (message: string) => void;
     /** Call client's 'requestConfirmation' method */
@@ -38,12 +38,12 @@ export interface RpcServerCall {
 }
 
 /** Server RPC interface with ergonomic API. */
-/** Use `.on` to register handlers, `.call` to make RPC calls, and `.dispose()` to cleanup. */
+/** Use `.handle` to register handlers, `.client` to call client methods, and `.dispose()` to cleanup. */
 export interface RpcServer {
-    /** Register handlers for incoming events */
-    readonly on: RpcServerOn;
+    /** Register handlers for calls from client */
+    readonly handle: RpcServerHandle;
     /** Call client methods */
-    readonly call: RpcServerCall;
+    readonly client: RpcServerClient;
     /** The underlying socket instance */
     readonly socket: Socket;
     /** Whether this instance has been disposed */
@@ -60,19 +60,19 @@ export interface RpcServer {
  * ```typescript
  * const server = createRpcServer(socket);
  *
- * // Register handlers
- * server.on.getUser(async (userId) => {
+ * // Register handlers for calls from client
+ * server.handle.getUser(async (userId) => {
  *   // handle event
  * });
  *
- * // Make calls
- * server.call.onMessage(...);
+ * // Call client methods
+ * server.client.onMessage(...);
  *
  * // Cleanup when done
  * server.dispose();
  * ```
  * @param socket The socket instance
- * @returns RpcServer instance with .on, .call, and .dispose()
+ * @returns RpcServer instance with .handle, .client, and .dispose()
  */
 export function createRpcServer(socket: Socket): RpcServer {
     const unsubscribers: Array<() => void> = [];
@@ -82,7 +82,7 @@ export function createRpcServer(socket: Socket): RpcServer {
         if (_disposed) throw new Error('RpcServer has been disposed');
     };
 
-    const on: RpcServerOn = {
+    const handle: RpcServerHandle = {
         getUser(handler: (userId: string) => Promise<User | RpcError>) {
             checkDisposed();
             const listener = async (userId: string, callback: (result: User | RpcError) => void) => {
@@ -135,7 +135,7 @@ export function createRpcServer(socket: Socket): RpcServer {
         }
     };
 
-    const call: RpcServerCall = {
+    const client: RpcServerClient = {
         onMessage(message: string) {
             socket.emit('onMessage', message);
         },
@@ -149,8 +149,8 @@ export function createRpcServer(socket: Socket): RpcServer {
     };
 
     return {
-        on,
-        call,
+        handle,
+        client,
         get socket() { return socket; },
         get disposed() { return _disposed; },
         dispose() {

@@ -1,4 +1,4 @@
-import { FrameworkClientFunctions, FrameworkServerFunctions } from './framework.define';
+import type { FrameworkClientFunctions, FrameworkServerFunctions } from "./framework.define";
 
 /**
  * Represents a plan entity with basic identification

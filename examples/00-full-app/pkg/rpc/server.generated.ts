@@ -87,8 +87,8 @@ export function createRpcServer(socket: Socket): RpcServer {
             checkDisposed();
             const listener = async (prompt: string, callback: (result: string | RpcError) => void) => {
                 try {
-                    const result = await handler(prompt);
-                    callback(result);
+                    const handlerResult = await handler(prompt);
+                    callback(handlerResult);
                 } catch (error) {
                     console.error('[generateText] Handler error:', error);
                     callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
@@ -101,8 +101,8 @@ export function createRpcServer(socket: Socket): RpcServer {
             checkDisposed();
             const listener = async (request: GetPlanRequest, callback: (result: Plan | RpcError) => void) => {
                 try {
-                    const result = await handler(request);
-                    callback(result);
+                    const handlerResult = await handler(request);
+                    callback(handlerResult);
                 } catch (error) {
                     console.error('[getPlan] Handler error:', error);
                     callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });

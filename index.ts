@@ -613,12 +613,12 @@ function generateFactoryFunction(
             writer.indent(() => {
               writer.writeLine("try {");
               writer.indent(() => {
-                writer.writeLine(`const result = await handler(${handlerParams});`);
+                writer.writeLine(`const handlerResult = await handler(${handlerParams});`);
                 writer.writeLine(
-                  `if (result && typeof result === 'object' && 'code' in result && 'message' in result) {`,
+                  `if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {`,
                 );
                 writer.indent(() => {
-                  writer.writeLine(`socket.emit('rpcError', result);`);
+                  writer.writeLine(`socket.emit('rpcError', handlerResult);`);
                 });
                 writer.writeLine("}");
               });
@@ -642,8 +642,8 @@ function generateFactoryFunction(
             writer.indent(() => {
               writer.writeLine("try {");
               writer.indent(() => {
-                writer.writeLine(`const result = await handler(${handlerParams});`);
-                writer.writeLine("callback(result);");
+                writer.writeLine(`const handlerResult = await handler(${handlerParams});`);
+                writer.writeLine("callback(handlerResult);");
               });
               writer.writeLine("} catch (error) {");
               writer.indent(() => {

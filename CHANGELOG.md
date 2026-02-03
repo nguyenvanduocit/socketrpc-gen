@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.0.1](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v4.0.0...v4.0.1) (2026-02-03)
+
+
+### Bug Fixes
+
+* rename handler result variable to avoid TDZ error ([a7fd201](https://github.com/nguyenvanduocit/socketrpc-gen/commit/a7fd2010b80e2c3c66118662691b081d54cc7e85))
+
 ## [4.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v3.0.0...v4.0.0) (2025-12-23)
 
 

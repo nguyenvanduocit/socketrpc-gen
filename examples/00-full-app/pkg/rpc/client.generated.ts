@@ -13,18 +13,18 @@
  */
 
 import type { Socket } from "socket.io-client";
-import type { RpcError } from "./types.generated";
+import { type RpcError, type RpcCallOptions, toRpcError } from "./types.generated";
 import type { GetPlanRequest, Plan } from "./define";
 
 // === RPCCLIENT INTERFACE ===
 /** Handler registration methods - implement these to handle calls from server */
 export interface RpcClientHandle {
     /** Register handler for 'showError' - called by server */
-    showError: (handler: (error: Error) => Promise<void | RpcError>) => void;
+    showError: (handler: (error: Error) => Promise<void>) => void;
     /** Register handler for 'updateDiscoveriedUrls' - called by server */
-    updateDiscoveriedUrls: (handler: (url: string) => Promise<void | RpcError>) => void;
+    updateDiscoveriedUrls: (handler: (url: string) => Promise<void>) => void;
     /** Register handler for 'getBrowserVersion' - called by server */
-    getBrowserVersion: (handler: () => Promise<string | RpcError>) => void;
+    getBrowserVersion: (handler: () => Promise<string>) => void;
     /** Register handler for RPC errors */
     rpcError: (handler: (error: RpcError) => void) => void;
 }
@@ -32,9 +32,9 @@ export interface RpcClientHandle {
 /** Methods to call server */
 export interface RpcClientServer {
     /** Call server's 'generateText' method */
-    generateText: (prompt: string, timeout?: number) => Promise<string | RpcError>;
+    generateText: (prompt: string, opts?: RpcCallOptions) => Promise<string | RpcError>;
     /** Call server's 'getPlan' method */
-    getPlan: (request: GetPlanRequest, timeout?: number) => Promise<Plan | RpcError>;
+    getPlan: (request: GetPlanRequest, opts?: RpcCallOptions) => Promise<Plan | RpcError>;
 }
 
 /** Client RPC interface with ergonomic API. */
@@ -83,39 +83,33 @@ export function createRpcClient(socket: Socket): RpcClient {
     };
 
     const handle: RpcClientHandle = {
-        showError(handler: (error: Error) => Promise<void | RpcError>) {
+        showError(handler: (error: Error) => Promise<void>) {
             checkDisposed();
             const listener = async (error: Error) => {
                 try {
-                    const handlerResult = await handler(error);
-                    if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {
-                        socket.emit('rpcError', handlerResult);
-                    }
+                    await handler(error);
                 } catch (error) {
                     console.error('[showError] Handler error:', error);
-                    socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'showError' }));
                 }
             };
             socket.on('showError', listener);
             unsubscribers.push(() => socket.off('showError', listener));
         },
-        updateDiscoveriedUrls(handler: (url: string) => Promise<void | RpcError>) {
+        updateDiscoveriedUrls(handler: (url: string) => Promise<void>) {
             checkDisposed();
             const listener = async (url: string) => {
                 try {
-                    const handlerResult = await handler(url);
-                    if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {
-                        socket.emit('rpcError', handlerResult);
-                    }
+                    await handler(url);
                 } catch (error) {
                     console.error('[updateDiscoveriedUrls] Handler error:', error);
-                    socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'updateDiscoveriedUrls' }));
                 }
             };
             socket.on('updateDiscoveriedUrls', listener);
             unsubscribers.push(() => socket.off('updateDiscoveriedUrls', listener));
         },
-        getBrowserVersion(handler: () => Promise<string | RpcError>) {
+        getBrowserVersion(handler: () => Promise<string>) {
             checkDisposed();
             const listener = async (callback: (result: string | RpcError) => void) => {
                 try {
@@ -123,7 +117,7 @@ export function createRpcClient(socket: Socket): RpcClient {
                     callback(handlerResult);
                 } catch (error) {
                     console.error('[getBrowserVersion] Handler error:', error);
-                    callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    callback(toRpcError(error, { origin: 'getBrowserVersion' }));
                 }
             };
             socket.on('getBrowserVersion', listener);
@@ -132,24 +126,28 @@ export function createRpcClient(socket: Socket): RpcClient {
         rpcError(handler: (error: RpcError) => void) {
             checkDisposed();
             const listener = (error: RpcError) => handler(error);
-            socket.on('rpcError', listener);
-            unsubscribers.push(() => socket.off('rpcError', listener));
+            socket.on('__rpc:error__', listener);
+            unsubscribers.push(() => socket.off('__rpc:error__', listener));
         }
     };
 
     const server: RpcClientServer = {
-        async generateText(prompt: string, timeout: number = 5000): Promise<string | RpcError> {
+        async generateText(prompt: string, opts?: RpcCallOptions): Promise<string | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'generateText' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('generateText', prompt);
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'generateText' });
             }
         },
-        async getPlan(request: GetPlanRequest, timeout: number = 5000): Promise<Plan | RpcError> {
+        async getPlan(request: GetPlanRequest, opts?: RpcCallOptions): Promise<Plan | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'getPlan' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('getPlan', request);
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'getPlan' });
             }
         }
     };

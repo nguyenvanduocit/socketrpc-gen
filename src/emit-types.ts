@@ -1,5 +1,5 @@
 import * as path from "path";
-import { Project } from "ts-morph";
+import { Project, VariableDeclarationKind } from "ts-morph";
 import type { ResolvedConfig } from "./types";
 
 // Leading " * " with a trailing space — preserves the exact header layout used by
@@ -41,13 +41,66 @@ ${HEADER_BLANK_LINE}
   });
 
   typesFile.addInterface({
+    name: "RpcCallOptions",
+    isExported: true,
+    docs: ["Per-call options for RPC methods. Extensible — new fields can be added without breaking callers."],
+    properties: [
+      {
+        name: "timeout",
+        type: "number",
+        hasQuestionToken: true,
+        docs: ["Override the default timeout (ms) for this call."],
+      },
+    ],
+  });
+
+  typesFile.addVariableStatement({
+    isExported: true,
+    declarationKind: VariableDeclarationKind.Const,
+    docs: ["Standard RPC error codes. Use these instead of ad-hoc strings."],
+    declarations: [
+      {
+        name: "RpcErrorCodes",
+        initializer: `{
+    TIMEOUT: "TIMEOUT",
+    DISPOSED: "DISPOSED",
+    INTERNAL_ERROR: "INTERNAL_ERROR",
+    INVALID_ARGUMENT: "INVALID_ARGUMENT",
+} as const`,
+      },
+    ],
+  });
+
+  typesFile.addTypeAlias({
+    name: "RpcErrorCode",
+    type: "typeof RpcErrorCodes[keyof typeof RpcErrorCodes]",
+    isExported: true,
+    docs: ["Union of all standard RPC error code string literals."],
+  });
+
+  typesFile.addInterface({
     name: "RpcError",
     isExported: true,
     docs: ["Represents an error that occurred during an RPC call."],
     properties: [
       { name: "message", type: "string", docs: ["The error message."] },
-      { name: "code", type: "string", docs: ["The error code."] },
-      { name: "data", type: "any", docs: ["The error data."] },
+      {
+        name: "code",
+        type: "string",
+        docs: ["The error code. Standard codes are in RpcErrorCodes."],
+      },
+      {
+        name: "origin",
+        type: "string",
+        hasQuestionToken: true,
+        docs: ["Name of the RPC function where the error originated."],
+      },
+      {
+        name: "data",
+        type: "any",
+        hasQuestionToken: true,
+        docs: ["Optional error-specific payload."],
+      },
     ],
   });
 
@@ -58,6 +111,24 @@ ${HEADER_BLANK_LINE}
     parameters: [{ name: "obj", type: "any" }],
     returnType: "obj is RpcError",
     statements: `return !!obj && typeof (obj as RpcError).message === 'string' && typeof (obj as RpcError).code === 'string';`,
+  });
+
+  typesFile.addFunction({
+    name: "toRpcError",
+    isExported: true,
+    docs: [
+      "Normalize any thrown value into an RpcError. Passes existing RpcError values through unchanged so `throw rpcErrorObj` preserves shape.",
+    ],
+    parameters: [
+      { name: "err", type: "unknown" },
+      { name: "opts", type: "{ code?: string; origin?: string }", hasQuestionToken: true },
+    ],
+    returnType: "RpcError",
+    statements: `if (isRpcError(err)) return err;
+const message = err instanceof Error ? err.message : String(err);
+const isTimeout = err instanceof Error && err.message === "operation has timed out";
+const code = opts?.code ?? (isTimeout ? RpcErrorCodes.TIMEOUT : RpcErrorCodes.INTERNAL_ERROR);
+return { message, code, origin: opts?.origin };`,
   });
 
   typesFile.formatText();

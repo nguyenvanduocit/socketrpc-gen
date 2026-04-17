@@ -13,6 +13,18 @@ function isValidJavaScriptIdentifier(name: string): boolean {
   return /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name);
 }
 
+// Names that would collide with the generated RpcClient/RpcServer surface.
+// If a user defines one of these on ClientFunctions/ServerFunctions, refuse.
+const RESERVED_NAMES = new Set([
+  "rpcError",
+  "dispose",
+  "disposed",
+  "handle",
+  "server",
+  "client",
+  "socket",
+]);
+
 /**
  * Recursively collects all base interfaces from an interface, including those from imported files
  */
@@ -64,6 +76,12 @@ function extractSignatureFromProperty(
   if (!isValidJavaScriptIdentifier(name)) {
     console.error(`Warning: Skipping function '${name}' - not a valid JavaScript identifier`);
     return null;
+  }
+
+  if (RESERVED_NAMES.has(name)) {
+    throw new Error(
+      `Function name '${name}' is reserved by socket-rpc and collides with the generated RpcClient/RpcServer surface. Please rename it in your ClientFunctions/ServerFunctions interface.`,
+    );
   }
 
   const callSignatures = property.getType().getCallSignatures();
@@ -134,16 +152,15 @@ function collectReferencedSymbols(
   visited.add(type);
 
   const symbol = type.getAliasSymbol() ?? type.getSymbol();
-  if (symbol) {
-    const name = symbol.getName();
-    const isAnonymous = !name || name === "__type" || name === "__object";
-    if (!isAnonymous && !out.has(name)) {
-      for (const decl of symbol.getDeclarations()) {
-        const sf = decl.getSourceFile();
-        if (!sf.isInNodeModules() && !sf.isDeclarationFile()) {
-          out.set(name, sf);
-          break;
-        }
+  const name = symbol?.getName();
+  const isAnonymous = !symbol || !name || name === "__type" || name === "__object";
+
+  if (!isAnonymous && !out.has(name!)) {
+    for (const decl of symbol!.getDeclarations()) {
+      const sf = decl.getSourceFile();
+      if (!sf.isInNodeModules() && !sf.isDeclarationFile()) {
+        out.set(name!, sf);
+        break;
       }
     }
   }
@@ -165,7 +182,7 @@ function collectReferencedSymbols(
 
   // Walk anonymous object shapes so nested named types are discovered.
   // Named object types' imports cover their own structure at the declaration site.
-  if (!symbol) {
+  if (isAnonymous) {
     for (const prop of type.getProperties()) {
       const propDecl = prop.getDeclarations()[0];
       if (propDecl) {

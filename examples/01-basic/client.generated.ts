@@ -13,16 +13,16 @@
  */
 
 import type { Socket } from "socket.io-client";
-import type { RpcError } from "./types.generated";
+import { type RpcError, type RpcCallOptions, toRpcError } from "./types.generated";
 import type { User } from "./define";
 
 // === RPCCLIENT INTERFACE ===
 /** Handler registration methods - implement these to handle calls from server */
 export interface RpcClientHandle {
     /** Register handler for 'onMessage' - called by server */
-    onMessage: (handler: (message: string) => Promise<void | RpcError>) => void;
+    onMessage: (handler: (message: string) => Promise<void>) => void;
     /** Register handler for 'requestConfirmation' - called by server */
-    requestConfirmation: (handler: (prompt: string) => Promise<boolean | RpcError>) => void;
+    requestConfirmation: (handler: (prompt: string) => Promise<boolean>) => void;
     /** Register handler for RPC errors */
     rpcError: (handler: (error: RpcError) => void) => void;
 }
@@ -30,9 +30,9 @@ export interface RpcClientHandle {
 /** Methods to call server */
 export interface RpcClientServer {
     /** Call server's 'getUser' method */
-    getUser: (userId: string, timeout?: number) => Promise<User | RpcError>;
+    getUser: (userId: string, opts?: RpcCallOptions) => Promise<User | RpcError>;
     /** Call server's 'createUser' method */
-    createUser: (name: string, email: string, timeout?: number) => Promise<User | RpcError>;
+    createUser: (name: string, email: string, opts?: RpcCallOptions) => Promise<User | RpcError>;
     /** Call server's 'deleteUser' method */
     deleteUser: (userId: string) => void;
 }
@@ -83,23 +83,20 @@ export function createRpcClient(socket: Socket): RpcClient {
     };
 
     const handle: RpcClientHandle = {
-        onMessage(handler: (message: string) => Promise<void | RpcError>) {
+        onMessage(handler: (message: string) => Promise<void>) {
             checkDisposed();
             const listener = async (message: string) => {
                 try {
-                    const handlerResult = await handler(message);
-                    if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {
-                        socket.emit('rpcError', handlerResult);
-                    }
+                    await handler(message);
                 } catch (error) {
                     console.error('[onMessage] Handler error:', error);
-                    socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'onMessage' }));
                 }
             };
             socket.on('onMessage', listener);
             unsubscribers.push(() => socket.off('onMessage', listener));
         },
-        requestConfirmation(handler: (prompt: string) => Promise<boolean | RpcError>) {
+        requestConfirmation(handler: (prompt: string) => Promise<boolean>) {
             checkDisposed();
             const listener = async (prompt: string, callback: (result: boolean | RpcError) => void) => {
                 try {
@@ -107,7 +104,7 @@ export function createRpcClient(socket: Socket): RpcClient {
                     callback(handlerResult);
                 } catch (error) {
                     console.error('[requestConfirmation] Handler error:', error);
-                    callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    callback(toRpcError(error, { origin: 'requestConfirmation' }));
                 }
             };
             socket.on('requestConfirmation', listener);
@@ -116,27 +113,32 @@ export function createRpcClient(socket: Socket): RpcClient {
         rpcError(handler: (error: RpcError) => void) {
             checkDisposed();
             const listener = (error: RpcError) => handler(error);
-            socket.on('rpcError', listener);
-            unsubscribers.push(() => socket.off('rpcError', listener));
+            socket.on('__rpc:error__', listener);
+            unsubscribers.push(() => socket.off('__rpc:error__', listener));
         }
     };
 
     const server: RpcClientServer = {
-        async getUser(userId: string, timeout: number = 5000): Promise<User | RpcError> {
+        async getUser(userId: string, opts?: RpcCallOptions): Promise<User | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'getUser' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('getUser', userId);
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'getUser' });
             }
         },
-        async createUser(name: string, email: string, timeout: number = 5000): Promise<User | RpcError> {
+        async createUser(name: string, email: string, opts?: RpcCallOptions): Promise<User | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'createUser' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('createUser', name, email);
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'createUser' });
             }
         },
         deleteUser(userId: string) {
+            if (_disposed) return;
             socket.emit('deleteUser', userId);
         }
     };

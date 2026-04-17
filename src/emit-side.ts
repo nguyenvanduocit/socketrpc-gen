@@ -56,7 +56,7 @@ function generateFactoryInterface(
     const funcParams = func.params
       .map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`)
       .join(", ");
-    const returnType = func.isVoid ? "void | RpcError" : `${func.returnType} | RpcError`;
+    const returnType = func.isVoid ? "void" : func.returnType;
     return {
       name: func.name,
       type: `(handler: (${funcParams}) => Promise<${returnType}>) => void`,
@@ -82,12 +82,12 @@ function generateFactoryInterface(
     const funcParams = func.params
       .map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`)
       .join(", ");
-    const timeoutParam = !func.isVoid
+    const optsParam = !func.isVoid
       ? funcParams
-        ? ", timeout?: number"
-        : "timeout?: number"
+        ? ", opts?: RpcCallOptions"
+        : "opts?: RpcCallOptions"
       : "";
-    const allParams = funcParams + timeoutParam;
+    const allParams = funcParams + optsParam;
     const returnType = func.isVoid ? "void" : `Promise<${func.returnType} | RpcError>`;
     return {
       name: func.name,
@@ -148,6 +148,8 @@ function generateFactoryInterface(
   });
 }
 
+const RPC_ERROR_EVENT = "__rpc:error__";
+
 /**
  * Writes one entry of the `handle` object literal — a method that accepts a user
  * handler, wires it to socket.on, and records an unsubscriber. Void-returning
@@ -162,7 +164,7 @@ function writeHandleMethod(
   const funcParams = func.params
     .map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`)
     .join(", ");
-  const returnType = func.isVoid ? "void | RpcError" : `${func.returnType} | RpcError`;
+  const returnType = func.isVoid ? "void" : func.returnType;
   const handlerParams = func.params.map((p) => p.name).join(", ");
   const typedParams = func.params.map((p) => `${p.name}: ${p.type}`).join(", ");
 
@@ -175,20 +177,13 @@ function writeHandleMethod(
       writer.indent(() => {
         writer.writeLine("try {");
         writer.indent(() => {
-          writer.writeLine(`const handlerResult = await handler(${handlerParams});`);
-          writer.writeLine(
-            `if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {`,
-          );
-          writer.indent(() => {
-            writer.writeLine(`socket.emit('rpcError', handlerResult);`);
-          });
-          writer.writeLine("}");
+          writer.writeLine(`await handler(${handlerParams});`);
         });
         writer.writeLine("} catch (error) {");
         writer.indent(() => {
           writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
           writer.writeLine(
-            `socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });`,
+            `socket.emit('${RPC_ERROR_EVENT}', toRpcError(error, { origin: '${func.name}' }));`,
           );
         });
         writer.writeLine("}");
@@ -209,9 +204,7 @@ function writeHandleMethod(
         writer.writeLine("} catch (error) {");
         writer.indent(() => {
           writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-          writer.writeLine(
-            `callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });`,
-          );
+          writer.writeLine(`callback(toRpcError(error, { origin: '${func.name}' }));`);
         });
         writer.writeLine("}");
       });
@@ -232,8 +225,8 @@ function writeRpcErrorHandler(writer: CodeBlockWriter): void {
   writer.indent(() => {
     writer.writeLine("checkDisposed();");
     writer.writeLine("const listener = (error: RpcError) => handler(error);");
-    writer.writeLine(`socket.on('rpcError', listener);`);
-    writer.writeLine(`unsubscribers.push(() => socket.off('rpcError', listener));`);
+    writer.writeLine(`socket.on('${RPC_ERROR_EVENT}', listener);`);
+    writer.writeLine(`unsubscribers.push(() => socket.off('${RPC_ERROR_EVENT}', listener));`);
   });
   writer.writeLine("}");
 }
@@ -252,7 +245,7 @@ function writeCallMethod(
 ): void {
   const funcParams = func.params.map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`);
   if (!func.isVoid) {
-    funcParams.push(`timeout: number = ${defaultTimeout}`);
+    funcParams.push(`opts?: RpcCallOptions`);
   }
   const paramsString = funcParams.join(", ");
   const argsArray = func.params.map((p) => p.name);
@@ -261,6 +254,7 @@ function writeCallMethod(
   if (func.isVoid) {
     writer.writeLine(`${func.name}(${paramsString}) {`);
     writer.indent(() => {
+      writer.writeLine("if (_disposed) return;");
       writer.writeLine(`socket.emit('${func.name}'${argsString});`);
     });
     writer.writeLine("}" + trailingChar);
@@ -269,6 +263,10 @@ function writeCallMethod(
       `async ${func.name}(${paramsString}): Promise<${func.returnType} | RpcError> {`,
     );
     writer.indent(() => {
+      writer.writeLine(
+        `if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: '${func.name}' };`,
+      );
+      writer.writeLine(`const timeout = opts?.timeout ?? ${defaultTimeout};`);
       writer.writeLine("try {");
       writer.indent(() => {
         writer.writeLine(
@@ -277,9 +275,7 @@ function writeCallMethod(
       });
       writer.writeLine("} catch (err) {");
       writer.indent(() => {
-        writer.writeLine(
-          `return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };`,
-        );
+        writer.writeLine(`return toRpcError(err, { origin: '${func.name}' });`);
       });
       writer.writeLine("}");
     });
@@ -471,8 +467,11 @@ export function generateSideFile(
 
   sideFile.addImportDeclaration({
     moduleSpecifier: "./types.generated",
-    namedImports: ["RpcError"],
-    isTypeOnly: true,
+    namedImports: [
+      { name: "RpcError", isTypeOnly: true },
+      { name: "RpcCallOptions", isTypeOnly: true },
+      { name: "toRpcError" },
+    ],
   });
 
   addCustomTypeImports(sideFile, usedTypes, inputFile);

@@ -195,21 +195,18 @@ io.on("connection", async (socket: ExtendedSocket) => {
      * @param prompt - Input text prompt from the client
      * @returns Promise<string> - Generated text response
      */
-    rpc.handle.generateText(async (prompt): Promise<string | RpcError> => {
+    rpc.handle.generateText(async (prompt): Promise<string> => {
       try {
         if (prompt === "error") {
-          return { message: "expected error" } as RpcError;
+          throw { message: "expected error", code: "EXPECTED_ERROR" } as RpcError;
         } else if (prompt === "throw") {
           throw new Error("unexpected error");
         }
         return "test success";
       } catch (rpcError) {
         logError(`RPC generateText (Socket: ${socket.id}, User: ${socket.data.userId})`, rpcError);
-        // Notify the client about the error via rpc.client.showError
         rpc.client.showError(new Error("An unexpected error occurred processing your request."));
-        return {
-          message: "Internal server error during text generation.",
-        } as RpcError;
+        throw { message: "Internal server error during text generation.", code: "INTERNAL_ERROR" } as RpcError;
       }
     });
   } catch (connectionError) {

@@ -13,17 +13,17 @@
  */
 
 import type { Socket } from "socket.io-client";
-import type { RpcError } from "./types.generated";
+import { type RpcError, type RpcCallOptions, toRpcError } from "./types.generated";
 
 // === RPCCLIENT INTERFACE ===
 /** Handler registration methods - implement these to handle calls from server */
 export interface RpcClientHandle {
     /** Register handler for 'onProgress' - called by server */
-    onProgress: (handler: (update: { taskId: string; progress: number; message?: string | undefined; }) => Promise<void | RpcError>) => void;
+    onProgress: (handler: (update: { taskId: string; progress: number; message?: string | undefined; }) => Promise<void>) => void;
     /** Register handler for 'onTaskComplete' - called by server */
-    onTaskComplete: (handler: (task: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }) => Promise<void | RpcError>) => void;
+    onTaskComplete: (handler: (task: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }) => Promise<void>) => void;
     /** Register handler for 'onError' - called by server */
-    onError: (handler: (message: string, code: string) => Promise<void | RpcError>) => void;
+    onError: (handler: (message: string, code: string) => Promise<void>) => void;
     /** Register handler for RPC errors */
     rpcError: (handler: (error: RpcError) => void) => void;
 }
@@ -31,13 +31,13 @@ export interface RpcClientHandle {
 /** Methods to call server */
 export interface RpcClientServer {
     /** Call server's 'generate' method */
-    generate: (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }, timeout?: number) => Promise<{ text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; } | RpcError>;
+    generate: (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }, opts?: RpcCallOptions) => Promise<{ text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; } | RpcError>;
     /** Call server's 'createTask' method */
-    createTask: (request: { title: string; description?: string | undefined; }, timeout?: number) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError>;
+    createTask: (request: { title: string; description?: string | undefined; }, opts?: RpcCallOptions) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError>;
     /** Call server's 'getTask' method */
-    getTask: (taskId: string, timeout?: number) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError>;
+    getTask: (taskId: string, opts?: RpcCallOptions) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError>;
     /** Call server's 'listTasks' method */
-    listTasks: (timeout?: number) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[] | RpcError>;
+    listTasks: (opts?: RpcCallOptions) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[] | RpcError>;
     /** Call server's 'cancelTask' method */
     cancelTask: (taskId: string) => void;
 }
@@ -88,49 +88,40 @@ export function createRpcClient(socket: Socket): RpcClient {
     };
 
     const handle: RpcClientHandle = {
-        onProgress(handler: (update: { taskId: string; progress: number; message?: string | undefined; }) => Promise<void | RpcError>) {
+        onProgress(handler: (update: { taskId: string; progress: number; message?: string | undefined; }) => Promise<void>) {
             checkDisposed();
             const listener = async (update: { taskId: string; progress: number; message?: string | undefined; }) => {
                 try {
-                    const handlerResult = await handler(update);
-                    if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {
-                        socket.emit('rpcError', handlerResult);
-                    }
+                    await handler(update);
                 } catch (error) {
                     console.error('[onProgress] Handler error:', error);
-                    socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'onProgress' }));
                 }
             };
             socket.on('onProgress', listener);
             unsubscribers.push(() => socket.off('onProgress', listener));
         },
-        onTaskComplete(handler: (task: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }) => Promise<void | RpcError>) {
+        onTaskComplete(handler: (task: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }) => Promise<void>) {
             checkDisposed();
             const listener = async (task: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }) => {
                 try {
-                    const handlerResult = await handler(task);
-                    if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {
-                        socket.emit('rpcError', handlerResult);
-                    }
+                    await handler(task);
                 } catch (error) {
                     console.error('[onTaskComplete] Handler error:', error);
-                    socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'onTaskComplete' }));
                 }
             };
             socket.on('onTaskComplete', listener);
             unsubscribers.push(() => socket.off('onTaskComplete', listener));
         },
-        onError(handler: (message: string, code: string) => Promise<void | RpcError>) {
+        onError(handler: (message: string, code: string) => Promise<void>) {
             checkDisposed();
             const listener = async (message: string, code: string) => {
                 try {
-                    const handlerResult = await handler(message, code);
-                    if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {
-                        socket.emit('rpcError', handlerResult);
-                    }
+                    await handler(message, code);
                 } catch (error) {
                     console.error('[onError] Handler error:', error);
-                    socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'onError' }));
                 }
             };
             socket.on('onError', listener);
@@ -139,41 +130,50 @@ export function createRpcClient(socket: Socket): RpcClient {
         rpcError(handler: (error: RpcError) => void) {
             checkDisposed();
             const listener = (error: RpcError) => handler(error);
-            socket.on('rpcError', listener);
-            unsubscribers.push(() => socket.off('rpcError', listener));
+            socket.on('__rpc:error__', listener);
+            unsubscribers.push(() => socket.off('__rpc:error__', listener));
         }
     };
 
     const server: RpcClientServer = {
-        async generate(request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }, timeout: number = 5000): Promise<{ text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; } | RpcError> {
+        async generate(request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }, opts?: RpcCallOptions): Promise<{ text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; } | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'generate' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('generate', request);
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'generate' });
             }
         },
-        async createTask(request: { title: string; description?: string | undefined; }, timeout: number = 5000): Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError> {
+        async createTask(request: { title: string; description?: string | undefined; }, opts?: RpcCallOptions): Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'createTask' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('createTask', request);
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'createTask' });
             }
         },
-        async getTask(taskId: string, timeout: number = 5000): Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError> {
+        async getTask(taskId: string, opts?: RpcCallOptions): Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'getTask' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('getTask', taskId);
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'getTask' });
             }
         },
-        async listTasks(timeout: number = 5000): Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[] | RpcError> {
+        async listTasks(opts?: RpcCallOptions): Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[] | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'listTasks' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('listTasks');
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'listTasks' });
             }
         },
         cancelTask(taskId: string) {
+            if (_disposed) return;
             socket.emit('cancelTask', taskId);
         }
     };

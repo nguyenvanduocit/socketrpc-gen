@@ -9,17 +9,45 @@
 /** Function to unsubscribe from an event listener. Call this to clean up the listener. */
 export type UnsubscribeFunction = () => void;
 
+/** Per-call options for RPC methods. Extensible — new fields can be added without breaking callers. */
+export interface RpcCallOptions {
+    /** Override the default timeout (ms) for this call. */
+    timeout?: number;
+}
+
+/** Standard RPC error codes. Use these instead of ad-hoc strings. */
+export const RpcErrorCodes = {
+    TIMEOUT: "TIMEOUT",
+    DISPOSED: "DISPOSED",
+    INTERNAL_ERROR: "INTERNAL_ERROR",
+    INVALID_ARGUMENT: "INVALID_ARGUMENT",
+} as const;
+
+/** Union of all standard RPC error code string literals. */
+export type RpcErrorCode = typeof RpcErrorCodes[keyof typeof RpcErrorCodes];
+
 /** Represents an error that occurred during an RPC call. */
 export interface RpcError {
     /** The error message. */
     message: string;
-    /** The error code. */
+    /** The error code. Standard codes are in RpcErrorCodes. */
     code: string;
-    /** The error data. */
-    data: any;
+    /** Name of the RPC function where the error originated. */
+    origin?: string;
+    /** Optional error-specific payload. */
+    data?: any;
 }
 
 /** Type guard to check if an object is an RpcError. */
 export function isRpcError(obj: any): obj is RpcError {
     return !!obj && typeof (obj as RpcError).message === 'string' && typeof (obj as RpcError).code === 'string';
+}
+
+/** Normalize any thrown value into an RpcError. Passes existing RpcError values through unchanged so `throw rpcErrorObj` preserves shape. */
+export function toRpcError(err: unknown, opts?: { code?: string; origin?: string }): RpcError {
+    if (isRpcError(err)) return err;
+    const message = err instanceof Error ? err.message : String(err);
+    const isTimeout = err instanceof Error && err.message === "operation has timed out";
+    const code = opts?.code ?? (isTimeout ? RpcErrorCodes.TIMEOUT : RpcErrorCodes.INTERNAL_ERROR);
+    return { message, code, origin: opts?.origin };
 }

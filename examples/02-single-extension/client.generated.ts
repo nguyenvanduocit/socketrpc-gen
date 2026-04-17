@@ -13,22 +13,22 @@
  */
 
 import type { Socket } from "socket.io-client";
-import type { RpcError } from "./types.generated";
+import { type RpcError, type RpcCallOptions, toRpcError } from "./types.generated";
 import type { Product, CreateProductRequest } from "./define";
 
 // === RPCCLIENT INTERFACE ===
 /** Handler registration methods - implement these to handle calls from server */
 export interface RpcClientHandle {
     /** Register handler for 'showError' - called by server */
-    showError: (handler: (error: Error) => Promise<void | RpcError>) => void;
+    showError: (handler: (error: Error) => Promise<void>) => void;
     /** Register handler for 'showSuccess' - called by server */
-    showSuccess: (handler: (message: string) => Promise<void | RpcError>) => void;
+    showSuccess: (handler: (message: string) => Promise<void>) => void;
     /** Register handler for 'getClientInfo' - called by server */
-    getClientInfo: (handler: () => Promise<{ userAgent: string; language: string; } | RpcError>) => void;
+    getClientInfo: (handler: () => Promise<{ userAgent: string; language: string; }>) => void;
     /** Register handler for 'onProductUpdated' - called by server */
-    onProductUpdated: (handler: (product: Product) => Promise<void | RpcError>) => void;
+    onProductUpdated: (handler: (product: Product) => Promise<void>) => void;
     /** Register handler for 'refreshProducts' - called by server */
-    refreshProducts: (handler: () => Promise<void | RpcError>) => void;
+    refreshProducts: (handler: () => Promise<void>) => void;
     /** Register handler for RPC errors */
     rpcError: (handler: (error: RpcError) => void) => void;
 }
@@ -36,15 +36,15 @@ export interface RpcClientHandle {
 /** Methods to call server */
 export interface RpcClientServer {
     /** Call server's 'ping' method */
-    ping: (timeout?: number) => Promise<string | RpcError>;
+    ping: (opts?: RpcCallOptions) => Promise<string | RpcError>;
     /** Call server's 'getServerTime' method */
-    getServerTime: (timeout?: number) => Promise<number | RpcError>;
+    getServerTime: (opts?: RpcCallOptions) => Promise<number | RpcError>;
     /** Call server's 'getProduct' method */
-    getProduct: (productId: string, timeout?: number) => Promise<Product | RpcError>;
+    getProduct: (productId: string, opts?: RpcCallOptions) => Promise<Product | RpcError>;
     /** Call server's 'createProduct' method */
-    createProduct: (request: CreateProductRequest, timeout?: number) => Promise<Product | RpcError>;
+    createProduct: (request: CreateProductRequest, opts?: RpcCallOptions) => Promise<Product | RpcError>;
     /** Call server's 'listProducts' method */
-    listProducts: (timeout?: number) => Promise<Product[] | RpcError>;
+    listProducts: (opts?: RpcCallOptions) => Promise<Product[] | RpcError>;
 }
 
 /** Client RPC interface with ergonomic API. */
@@ -93,39 +93,33 @@ export function createRpcClient(socket: Socket): RpcClient {
     };
 
     const handle: RpcClientHandle = {
-        showError(handler: (error: Error) => Promise<void | RpcError>) {
+        showError(handler: (error: Error) => Promise<void>) {
             checkDisposed();
             const listener = async (error: Error) => {
                 try {
-                    const handlerResult = await handler(error);
-                    if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {
-                        socket.emit('rpcError', handlerResult);
-                    }
+                    await handler(error);
                 } catch (error) {
                     console.error('[showError] Handler error:', error);
-                    socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'showError' }));
                 }
             };
             socket.on('showError', listener);
             unsubscribers.push(() => socket.off('showError', listener));
         },
-        showSuccess(handler: (message: string) => Promise<void | RpcError>) {
+        showSuccess(handler: (message: string) => Promise<void>) {
             checkDisposed();
             const listener = async (message: string) => {
                 try {
-                    const handlerResult = await handler(message);
-                    if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {
-                        socket.emit('rpcError', handlerResult);
-                    }
+                    await handler(message);
                 } catch (error) {
                     console.error('[showSuccess] Handler error:', error);
-                    socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'showSuccess' }));
                 }
             };
             socket.on('showSuccess', listener);
             unsubscribers.push(() => socket.off('showSuccess', listener));
         },
-        getClientInfo(handler: () => Promise<{ userAgent: string; language: string; } | RpcError>) {
+        getClientInfo(handler: () => Promise<{ userAgent: string; language: string; }>) {
             checkDisposed();
             const listener = async (callback: (result: { userAgent: string; language: string; } | RpcError) => void) => {
                 try {
@@ -133,39 +127,33 @@ export function createRpcClient(socket: Socket): RpcClient {
                     callback(handlerResult);
                 } catch (error) {
                     console.error('[getClientInfo] Handler error:', error);
-                    callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    callback(toRpcError(error, { origin: 'getClientInfo' }));
                 }
             };
             socket.on('getClientInfo', listener);
             unsubscribers.push(() => socket.off('getClientInfo', listener));
         },
-        onProductUpdated(handler: (product: Product) => Promise<void | RpcError>) {
+        onProductUpdated(handler: (product: Product) => Promise<void>) {
             checkDisposed();
             const listener = async (product: Product) => {
                 try {
-                    const handlerResult = await handler(product);
-                    if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {
-                        socket.emit('rpcError', handlerResult);
-                    }
+                    await handler(product);
                 } catch (error) {
                     console.error('[onProductUpdated] Handler error:', error);
-                    socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'onProductUpdated' }));
                 }
             };
             socket.on('onProductUpdated', listener);
             unsubscribers.push(() => socket.off('onProductUpdated', listener));
         },
-        refreshProducts(handler: () => Promise<void | RpcError>) {
+        refreshProducts(handler: () => Promise<void>) {
             checkDisposed();
             const listener = async () => {
                 try {
-                    const handlerResult = await handler();
-                    if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {
-                        socket.emit('rpcError', handlerResult);
-                    }
+                    await handler();
                 } catch (error) {
                     console.error('[refreshProducts] Handler error:', error);
-                    socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
+                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'refreshProducts' }));
                 }
             };
             socket.on('refreshProducts', listener);
@@ -174,45 +162,55 @@ export function createRpcClient(socket: Socket): RpcClient {
         rpcError(handler: (error: RpcError) => void) {
             checkDisposed();
             const listener = (error: RpcError) => handler(error);
-            socket.on('rpcError', listener);
-            unsubscribers.push(() => socket.off('rpcError', listener));
+            socket.on('__rpc:error__', listener);
+            unsubscribers.push(() => socket.off('__rpc:error__', listener));
         }
     };
 
     const server: RpcClientServer = {
-        async ping(timeout: number = 5000): Promise<string | RpcError> {
+        async ping(opts?: RpcCallOptions): Promise<string | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'ping' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('ping');
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'ping' });
             }
         },
-        async getServerTime(timeout: number = 5000): Promise<number | RpcError> {
+        async getServerTime(opts?: RpcCallOptions): Promise<number | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'getServerTime' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('getServerTime');
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'getServerTime' });
             }
         },
-        async getProduct(productId: string, timeout: number = 5000): Promise<Product | RpcError> {
+        async getProduct(productId: string, opts?: RpcCallOptions): Promise<Product | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'getProduct' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('getProduct', productId);
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'getProduct' });
             }
         },
-        async createProduct(request: CreateProductRequest, timeout: number = 5000): Promise<Product | RpcError> {
+        async createProduct(request: CreateProductRequest, opts?: RpcCallOptions): Promise<Product | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'createProduct' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('createProduct', request);
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'createProduct' });
             }
         },
-        async listProducts(timeout: number = 5000): Promise<Product[] | RpcError> {
+        async listProducts(opts?: RpcCallOptions): Promise<Product[] | RpcError> {
+            if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'listProducts' };
+            const timeout = opts?.timeout ?? 5000;
             try {
                 return await socket.timeout(timeout).emitWithAck('listProducts');
             } catch (err) {
-                return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };
+                return toRpcError(err, { origin: 'listProducts' });
             }
         }
     };

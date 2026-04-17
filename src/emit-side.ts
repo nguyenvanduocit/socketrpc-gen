@@ -288,6 +288,53 @@ function writeCallMethod(
 }
 
 /**
+ * Builds the JSDoc description block shown above the generated factory function.
+ * Renders a minimal usage example using the first handle + call signatures (or
+ * placeholders when the interface has none).
+ */
+function buildFactoryJsDoc(
+  factoryName: string,
+  side: "client" | "server",
+  targetSide: "client" | "server",
+  handleFunctions: FunctionSignature[],
+  callFunctions: FunctionSignature[],
+): string {
+  const sampleHandle = handleFunctions[0];
+  const handleName = sampleHandle?.name || "eventName";
+  // `||` (not `??`) so zero-param handles fall back to "data" — matches
+  // the pre-extract inline template's fallback semantics exactly.
+  const handleArgs = sampleHandle?.params.map((p) => p.name).join(", ") || "data";
+
+  const sampleCall = callFunctions[0];
+  let callExample = "// ...";
+  if (sampleCall) {
+    const callArgs = sampleCall.params.map(() => "...").join(", ");
+    const callExpr = `${side}.${targetSide}.${sampleCall.name}(${callArgs})`;
+    callExample = sampleCall.isVoid ? `${callExpr};` : `const result = await ${callExpr};`;
+  }
+
+  return [
+    `Create a ${side} RPC instance.`,
+    "",
+    "Usage:",
+    "```typescript",
+    `const ${side} = ${factoryName}(socket);`,
+    "",
+    `// Register handlers for calls from ${targetSide}`,
+    `${side}.handle.${handleName}(async (${handleArgs}) => {`,
+    "  // handle event",
+    "});",
+    "",
+    `// Call ${targetSide} methods`,
+    callExample,
+    "",
+    "// Cleanup when done",
+    `${side}.dispose();`,
+    "```",
+  ].join("\n");
+}
+
+/**
  * Emits the createRpcClient / createRpcServer factory function. The function body
  * is composed from named section writers (writeHandleMethod, writeRpcErrorHandler,
  * writeCallMethod) so each concern lives in one small, focused helper.
@@ -371,7 +418,13 @@ function generateFactoryFunction(
     docs: [
       {
         kind: StructureKind.JSDoc,
-        description: `Create a ${side} RPC instance.\n\nUsage:\n\`\`\`typescript\nconst ${side} = ${factoryName}(socket);\n\n// Register handlers for calls from ${targetSide}\n${side}.handle.${handleFunctions[0]?.name || "eventName"}(async (${handleFunctions[0]?.params.map((p) => p.name).join(", ") || "data"}) => {\n  // handle event\n});\n\n// Call ${targetSide} methods\n${callFunctions[0] ? (callFunctions[0].isVoid ? `${side}.${targetSide}.${callFunctions[0].name}(${callFunctions[0].params.map((p) => "...").join(", ")});` : `const result = await ${side}.${targetSide}.${callFunctions[0].name}(${callFunctions[0].params.map((p) => "...").join(", ")});`) : "// ..."}\n\n// Cleanup when done\n${side}.dispose();\n\`\`\``,
+        description: buildFactoryJsDoc(
+          factoryName,
+          side,
+          targetSide,
+          handleFunctions,
+          callFunctions,
+        ),
         tags: [
           { kind: StructureKind.JSDocTag, tagName: "param", text: "socket The socket instance" },
           {

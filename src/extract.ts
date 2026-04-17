@@ -91,6 +91,14 @@ function extractSignatureFromProperty(
 }
 
 /**
+ * Returns an interface plus its transitive base interfaces, in walk order
+ * (bases first, then the derived interface).
+ */
+function getInterfaceChain(iface: InterfaceDeclaration): InterfaceDeclaration[] {
+  return [...getAllBaseInterfaces(iface), iface];
+}
+
+/**
  * Extracts function signatures from a TypeScript interface using ts-morph.
  * Walks the entire inheritance chain so extended interfaces' methods are included.
  */
@@ -99,9 +107,8 @@ function extractFunctionSignatures(
 ): FunctionSignature[] {
   const signatures: FunctionSignature[] = [];
   const processedNames = new Set<string>();
-  const allInterfaces = [...getAllBaseInterfaces(interfaceDeclaration), interfaceDeclaration];
 
-  for (const iface of allInterfaces) {
+  for (const iface of getInterfaceChain(interfaceDeclaration)) {
     for (const property of iface.getProperties()) {
       const extracted = extractSignatureFromProperty(property, processedNames);
       if (extracted) {
@@ -177,9 +184,8 @@ function collectUsedTypes(
   out: Map<string, SourceFile>,
 ): void {
   const visited = new Set<Type>();
-  const allInterfaces = [...getAllBaseInterfaces(interfaceDeclaration), interfaceDeclaration];
 
-  for (const iface of allInterfaces) {
+  for (const iface of getInterfaceChain(interfaceDeclaration)) {
     for (const property of iface.getProperties()) {
       const typeNode = property.getTypeNode();
       if (!typeNode || typeNode.getKind() !== SyntaxKind.FunctionType) continue;

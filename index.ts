@@ -885,7 +885,7 @@ async function extractInterfacesFromFile(inputPath: string): Promise<{
 }> {
   // Create a new ts-morph project for reading input
   const inputProject = new Project({
-    tsConfigFilePath: path.join(__dirname, "tsconfig.json"),
+    tsConfigFilePath: path.join(import.meta.dir, "tsconfig.json"),
     skipAddingFilesFromTsConfig: true,
   });
 
@@ -1058,30 +1058,29 @@ async function watchMode(config: GeneratorConfig): Promise<void> {
   // Initial generation
   await generateRpcPackage(config);
 
-  // Watch for changes
-  fs.watchFile(inputPath, { interval: 1000 }, async (curr, prev) => {
-    if (curr.mtime !== prev.mtime) {
-      console.log(`\n🔄 ${path.basename(inputPath)} changed, regenerating...`);
-      try {
-        await generateRpcPackage(config);
-      } catch (error) {
-        console.error("❌ Error during regeneration:", error);
-      }
+  // Watch for changes (event-based; falls back to polling only if the platform requires it)
+  const watcher = fs.watch(inputPath, async (eventType) => {
+    if (eventType !== "change") return;
+    console.log(`\n🔄 ${path.basename(inputPath)} changed, regenerating...`);
+    try {
+      await generateRpcPackage(config);
+    } catch (error) {
+      console.error("❌ Error during regeneration:", error);
     }
   });
 
   // Handle process termination
   process.on("SIGINT", () => {
     console.log("\n👋 Stopping watch mode...");
-    fs.unwatchFile(inputPath);
+    watcher.close();
     process.exit(0);
   });
 }
 
 // Run the generator if this file is executed directly
-if (require.main === module) {
+if (import.meta.main) {
   // Read version from package.json
-  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf-8"));
+  const packageJson = JSON.parse(fs.readFileSync(path.join(import.meta.dir, "package.json"), "utf-8"));
   const version = packageJson.version;
 
   const program = new Command();

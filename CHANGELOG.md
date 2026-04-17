@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.0.2](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v4.0.1...v4.0.2) (2026-04-17)
+
+
+### Bug Fixes
+
+* harden type extraction against nested generics and drop unused zod dep ([114ca0e](https://github.com/nguyenvanduocit/socketrpc-gen/commit/114ca0e9f132b676bc0c3f9f17bf21202ff2bdf8))
+
 ## [4.0.1](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v4.0.0...v4.0.1) (2026-02-03)
 
 

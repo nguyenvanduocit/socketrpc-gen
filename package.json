@@ -1,5 +1,5 @@
 {
-  "name": "@nguyenvanduocit/socketrpc-gen",
+  "name": "socketrpc-gen",
   "version": "5.0.0",
   "description": "Code generator for Socket.IO RPC packages using ts-morph.",
   "main": "index.ts",
@@ -11,9 +11,6 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nguyenvanduocit/socketrpc-gen.git"
-  },
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
   },
   "keywords": [
     "socket.io",

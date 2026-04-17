@@ -51,7 +51,9 @@ afterAll(() => {
   }
 });
 
-const TEST_TIMEOUT_MS = 30_000;
+// Each test spawns `bun run index.ts`, which pays the ts-morph cold-start cost
+// (typically 3-5s, occasionally more on first run after checkout).
+const TEST_TIMEOUT_MS = 60_000;
 
 describe("generator snapshot tests", () => {
   for (const ex of EXAMPLES) {

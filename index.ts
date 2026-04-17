@@ -516,6 +516,145 @@ function generateFactoryInterface(
 }
 
 /**
+ * Writes one entry of the `handle` object literal — a method that accepts a user
+ * handler, wires it to socket.on, and records an unsubscriber. Void-returning
+ * signatures become fire-and-forget listeners; signatures returning a value use
+ * the socket.io acknowledgment callback.
+ */
+function writeHandleMethod(
+  writer: CodeBlockWriter,
+  func: FunctionSignature,
+  trailingChar: string,
+): void {
+  const funcParams = func.params
+    .map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`)
+    .join(", ");
+  const returnType = func.isVoid ? "void | RpcError" : `${func.returnType} | RpcError`;
+  const handlerParams = func.params.map((p) => p.name).join(", ");
+  const typedParams = func.params.map((p) => `${p.name}: ${p.type}`).join(", ");
+
+  writer.writeLine(`${func.name}(handler: (${funcParams}) => Promise<${returnType}>) {`);
+  writer.indent(() => {
+    writer.writeLine("checkDisposed();");
+
+    if (func.isVoid) {
+      writer.writeLine(`const listener = async (${typedParams}) => {`);
+      writer.indent(() => {
+        writer.writeLine("try {");
+        writer.indent(() => {
+          writer.writeLine(`const handlerResult = await handler(${handlerParams});`);
+          writer.writeLine(
+            `if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {`,
+          );
+          writer.indent(() => {
+            writer.writeLine(`socket.emit('rpcError', handlerResult);`);
+          });
+          writer.writeLine("}");
+        });
+        writer.writeLine("} catch (error) {");
+        writer.indent(() => {
+          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
+          writer.writeLine(
+            `socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });`,
+          );
+        });
+        writer.writeLine("}");
+      });
+      writer.writeLine("};");
+    } else {
+      const callbackType = `(result: ${func.returnType} | RpcError) => void`;
+      const fullParams = typedParams
+        ? `${typedParams}, callback: ${callbackType}`
+        : `callback: ${callbackType}`;
+      writer.writeLine(`const listener = async (${fullParams}) => {`);
+      writer.indent(() => {
+        writer.writeLine("try {");
+        writer.indent(() => {
+          writer.writeLine(`const handlerResult = await handler(${handlerParams});`);
+          writer.writeLine("callback(handlerResult);");
+        });
+        writer.writeLine("} catch (error) {");
+        writer.indent(() => {
+          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
+          writer.writeLine(
+            `callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });`,
+          );
+        });
+        writer.writeLine("}");
+      });
+      writer.writeLine("};");
+    }
+
+    writer.writeLine(`socket.on('${func.name}', listener);`);
+    writer.writeLine(`unsubscribers.push(() => socket.off('${func.name}', listener));`);
+  });
+  writer.writeLine("}" + trailingChar);
+}
+
+/**
+ * Writes the built-in rpcError listener entry for the handle object.
+ */
+function writeRpcErrorHandler(writer: CodeBlockWriter): void {
+  writer.writeLine("rpcError(handler: (error: RpcError) => void) {");
+  writer.indent(() => {
+    writer.writeLine("checkDisposed();");
+    writer.writeLine("const listener = (error: RpcError) => handler(error);");
+    writer.writeLine(`socket.on('rpcError', listener);`);
+    writer.writeLine(`unsubscribers.push(() => socket.off('rpcError', listener));`);
+  });
+  writer.writeLine("}");
+}
+
+/**
+ * Writes one entry of the target-side call object — a method that fires an
+ * outbound event. Void signatures use socket.emit (fire-and-forget); returning
+ * signatures use socket.timeout(...).emitWithAck and translate any thrown error
+ * into an RpcError value.
+ */
+function writeCallMethod(
+  writer: CodeBlockWriter,
+  func: FunctionSignature,
+  trailingChar: string,
+  defaultTimeout: number,
+): void {
+  const funcParams = func.params.map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`);
+  if (!func.isVoid) {
+    funcParams.push(`timeout: number = ${defaultTimeout}`);
+  }
+  const paramsString = funcParams.join(", ");
+  const argsArray = func.params.map((p) => p.name);
+  const argsString = argsArray.length > 0 ? `, ${argsArray.join(", ")}` : "";
+
+  if (func.isVoid) {
+    writer.writeLine(`${func.name}(${paramsString}) {`);
+    writer.indent(() => {
+      writer.writeLine(`socket.emit('${func.name}'${argsString});`);
+    });
+    writer.writeLine("}" + trailingChar);
+  } else {
+    writer.writeLine(
+      `async ${func.name}(${paramsString}): Promise<${func.returnType} | RpcError> {`,
+    );
+    writer.indent(() => {
+      writer.writeLine("try {");
+      writer.indent(() => {
+        writer.writeLine(
+          `return await socket.timeout(timeout).emitWithAck('${func.name}'${argsString});`,
+        );
+      });
+      writer.writeLine("} catch (err) {");
+      writer.indent(() => {
+        writer.writeLine(
+          `return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };`,
+        );
+      });
+      writer.writeLine("}");
+    });
+    writer.writeLine("}" + trailingChar);
+  }
+}
+
+/**
  * Generates the createRpcClient or createRpcServer factory function
  * This is the main API - all socket logic is inlined here
  */
@@ -534,12 +673,12 @@ function generateFactoryFunction(
   sourceFile.addStatements(`\n// === FACTORY FUNCTION ===`);
 
   const bodyWriter = (writer: CodeBlockWriter) => {
-    // Track unsubscribers
+    // Shared closure state: listeners unsubscribed on dispose(), plus the dispose latch.
     writer.writeLine("const unsubscribers: Array<() => void> = [];");
     writer.writeLine("let _disposed = false;");
     writer.writeLine("");
 
-    // Helper to check disposed
+    // Reusable disposed-check used by every handler registration.
     writer.writeLine("const checkDisposed = () => {");
     writer.indent(() => {
       writer.writeLine(`if (_disposed) throw new Error('${interfaceName} has been disposed');`);
@@ -547,138 +686,30 @@ function generateFactoryFunction(
     writer.writeLine("};");
     writer.writeLine("");
 
-    // Build the handle object with inlined handler logic
+    // handle: one method per server-to-client (or client-to-server) inbound function,
+    // plus a catch-all rpcError listener.
     writer.writeLine("const handle: " + interfaceName + "Handle = {");
     writer.indent(() => {
-      handleFunctions.forEach((func, index) => {
-        const funcParams = func.params
-          .map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`)
-          .join(", ");
-        const returnType = func.isVoid ? "void | RpcError" : `${func.returnType} | RpcError`;
-        const handlerParams = func.params.map((p) => p.name).join(", ");
-        const typedParams = func.params.map((p) => `${p.name}: ${p.type}`).join(", ");
-
-        writer.writeLine(`${func.name}(handler: (${funcParams}) => Promise<${returnType}>) {`);
-        writer.indent(() => {
-          writer.writeLine("checkDisposed();");
-
-          // Inline the listener logic
-          if (func.isVoid) {
-            // Fire-and-forget handler
-            writer.writeLine(`const listener = async (${typedParams}) => {`);
-            writer.indent(() => {
-              writer.writeLine("try {");
-              writer.indent(() => {
-                writer.writeLine(`const handlerResult = await handler(${handlerParams});`);
-                writer.writeLine(
-                  `if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {`,
-                );
-                writer.indent(() => {
-                  writer.writeLine(`socket.emit('rpcError', handlerResult);`);
-                });
-                writer.writeLine("}");
-              });
-              writer.writeLine("} catch (error) {");
-              writer.indent(() => {
-                writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-                writer.writeLine(
-                  `socket.emit('rpcError', { message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });`,
-                );
-              });
-              writer.writeLine("}");
-            });
-            writer.writeLine("};");
-          } else {
-            // Acknowledgment handler
-            const callbackType = `(result: ${func.returnType} | RpcError) => void`;
-            const fullParams = typedParams
-              ? `${typedParams}, callback: ${callbackType}`
-              : `callback: ${callbackType}`;
-            writer.writeLine(`const listener = async (${fullParams}) => {`);
-            writer.indent(() => {
-              writer.writeLine("try {");
-              writer.indent(() => {
-                writer.writeLine(`const handlerResult = await handler(${handlerParams});`);
-                writer.writeLine("callback(handlerResult);");
-              });
-              writer.writeLine("} catch (error) {");
-              writer.indent(() => {
-                writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
-                writer.writeLine(
-                  `callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });`,
-                );
-              });
-              writer.writeLine("}");
-            });
-            writer.writeLine("};");
-          }
-
-          writer.writeLine(`socket.on('${func.name}', listener);`);
-          writer.writeLine(`unsubscribers.push(() => socket.off('${func.name}', listener));`);
-        });
-        writer.writeLine("}" + (index < handleFunctions.length - 1 ? "," : ","));
-      });
-
-      // Add rpcError handler
-      writer.writeLine("rpcError(handler: (error: RpcError) => void) {");
-      writer.indent(() => {
-        writer.writeLine("checkDisposed();");
-        writer.writeLine("const listener = (error: RpcError) => handler(error);");
-        writer.writeLine(`socket.on('rpcError', listener);`);
-        writer.writeLine(`unsubscribers.push(() => socket.off('rpcError', listener));`);
-      });
-      writer.writeLine("}");
+      for (const func of handleFunctions) {
+        writeHandleMethod(writer, func, ",");
+      }
+      writeRpcErrorHandler(writer);
     });
     writer.writeLine("};");
     writer.writeLine("");
 
-    // Build the target-side call object (e.g., "server" for client, "client" for server)
+    // target-side call object: one method per outbound function (void → emit, else → emitWithAck).
     writer.writeLine(`const ${targetSide}: ` + interfaceName + targetSideCapitalized + " = {");
     writer.indent(() => {
       callFunctions.forEach((func, index) => {
-        const funcParams = func.params.map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`);
-        if (!func.isVoid) {
-          funcParams.push(`timeout: number = ${config.defaultTimeout}`);
-        }
-        const paramsString = funcParams.join(", ");
-        const argsArray = func.params.map((p) => p.name);
-        const argsString = argsArray.length > 0 ? `, ${argsArray.join(", ")}` : "";
-
-        if (func.isVoid) {
-          // Fire-and-forget call
-          writer.writeLine(`${func.name}(${paramsString}) {`);
-          writer.indent(() => {
-            writer.writeLine(`socket.emit('${func.name}'${argsString});`);
-          });
-          writer.writeLine("}" + (index < callFunctions.length - 1 ? "," : ""));
-        } else {
-          // Acknowledgment call
-          writer.writeLine(
-            `async ${func.name}(${paramsString}): Promise<${func.returnType} | RpcError> {`,
-          );
-          writer.indent(() => {
-            writer.writeLine("try {");
-            writer.indent(() => {
-              writer.writeLine(
-                `return await socket.timeout(timeout).emitWithAck('${func.name}'${argsString});`,
-              );
-            });
-            writer.writeLine("} catch (err) {");
-            writer.indent(() => {
-              writer.writeLine(
-                `return { message: err instanceof Error ? err.message : String(err), code: 'INTERNAL_ERROR', data: undefined };`,
-              );
-            });
-            writer.writeLine("}");
-          });
-          writer.writeLine("}" + (index < callFunctions.length - 1 ? "," : ""));
-        }
+        const trailing = index < callFunctions.length - 1 ? "," : "";
+        writeCallMethod(writer, func, trailing, config.defaultTimeout);
       });
     });
     writer.writeLine("};");
     writer.writeLine("");
 
-    // Return the interface object
+    // Returned interface: exposes handle/call/socket plus the dispose latch.
     writer.writeLine("return {");
     writer.indent(() => {
       writer.writeLine("handle,");

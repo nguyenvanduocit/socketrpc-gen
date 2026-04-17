@@ -27,7 +27,7 @@ ${HEADER_BLANK_LINE}
  * Auto-generated types for the RPC package
  *
  * To regenerate this file, run:
- * bunx socketrpc-gen ${config.inputPath}
+ * bunx @nguyenvanduocit/socketrpc-gen ${config.inputPath}
  */
 
 `,

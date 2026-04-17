@@ -26,10 +26,12 @@ const EXAMPLES: Example[] = [
   { dir: "examples/00-full-app/pkg/rpc", deps: [] },
 ];
 
-// Generated headers embed the absolute input path (e.g. "bunx socketrpc-gen /abs/path/define.ts").
-// Normalize to make snapshot comparisons path-independent.
+// Generated headers embed the CLI invocation with the absolute input path
+// (e.g. "bunx @nguyenvanduocit/socketrpc-gen /abs/path/define.ts"). Normalize
+// both the path and the package identifier so snapshot comparisons stay stable
+// across local + CI machines and across scope renames.
 function normalizeHeader(content: string): string {
-  return content.replace(/bunx socketrpc-gen .+$/gm, "bunx socketrpc-gen <PATH>");
+  return content.replace(/bunx (@[\w-]+\/)?socketrpc-gen .+$/gm, "bunx socketrpc-gen <PATH>");
 }
 
 function runGenerator(inputFile: string): { exitCode: number; stderr: string; stdout: string } {

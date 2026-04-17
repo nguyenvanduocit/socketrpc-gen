@@ -492,7 +492,7 @@ export function generateSideFile(
  *   ${side}.${targetSide}.methodName(args);
  *   ${side}.dispose();
  *
- * To regenerate: bunx socketrpc-gen ${config.inputPath}
+ * To regenerate: bunx @nguyenvanduocit/socketrpc-gen ${config.inputPath}
  */
 
 `,

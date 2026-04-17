@@ -1,6 +1,6 @@
 # Socket RPC
 
-[![npm version](https://badge.fury.io/js/socketrpc-gen.svg)](https://badge.fury.io/js/socketrpc-gen)
+Published on **GitHub Packages** as `@nguyenvanduocit/socketrpc-gen`.
 
 `socket-rpc` is a powerful command-line tool that automatically generates a type-safe RPC (Remote Procedure Call) layer for your client and server applications using `socket.io`. It takes a TypeScript interface as input and generates all the necessary code for you to communicate between your client and server with full type safety. It's unopinionated, meaning it only generates the function bindings and doesn't interfere with your existing `socket.io` configuration.
 
@@ -13,6 +13,37 @@
 -   **Bidirectional Communication:** Supports both client-to-server and server-to-client RPC calls.
 -   **Simple to Use:** Get started with a single command.
 -   **Error Handling:** Built-in error handling with `RpcError` type.
+
+## Installation
+
+This package is published to **GitHub Packages**, not the public npm registry.
+Before installing, point the `@nguyenvanduocit` scope at GitHub Packages by
+adding the following line to a project-local `.npmrc` (or `~/.npmrc`):
+
+```
+@nguyenvanduocit:registry=https://npm.pkg.github.com
+```
+
+GitHub Packages requires authentication even for public packages. Create a
+classic Personal Access Token with the `read:packages` scope at
+<https://github.com/settings/tokens>, then either `npm login` against the
+registry once, or append to the same `.npmrc`:
+
+```
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```
+
+Once configured, run the generator via `bunx`:
+
+```bash
+bunx @nguyenvanduocit/socketrpc-gen <path-to-your-interface-file>
+```
+
+Or install it as a dev dependency:
+
+```bash
+bun add -d @nguyenvanduocit/socketrpc-gen
+```
 
 ## Getting Started
 
@@ -73,13 +104,13 @@ interface ClientFunctions {
 Use the `socketrpc-gen` CLI to generate the RPC code. The generator automatically infers the output directory from the input file path.
 
 ```bash
-bunx socketrpc-gen <path-to-your-interface-file> [options]
+bunx @nguyenvanduocit/socketrpc-gen <path-to-your-interface-file> [options]
 ```
 
 For example:
 
 ```bash
-bunx socketrpc-gen ./examples/00-full-app/pkg/rpc/define.ts
+bunx @nguyenvanduocit/socketrpc-gen ./examples/00-full-app/pkg/rpc/define.ts
 ```
 
 This will generate a new package in the `examples/00-full-app/pkg/rpc` directory containing the generated client and server code.

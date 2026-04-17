@@ -864,13 +864,14 @@ function resolveConfig(userConfig: GeneratorConfig): ResolvedConfig {
 }
 
 /**
- * Validates that the input file exists
+ * Validates that the input file exists. Throws on failure; the CLI boundary is
+ * responsible for reporting the error and choosing the exit code.
  */
 function validateInputFile(inputPath: string): void {
   if (!fs.existsSync(inputPath)) {
-    console.error("❌ Error: Input file not found at", inputPath);
-    console.error("💡 Please create a file with ClientFunctions and ServerFunctions interfaces");
-    process.exit(1);
+    throw new Error(
+      `Input file not found at ${inputPath}. Create a file with ClientFunctions and ServerFunctions interfaces.`,
+    );
   }
 }
 
@@ -903,8 +904,9 @@ async function extractInterfacesFromFile(inputPath: string): Promise<{
   const serverFunctionsInterface = sourceFile.getInterface("ServerFunctions");
 
   if (!clientFunctionsInterface || !serverFunctionsInterface) {
-    console.error("❌ Error: Could not find ClientFunctions or ServerFunctions interfaces");
-    process.exit(1);
+    throw new Error(
+      `Could not find ClientFunctions or ServerFunctions interfaces in ${inputPath}.`,
+    );
   }
 
   // Extract function signatures
@@ -994,52 +996,47 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
   const config = resolveConfig(userConfig);
   validateInputFile(config.inputPath);
 
-  try {
-    const { clientFunctions, serverFunctions, usedTypes, inputFile } =
-      await extractInterfacesFromFile(config.inputPath);
-    await ensurePackageStructure(config.outputDir, config);
+  const { clientFunctions, serverFunctions, usedTypes, inputFile } =
+    await extractInterfacesFromFile(config.inputPath);
+  await ensurePackageStructure(config.outputDir, config);
 
-    // Create a new ts-morph project for generating output files
-    const outputProject = new Project({
-      useInMemoryFileSystem: false,
-      tsConfigFilePath: path.join(config.outputDir, "tsconfig.json"),
-      compilerOptions: {
-        outDir: path.join(config.outputDir, "dist"),
-        rootDir: config.outputDir,
-      },
-    });
+  // Create a new ts-morph project for generating output files
+  const outputProject = new Project({
+    useInMemoryFileSystem: false,
+    tsConfigFilePath: path.join(config.outputDir, "tsconfig.json"),
+    compilerOptions: {
+      outDir: path.join(config.outputDir, "dist"),
+      rootDir: config.outputDir,
+    },
+  });
 
-    // Generate files using ts-morph
-    generateTypesFile(outputProject, config.outputDir, config);
-    generateSideFile(
-      "client",
-      outputProject,
-      config.outputDir,
-      clientFunctions,
-      serverFunctions,
-      config,
-      usedTypes,
-      inputFile,
-    );
-    generateSideFile(
-      "server",
-      outputProject,
-      config.outputDir,
-      clientFunctions,
-      serverFunctions,
-      config,
-      usedTypes,
-      inputFile,
-    );
+  // Generate files using ts-morph
+  generateTypesFile(outputProject, config.outputDir, config);
+  generateSideFile(
+    "client",
+    outputProject,
+    config.outputDir,
+    clientFunctions,
+    serverFunctions,
+    config,
+    usedTypes,
+    inputFile,
+  );
+  generateSideFile(
+    "server",
+    outputProject,
+    config.outputDir,
+    clientFunctions,
+    serverFunctions,
+    config,
+    usedTypes,
+    inputFile,
+  );
 
-    // Save all generated files
-    await outputProject.save();
+  // Save all generated files
+  await outputProject.save();
 
-    logGenerationSummary(clientFunctions, serverFunctions, config.outputDir);
-  } catch (error) {
-    console.error("❌ Error generating RPC package:", error);
-    process.exit(1);
-  }
+  logGenerationSummary(clientFunctions, serverFunctions, config.outputDir);
 }
 
 // ============================================
@@ -1124,11 +1121,11 @@ if (import.meta.main) {
         errorLogger: options.errorLogger,
       };
 
-      if (options.watch) {
-        watchMode(config).catch(console.error);
-      } else {
-        generateRpcPackage(config).catch(console.error);
-      }
+      const run = options.watch ? watchMode(config) : generateRpcPackage(config);
+      run.catch((error) => {
+        console.error("❌ Error:", error instanceof Error ? error.message : error);
+        process.exit(1);
+      });
     });
 
   program.parse(process.argv);

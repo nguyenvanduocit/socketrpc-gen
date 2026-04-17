@@ -1,5 +1,16 @@
 # Changelog
 
+## [5.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v4.0.2...v5.0.0) (2026-04-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* The package is renamed from `socketrpc-gen` to `@nguyenvanduocit/socketrpc-gen` and is no longer available on the public npm registry. Consumers must configure the @nguyenvanduocit scope to point at https://npm.pkg.github.com (see README for the required .npmrc and token setup), then install or invoke the scoped name, e.g. `bunx @nguyenvanduocit/socketrpc-gen <path>`. The unscoped `socketrpc-gen` binary name is preserved, so once installed the CLI command is unchanged.
+
+### Features
+
+* switch publishing from npm to GitHub Packages ([62f17c0](https://github.com/nguyenvanduocit/socketrpc-gen/commit/62f17c0f2a916c5b136e4059e3052149e7e449fb))
+
 ## [4.0.2](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v4.0.1...v4.0.2) (2026-04-17)
 
 

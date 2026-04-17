@@ -1,6 +1,6 @@
 {
   "name": "@nguyenvanduocit/socketrpc-gen",
-  "version": "4.0.2",
+  "version": "5.0.0",
   "description": "Code generator for Socket.IO RPC packages using ts-morph.",
   "main": "index.ts",
   "module": "index.ts",

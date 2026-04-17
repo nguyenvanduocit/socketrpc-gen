@@ -87,8 +87,8 @@ export function createRpcServer(socket: Socket): RpcServer {
             checkDisposed();
             const listener = async (userId: string, callback: (result: User | RpcError) => void) => {
                 try {
-                    const result = await handler(userId);
-                    callback(result);
+                    const handlerResult = await handler(userId);
+                    callback(handlerResult);
                 } catch (error) {
                     console.error('[getUser] Handler error:', error);
                     callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
@@ -101,8 +101,8 @@ export function createRpcServer(socket: Socket): RpcServer {
             checkDisposed();
             const listener = async (name: string, email: string, callback: (result: User | RpcError) => void) => {
                 try {
-                    const result = await handler(name, email);
-                    callback(result);
+                    const handlerResult = await handler(name, email);
+                    callback(handlerResult);
                 } catch (error) {
                     console.error('[createUser] Handler error:', error);
                     callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });
@@ -115,9 +115,9 @@ export function createRpcServer(socket: Socket): RpcServer {
             checkDisposed();
             const listener = async (userId: string) => {
                 try {
-                    const result = await handler(userId);
-                    if (result && typeof result === 'object' && 'code' in result && 'message' in result) {
-                        socket.emit('rpcError', result);
+                    const handlerResult = await handler(userId);
+                    if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {
+                        socket.emit('rpcError', handlerResult);
                     }
                 } catch (error) {
                     console.error('[deleteUser] Handler error:', error);

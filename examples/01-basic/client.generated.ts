@@ -87,9 +87,9 @@ export function createRpcClient(socket: Socket): RpcClient {
             checkDisposed();
             const listener = async (message: string) => {
                 try {
-                    const result = await handler(message);
-                    if (result && typeof result === 'object' && 'code' in result && 'message' in result) {
-                        socket.emit('rpcError', result);
+                    const handlerResult = await handler(message);
+                    if (handlerResult && typeof handlerResult === 'object' && 'code' in handlerResult && 'message' in handlerResult) {
+                        socket.emit('rpcError', handlerResult);
                     }
                 } catch (error) {
                     console.error('[onMessage] Handler error:', error);
@@ -103,8 +103,8 @@ export function createRpcClient(socket: Socket): RpcClient {
             checkDisposed();
             const listener = async (prompt: string, callback: (result: boolean | RpcError) => void) => {
                 try {
-                    const result = await handler(prompt);
-                    callback(result);
+                    const handlerResult = await handler(prompt);
+                    callback(handlerResult);
                 } catch (error) {
                     console.error('[requestConfirmation] Handler error:', error);
                     callback({ message: error instanceof Error ? error.message : String(error), code: 'INTERNAL_ERROR', data: undefined });

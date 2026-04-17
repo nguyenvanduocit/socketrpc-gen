@@ -2,7 +2,15 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { Project, InterfaceDeclaration, SyntaxKind, SourceFile, StructureKind } from "ts-morph";
+import {
+  Project,
+  InterfaceDeclaration,
+  SyntaxKind,
+  SourceFile,
+  StructureKind,
+  PropertySignature,
+  CodeBlockWriter,
+} from "ts-morph";
 import { Command } from "commander";
 
 // ============================================
@@ -106,7 +114,7 @@ function getAllBaseInterfaces(interfaceDeclaration: InterfaceDeclaration): Inter
  * Returns null if the property should be skipped
  */
 function extractSignatureFromProperty(
-  property: any,
+  property: PropertySignature,
   processedNames: Set<string>,
 ): FunctionSignature | null {
   const typeNode = property.getTypeNode();
@@ -272,7 +280,7 @@ function generateTypesFile(project: Project, outputDir: string, config: Resolved
  * Handles types from both the input file and its imported dependencies
  */
 function addCustomTypeImports(
-  sourceFile: any,
+  sourceFile: SourceFile,
   functions: FunctionSignature[],
   inputFile: SourceFile,
   inputFilename: string,
@@ -445,7 +453,7 @@ function splitTypeArguments(args: string): string[] {
  * Generates the RpcClient or RpcServer interface with .handle and .client/.server namespaces
  */
 function generateFactoryInterface(
-  sourceFile: any,
+  sourceFile: SourceFile,
   callFunctions: FunctionSignature[],
   handleFunctions: FunctionSignature[],
   side: "client" | "server",
@@ -564,7 +572,7 @@ function generateFactoryInterface(
  * This is the main API - all socket logic is inlined here
  */
 function generateFactoryFunction(
-  sourceFile: any,
+  sourceFile: SourceFile,
   callFunctions: FunctionSignature[],
   handleFunctions: FunctionSignature[],
   side: "client" | "server",
@@ -577,7 +585,7 @@ function generateFactoryFunction(
 
   sourceFile.addStatements(`\n// === FACTORY FUNCTION ===`);
 
-  const bodyWriter = (writer: any) => {
+  const bodyWriter = (writer: CodeBlockWriter) => {
     // Track unsubscribers
     writer.writeLine("const unsubscribers: Array<() => void> = [];");
     writer.writeLine("let _disposed = false;");

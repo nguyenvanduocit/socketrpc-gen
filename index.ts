@@ -10,6 +10,7 @@ import {
   StructureKind,
   PropertySignature,
   CodeBlockWriter,
+  Type,
 } from "ts-morph";
 import { Command } from "commander";
 
@@ -276,173 +277,120 @@ function generateTypesFile(project: Project, outputDir: string, config: Resolved
 // ============================================
 
 /**
- * Extracts custom types used in function signatures and adds them as type-only imports
- * Handles types from both the input file and its imported dependencies
+ * Walks a ts-morph Type and records any referenced named symbols whose declaring
+ * source file is part of the user's codebase (not node_modules, not ambient lib).
+ */
+function collectReferencedSymbols(
+  type: Type,
+  out: Map<string, SourceFile>,
+  visited: Set<Type>,
+): void {
+  if (visited.has(type)) return;
+  visited.add(type);
+
+  const symbol = type.getAliasSymbol() ?? type.getSymbol();
+  if (symbol) {
+    const name = symbol.getName();
+    const isAnonymous = !name || name === "__type" || name === "__object";
+    if (!isAnonymous && !out.has(name)) {
+      for (const decl of symbol.getDeclarations()) {
+        const sf = decl.getSourceFile();
+        if (!sf.isInNodeModules() && !sf.isDeclarationFile()) {
+          out.set(name, sf);
+          break;
+        }
+      }
+    }
+  }
+
+  if (type.isUnion()) {
+    type.getUnionTypes().forEach((t) => collectReferencedSymbols(t, out, visited));
+  }
+  if (type.isIntersection()) {
+    type.getIntersectionTypes().forEach((t) => collectReferencedSymbols(t, out, visited));
+  }
+  if (type.isArray()) {
+    const elem = type.getArrayElementType();
+    if (elem) collectReferencedSymbols(elem, out, visited);
+  }
+  if (type.isTuple()) {
+    type.getTupleElements().forEach((t) => collectReferencedSymbols(t, out, visited));
+  }
+  type.getTypeArguments().forEach((t) => collectReferencedSymbols(t, out, visited));
+
+  // Walk anonymous object shapes so nested named types are discovered.
+  // Named object types' imports cover their own structure at the declaration site.
+  if (!symbol) {
+    for (const prop of type.getProperties()) {
+      const propDecl = prop.getDeclarations()[0];
+      if (propDecl) {
+        collectReferencedSymbols(prop.getTypeAtLocation(propDecl), out, visited);
+      }
+    }
+  }
+}
+
+/**
+ * Walks every function-property type in an interface chain and accumulates the
+ * map of named types referenced by those signatures.
+ */
+function collectUsedTypes(
+  interfaceDeclaration: InterfaceDeclaration,
+  out: Map<string, SourceFile>,
+): void {
+  const visited = new Set<Type>();
+  const allInterfaces = [...getAllBaseInterfaces(interfaceDeclaration), interfaceDeclaration];
+
+  for (const iface of allInterfaces) {
+    for (const property of iface.getProperties()) {
+      const typeNode = property.getTypeNode();
+      if (!typeNode || typeNode.getKind() !== SyntaxKind.FunctionType) continue;
+
+      const callSignatures = property.getType().getCallSignatures();
+      const signature = callSignatures[0];
+      if (!signature) continue;
+
+      for (const param of signature.getParameters()) {
+        collectReferencedSymbols(param.getTypeAtLocation(property), out, visited);
+      }
+      collectReferencedSymbols(signature.getReturnType(), out, visited);
+    }
+  }
+}
+
+/**
+ * Adds type-only imports for every user-declared type referenced by the signatures.
+ * The input file's imports are emitted before any dependency-file imports.
  */
 function addCustomTypeImports(
   sourceFile: SourceFile,
-  functions: FunctionSignature[],
+  usedTypes: Map<string, SourceFile>,
   inputFile: SourceFile,
-  inputFilename: string,
 ): void {
-  const usedTypes = new Set<string>();
+  if (usedTypes.size === 0) return;
 
-  // Extract types from function parameters and return types
-  functions.forEach((func) => {
-    func.params.forEach((param) => {
-      const typeNames = extractTypeNames(param.type);
-      typeNames.forEach((typeName) => usedTypes.add(typeName));
-    });
-
-    const returnTypeNames = extractTypeNames(func.returnType);
-    returnTypeNames.forEach((typeName) => usedTypes.add(typeName));
-  });
-
-  // Filter out primitive types and built-in types
-  const customTypes = Array.from(usedTypes).filter(
-    (type) =>
-      ![
-        "string",
-        "number",
-        "boolean",
-        "void",
-        "any",
-        "unknown",
-        "object",
-        "Array",
-        "Promise",
-        "Error",
-      ].includes(type) &&
-      !type.includes("|") &&
-      !type.includes("<") &&
-      !type.includes("["),
-  );
-
-  if (customTypes.length === 0) return;
-
-  // Group types by their source file
-  const typesByFile = new Map<string, string[]>();
-  const remainingTypes = new Set(customTypes);
-
-  // Check main input file first
-  const inputFileTypes = customTypes.filter((type) => {
-    const exportedTypes = inputFile.getExportedDeclarations();
-    return exportedTypes.has(type) || inputFile.getTypeAlias(type) || inputFile.getInterface(type);
-  });
-
-  if (inputFileTypes.length > 0) {
-    typesByFile.set(inputFilename, inputFileTypes);
-    inputFileTypes.forEach((t) => remainingTypes.delete(t));
+  // Group types by their declaring source file, preserving first-seen order within each bucket.
+  const typesByFile = new Map<SourceFile, string[]>();
+  for (const [name, sf] of usedTypes) {
+    const bucket = typesByFile.get(sf);
+    if (bucket) bucket.push(name);
+    else typesByFile.set(sf, [name]);
   }
 
-  // Check imported files for remaining types
-  if (remainingTypes.size > 0) {
-    const referencedFiles = inputFile.getReferencedSourceFiles();
-    for (const refFile of referencedFiles) {
-      const refFilename = path.basename(refFile.getFilePath(), path.extname(refFile.getFilePath()));
-      const foundTypes: string[] = [];
+  // Emit input-file imports first, then dependency-file imports in discovery order.
+  const inputBucket = typesByFile.get(inputFile);
+  const depBuckets = [...typesByFile.entries()].filter(([sf]) => sf !== inputFile);
 
-      for (const type of remainingTypes) {
-        const exportedTypes = refFile.getExportedDeclarations();
-        if (exportedTypes.has(type) || refFile.getTypeAlias(type) || refFile.getInterface(type)) {
-          foundTypes.push(type);
-        }
-      }
-
-      if (foundTypes.length > 0) {
-        typesByFile.set(refFilename, foundTypes);
-        foundTypes.forEach((t) => remainingTypes.delete(t));
-      }
-
-      if (remainingTypes.size === 0) break;
-    }
-  }
-
-  // Add import declarations for each file
-  for (const [filename, types] of typesByFile) {
+  const emit = (sf: SourceFile, names: string[]) => {
     sourceFile.addImportDeclaration({
-      moduleSpecifier: `./${filename}`,
-      namedImports: types,
+      moduleSpecifier: `./${sf.getBaseNameWithoutExtension()}`,
+      namedImports: names,
       isTypeOnly: true,
     });
-  }
-}
+  };
 
-/**
- * Extracts type names from a TypeScript type string
- * Handles complex types including generics, unions, and arrays
- */
-function extractTypeNames(typeString: string): string[] {
-  const types = new Set<string>();
-
-  // Remove array brackets and extract types from arrays
-  let cleanedType = typeString.replace(/\[\]/g, "");
-
-  // Extract types from generics: Map<string, User[]> -> Map, string, User
-  // This improved regex handles nested generics
-  const genericRegex = /([A-Z][a-zA-Z0-9]*)<(.+)>/;
-  const genericMatch = genericRegex.exec(cleanedType);
-
-  if (genericMatch) {
-    // Add the generic type itself (e.g., "Map")
-    types.add(genericMatch[1]);
-
-    // Recursively extract types from generic arguments
-    const genericArgs = genericMatch[2];
-    // Split by comma but respect nested generics
-    const args = splitTypeArguments(genericArgs);
-    args.forEach((arg) => {
-      extractTypeNames(arg.trim()).forEach((t) => types.add(t));
-    });
-
-    // Process the rest of the type string
-    cleanedType = cleanedType.replace(genericMatch[0], "");
-  }
-
-  // Extract types from unions: string | number | User
-  const unionParts = cleanedType.split("|").map((p) => p.trim());
-  unionParts.forEach((part) => {
-    const typeRegex = /\b([A-Z][a-zA-Z0-9]*)\b/g;
-    let match;
-    while ((match = typeRegex.exec(part)) !== null) {
-      types.add(match[1]);
-    }
-  });
-
-  return Array.from(types);
-}
-
-/**
- * Splits generic type arguments respecting nested generics
- * Example: "string, Map<string, User[]>" -> ["string", "Map<string, User[]>"]
- */
-function splitTypeArguments(args: string): string[] {
-  const result: string[] = [];
-  let current = "";
-  let depth = 0;
-
-  for (let i = 0; i < args.length; i++) {
-    const char = args[i];
-
-    if (char === "<") {
-      depth++;
-      current += char;
-    } else if (char === ">") {
-      depth--;
-      current += char;
-    } else if (char === "," && depth === 0) {
-      result.push(current.trim());
-      current = "";
-    } else {
-      current += char;
-    }
-  }
-
-  if (current.trim()) {
-    result.push(current.trim());
-  }
-
-  return result;
+  if (inputBucket) emit(inputFile, inputBucket);
+  for (const [sf, names] of depBuckets) emit(sf, names);
 }
 
 // ============================================
@@ -783,10 +731,12 @@ function generateSideFile(
   clientFunctions: FunctionSignature[],
   serverFunctions: FunctionSignature[],
   config: ResolvedConfig,
+  usedTypes: Map<string, SourceFile>,
   inputFile: SourceFile,
 ): void {
   const socketModule = side === "client" ? "socket.io-client" : "socket.io";
   const fileName = `${side}.generated.ts`;
+  const inputFilename = path.basename(config.inputPath, path.extname(config.inputPath));
 
   // Client calls serverFunctions and handles clientFunctions
   // Server calls clientFunctions and handles serverFunctions
@@ -811,14 +761,8 @@ function generateSideFile(
     isTypeOnly: true,
   });
 
-  // Add custom type imports from input file
-  const inputFilename = path.basename(config.inputPath, path.extname(config.inputPath));
-  addCustomTypeImports(
-    sideFile,
-    [...clientFunctions, ...serverFunctions],
-    inputFile,
-    inputFilename,
-  );
+  // Add custom type imports (grouped by their declaring source file)
+  addCustomTypeImports(sideFile, usedTypes, inputFile);
 
   const targetSide = side === "client" ? "server" : "client";
 
@@ -936,7 +880,8 @@ function validateInputFile(inputPath: string): void {
 async function extractInterfacesFromFile(inputPath: string): Promise<{
   clientFunctions: FunctionSignature[];
   serverFunctions: FunctionSignature[];
-  sourceFile: SourceFile;
+  usedTypes: Map<string, SourceFile>;
+  inputFile: SourceFile;
 }> {
   // Create a new ts-morph project for reading input
   const inputProject = new Project({
@@ -966,7 +911,15 @@ async function extractInterfacesFromFile(inputPath: string): Promise<{
   const clientFunctions = extractFunctionSignatures(serverFunctionsInterface);
   const serverFunctions = extractFunctionSignatures(clientFunctionsInterface);
 
-  return { clientFunctions, serverFunctions, sourceFile };
+  // Walk every signature's types and collect every user-declared type they reference.
+  // Order matters: server interface is walked first so that types appearing on
+  // server-facing methods (which tend to be called first in generated client code)
+  // are listed earliest in each import group.
+  const usedTypes = new Map<string, SourceFile>();
+  collectUsedTypes(serverFunctionsInterface, usedTypes);
+  collectUsedTypes(clientFunctionsInterface, usedTypes);
+
+  return { clientFunctions, serverFunctions, usedTypes, inputFile: sourceFile };
 }
 
 /**
@@ -1042,9 +995,8 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
   validateInputFile(config.inputPath);
 
   try {
-    const { clientFunctions, serverFunctions, sourceFile } = await extractInterfacesFromFile(
-      config.inputPath,
-    );
+    const { clientFunctions, serverFunctions, usedTypes, inputFile } =
+      await extractInterfacesFromFile(config.inputPath);
     await ensurePackageStructure(config.outputDir, config);
 
     // Create a new ts-morph project for generating output files
@@ -1066,7 +1018,8 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
       clientFunctions,
       serverFunctions,
       config,
-      sourceFile,
+      usedTypes,
+      inputFile,
     );
     generateSideFile(
       "server",
@@ -1075,7 +1028,8 @@ async function generateRpcPackage(userConfig: GeneratorConfig): Promise<void> {
       clientFunctions,
       serverFunctions,
       config,
-      sourceFile,
+      usedTypes,
+      inputFile,
     );
 
     // Save all generated files

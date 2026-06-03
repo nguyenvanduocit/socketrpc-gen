@@ -1,6 +1,13 @@
 /**
  * Configuration options for the RPC generator
  */
+/**
+ * How generated call methods surface RPC failures.
+ * - "return": calls resolve to `T | RpcError` (caller checks with `isRpcError`).
+ * - "throw": calls resolve to `T` and reject with the RpcError (caller uses try/catch).
+ */
+export type ErrorMode = "return" | "throw";
+
 export interface GeneratorConfig {
   /** Path to the input TypeScript file containing interface definitions */
   inputPath: string;
@@ -10,8 +17,10 @@ export interface GeneratorConfig {
   packageName: string;
   /** Default timeout for RPC calls in milliseconds */
   defaultTimeout?: number;
-  /** Custom error logger import path (e.g., '@/lib/logger') */
+  /** Custom error logger import path. The module must default-export `(message: string, ...args: unknown[]) => void` */
   errorLogger?: string;
+  /** How call methods surface failures: "return" the RpcError (default) or "throw" it */
+  errorMode?: ErrorMode;
 }
 
 /**
@@ -47,6 +56,7 @@ export function resolveConfig(userConfig: GeneratorConfig): ResolvedConfig {
   return {
     defaultTimeout: 5000,
     errorLogger: undefined,
+    errorMode: "return",
     ...userConfig,
   };
 }

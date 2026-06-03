@@ -11,14 +11,20 @@ export type UnsubscribeFunction = () => void;
 
 /** Per-call options for RPC methods. Extensible — new fields can be added without breaking callers. */
 export interface RpcCallOptions {
-    /** Override the default timeout (ms) for this call. */
+    /** Override the default timeout (ms) for this call. Ignored for fire-and-forget calls. */
     timeout?: number;
+    /** Abort the call. When the signal fires, the call settles with an ABORTED RpcError and stops awaiting the acknowledgement. */
+    signal?: AbortSignal;
+    /** Drop the call instead of buffering it when the socket is disconnected. Use for real-time or non-idempotent calls that must not be replayed on reconnect. */
+    volatile?: boolean;
 }
 
 /** Standard RPC error codes. Use these instead of ad-hoc strings. */
 export const RpcErrorCodes = {
     TIMEOUT: "TIMEOUT",
     DISPOSED: "DISPOSED",
+    DISCONNECTED: "DISCONNECTED",
+    ABORTED: "ABORTED",
     INTERNAL_ERROR: "INTERNAL_ERROR",
     INVALID_ARGUMENT: "INVALID_ARGUMENT",
 } as const;
@@ -28,6 +34,8 @@ export type RpcErrorCode = typeof RpcErrorCodes[keyof typeof RpcErrorCodes];
 
 /** Represents an error that occurred during an RPC call. */
 export interface RpcError {
+    /** Brand marking this object as an RpcError. Set by `toRpcError`/`rpcError`; checked by `isRpcError`. Distinguishes errors from successful results that happen to share the `{ message, code }` shape. */
+    readonly __rpcError: true;
     /** The error message. */
     message: string;
     /** The error code. Standard codes are in RpcErrorCodes. */
@@ -38,16 +46,35 @@ export interface RpcError {
     data?: any;
 }
 
-/** Type guard to check if an object is an RpcError. */
+/** Type guard to check if a value is an RpcError. Relies on the `__rpcError` brand, so successful results that share the `{ message, code }` shape are never misclassified. */
 export function isRpcError(obj: any): obj is RpcError {
-    return !!obj && typeof (obj as RpcError).message === 'string' && typeof (obj as RpcError).code === 'string';
+    return !!obj && (obj as RpcError).__rpcError === true;
 }
 
-/** Normalize any thrown value into an RpcError. Passes existing RpcError values through unchanged so `throw rpcErrorObj` preserves shape. */
+/** Construct a branded RpcError. Use inside handlers to signal a typed failure, e.g. `throw rpcError('NOT_FOUND', 'User not found')`. */
+export function rpcError(code: string, message: string, data?: any): RpcError {
+    return { __rpcError: true, code, message, data };
+}
+
+/** Normalize any thrown value into a branded RpcError. Passes existing RpcError values through unchanged, and maps socket.io's timeout and disconnect errors to the TIMEOUT and DISCONNECTED codes. */
 export function toRpcError(err: unknown, opts?: { code?: string; origin?: string }): RpcError {
     if (isRpcError(err)) return err;
     const message = err instanceof Error ? err.message : String(err);
     const isTimeout = err instanceof Error && err.message === "operation has timed out";
-    const code = opts?.code ?? (isTimeout ? RpcErrorCodes.TIMEOUT : RpcErrorCodes.INTERNAL_ERROR);
-    return { message, code, origin: opts?.origin };
+    const isDisconnected = err instanceof Error && err.message === "socket has been disconnected";
+    const code = opts?.code ?? (isTimeout
+        ? RpcErrorCodes.TIMEOUT
+        : isDisconnected
+            ? RpcErrorCodes.DISCONNECTED
+            : RpcErrorCodes.INTERNAL_ERROR);
+    return { __rpcError: true, message, code, origin: opts?.origin };
+}
+
+/** Resolve with an ABORTED RpcError when the signal fires. Internal helper raced against in-flight calls so an aborted call stops awaiting its acknowledgement. */
+export function rpcWhenAborted(signal: AbortSignal, origin: string): Promise<RpcError> {
+    return new Promise((resolve) => {
+        const fire = () => resolve({ __rpcError: true, code: RpcErrorCodes.ABORTED, message: "Request aborted", origin });
+        if (signal.aborted) return fire();
+        signal.addEventListener("abort", fire, { once: true });
+    });
 }

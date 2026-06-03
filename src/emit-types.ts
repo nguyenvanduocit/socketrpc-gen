@@ -49,7 +49,23 @@ ${HEADER_BLANK_LINE}
         name: "timeout",
         type: "number",
         hasQuestionToken: true,
-        docs: ["Override the default timeout (ms) for this call."],
+        docs: ["Override the default timeout (ms) for this call. Ignored for fire-and-forget calls."],
+      },
+      {
+        name: "signal",
+        type: "AbortSignal",
+        hasQuestionToken: true,
+        docs: [
+          "Abort the call. When the signal fires, the call settles with an ABORTED RpcError and stops awaiting the acknowledgement.",
+        ],
+      },
+      {
+        name: "volatile",
+        type: "boolean",
+        hasQuestionToken: true,
+        docs: [
+          "Drop the call instead of buffering it when the socket is disconnected. Use for real-time or non-idempotent calls that must not be replayed on reconnect.",
+        ],
       },
     ],
   });
@@ -64,6 +80,8 @@ ${HEADER_BLANK_LINE}
         initializer: `{
     TIMEOUT: "TIMEOUT",
     DISPOSED: "DISPOSED",
+    DISCONNECTED: "DISCONNECTED",
+    ABORTED: "ABORTED",
     INTERNAL_ERROR: "INTERNAL_ERROR",
     INVALID_ARGUMENT: "INVALID_ARGUMENT",
 } as const`,
@@ -83,6 +101,14 @@ ${HEADER_BLANK_LINE}
     isExported: true,
     docs: ["Represents an error that occurred during an RPC call."],
     properties: [
+      {
+        name: "__rpcError",
+        type: "true",
+        isReadonly: true,
+        docs: [
+          "Brand marking this object as an RpcError. Set by `toRpcError`/`rpcError`; checked by `isRpcError`. Distinguishes errors from successful results that happen to share the `{ message, code }` shape.",
+        ],
+      },
       { name: "message", type: "string", docs: ["The error message."] },
       {
         name: "code",
@@ -107,17 +133,34 @@ ${HEADER_BLANK_LINE}
   typesFile.addFunction({
     name: "isRpcError",
     isExported: true,
-    docs: ["Type guard to check if an object is an RpcError."],
+    docs: [
+      "Type guard to check if a value is an RpcError. Relies on the `__rpcError` brand, so successful results that share the `{ message, code }` shape are never misclassified.",
+    ],
     parameters: [{ name: "obj", type: "any" }],
     returnType: "obj is RpcError",
-    statements: `return !!obj && typeof (obj as RpcError).message === 'string' && typeof (obj as RpcError).code === 'string';`,
+    statements: `return !!obj && (obj as RpcError).__rpcError === true;`,
+  });
+
+  typesFile.addFunction({
+    name: "rpcError",
+    isExported: true,
+    docs: [
+      "Construct a branded RpcError. Use inside handlers to signal a typed failure, e.g. `throw rpcError('NOT_FOUND', 'User not found')`.",
+    ],
+    parameters: [
+      { name: "code", type: "string" },
+      { name: "message", type: "string" },
+      { name: "data", type: "any", hasQuestionToken: true },
+    ],
+    returnType: "RpcError",
+    statements: `return { __rpcError: true, code, message, data };`,
   });
 
   typesFile.addFunction({
     name: "toRpcError",
     isExported: true,
     docs: [
-      "Normalize any thrown value into an RpcError. Passes existing RpcError values through unchanged so `throw rpcErrorObj` preserves shape.",
+      "Normalize any thrown value into a branded RpcError. Passes existing RpcError values through unchanged, and maps socket.io's timeout and disconnect errors to the TIMEOUT and DISCONNECTED codes.",
     ],
     parameters: [
       { name: "err", type: "unknown" },
@@ -127,8 +170,31 @@ ${HEADER_BLANK_LINE}
     statements: `if (isRpcError(err)) return err;
 const message = err instanceof Error ? err.message : String(err);
 const isTimeout = err instanceof Error && err.message === "operation has timed out";
-const code = opts?.code ?? (isTimeout ? RpcErrorCodes.TIMEOUT : RpcErrorCodes.INTERNAL_ERROR);
-return { message, code, origin: opts?.origin };`,
+const isDisconnected = err instanceof Error && err.message === "socket has been disconnected";
+const code = opts?.code ?? (isTimeout
+    ? RpcErrorCodes.TIMEOUT
+    : isDisconnected
+        ? RpcErrorCodes.DISCONNECTED
+        : RpcErrorCodes.INTERNAL_ERROR);
+return { __rpcError: true, message, code, origin: opts?.origin };`,
+  });
+
+  typesFile.addFunction({
+    name: "rpcWhenAborted",
+    isExported: true,
+    docs: [
+      "Resolve with an ABORTED RpcError when the signal fires. Internal helper raced against in-flight calls so an aborted call stops awaiting its acknowledgement.",
+    ],
+    parameters: [
+      { name: "signal", type: "AbortSignal" },
+      { name: "origin", type: "string" },
+    ],
+    returnType: "Promise<RpcError>",
+    statements: `return new Promise((resolve) => {
+    const fire = () => resolve({ __rpcError: true, code: RpcErrorCodes.ABORTED, message: "Request aborted", origin });
+    if (signal.aborted) return fire();
+    signal.addEventListener("abort", fire, { once: true });
+});`,
   });
 
   typesFile.formatText();

@@ -23,6 +23,28 @@ function generatePackageJson(config: ResolvedConfig): object {
     version: "1.0.0",
     description: "Auto-generated RPC package for Socket.IO",
     type: "module",
+    // Root import resolves to the shared types/error vocabulary; the client/server
+    // entry points are exposed as subpaths so consumers can import them by package name.
+    main: "./dist/types.generated.js",
+    types: "./dist/types.generated.d.ts",
+    exports: {
+      ".": {
+        types: "./dist/types.generated.d.ts",
+        default: "./dist/types.generated.js",
+      },
+      "./client.generated": {
+        types: "./dist/client.generated.d.ts",
+        default: "./dist/client.generated.js",
+      },
+      "./server.generated": {
+        types: "./dist/server.generated.d.ts",
+        default: "./dist/server.generated.js",
+      },
+      "./types.generated": {
+        types: "./dist/types.generated.d.ts",
+        default: "./dist/types.generated.js",
+      },
+    },
     scripts: {
       build: "tsc",
       dev: "tsc --watch",

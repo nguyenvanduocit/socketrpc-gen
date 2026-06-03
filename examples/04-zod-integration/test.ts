@@ -7,64 +7,52 @@
  * 3. All imports resolve correctly
  */
 
-import { z } from 'zod';
 import type { Socket } from 'socket.io-client';
 
 // Import Zod schemas and inferred types from define.ts
 import {
   GenerateRequestSchema,
-  GenerateResponseSchema,
   TaskSchema,
-  CreateTaskRequestSchema,
-  ProgressUpdateSchema,
   type GenerateRequest,
-  type GenerateResponse,
   type Task,
   type CreateTaskRequest,
-  type ProgressUpdate
 } from './define';
 
-// Import generated functions
-import {
-  generate,
-  createTask,
-  getTask,
-  listTasks,
-  cancelTask,
-  handleOnProgress,
-  handleOnTaskComplete,
-  handleOnError
-} from './client.generated';
-
+// Import the generated factory + types
+import { createRpcClient } from './client.generated';
 import { isRpcError } from './types.generated';
 
 // ============================================
 // TYPE COMPATIBILITY TESTS
 // ============================================
 
-// Test: Zod-inferred types work with generated functions
+// Test: Zod-inferred types work with the generated call methods
 function testTypeCompatibility(socket: Socket) {
+  const rpc = createRpcClient(socket);
+
   // Create a request using the Zod-inferred type
   const request: GenerateRequest = {
     prompt: 'Hello, AI!',
     maxTokens: 100,
-    temperature: 0.7
+    temperature: 0.7,
   };
 
-  // The generated function accepts the Zod-inferred type
-  generate(socket, request);
+  // The generated call accepts the Zod-inferred type
+  rpc.server.generate(request);
 
   // Create task request
   const taskRequest: CreateTaskRequest = {
     title: 'Test Task',
-    description: 'A test task'
+    description: 'A test task',
   };
-  createTask(socket, taskRequest);
+  rpc.server.createTask(taskRequest);
 }
 
 // Test: Response types match Zod schemas
 async function testResponseTypes(socket: Socket) {
-  const response = await generate(socket, { prompt: 'test' });
+  const rpc = createRpcClient(socket);
+
+  const response = await rpc.server.generate({ prompt: 'test' });
 
   if (!isRpcError(response)) {
     // TypeScript knows response is GenerateResponse
@@ -75,7 +63,7 @@ async function testResponseTypes(socket: Socket) {
     console.log(text, finishReason, usage);
   }
 
-  const tasks = await listTasks(socket);
+  const tasks = await rpc.server.listTasks();
   if (!isRpcError(tasks)) {
     // TypeScript knows tasks is Task[]
     tasks.forEach((task: Task) => {
@@ -86,7 +74,9 @@ async function testResponseTypes(socket: Socket) {
 
 // Test: Handler types match Zod schemas
 function testHandlerTypes(socket: Socket) {
-  handleOnProgress(socket, async (socket, update) => {
+  const rpc = createRpcClient(socket);
+
+  rpc.handle.onProgress(async (update) => {
     // update matches ProgressUpdate type
     const taskId: string = update.taskId;
     const progress: number = update.progress;
@@ -94,14 +84,14 @@ function testHandlerTypes(socket: Socket) {
     console.log(taskId, progress, message);
   });
 
-  handleOnTaskComplete(socket, async (socket, task) => {
+  rpc.handle.onTaskComplete(async (task) => {
     // task matches Task type
     const id: string = task.id;
     const status: 'pending' | 'in_progress' | 'completed' = task.status;
     console.log(id, status);
   });
 
-  handleOnError(socket, async (socket, message, code) => {
+  rpc.handle.onError(async (message, code) => {
     console.error(`Error ${code}: ${message}`);
   });
 }
@@ -124,7 +114,7 @@ function testZodValidation() {
     title: 'My Task',
     description: 'Description',
     status: 'pending',
-    createdAt: '2024-01-01T00:00:00Z'
+    createdAt: '2024-01-01T00:00:00Z',
   };
 
   const taskResult = TaskSchema.safeParse(taskData);
@@ -133,6 +123,9 @@ function testZodValidation() {
     console.log('Valid task:', task.title);
   }
 }
+
+// Keep the type-check entry points referenced so unused-symbol settings stay quiet.
+void [testTypeCompatibility, testResponseTypes, testHandlerTypes, testZodValidation];
 
 // ============================================
 // RUN TESTS (type-check only, no runtime)

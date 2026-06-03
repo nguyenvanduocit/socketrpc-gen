@@ -23,6 +23,10 @@ const RESERVED_NAMES = new Set([
   "server",
   "client",
   "socket",
+  "connected",
+  "onConnect",
+  "onDisconnect",
+  "onReconnect",
 ]);
 
 /**

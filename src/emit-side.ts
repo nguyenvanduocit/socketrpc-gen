@@ -35,6 +35,94 @@ function addCustomTypeImports(
   for (const [sf, names] of depBuckets) emit(sf, names);
 }
 
+const RPC_ERROR_EVENT = "__rpc:error__";
+
+/**
+ * Builds the socket.io event-map property for one signature. Void signatures map to
+ * a plain listener; value-returning signatures append the ack callback so
+ * `emitWithAck` and `socket.on` are correctly typed when the map is applied.
+ */
+function eventMapProperty(func: FunctionSignature): { name: string; type: string } {
+  const params = func.params.map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`);
+  if (func.isVoid) {
+    return { name: func.name, type: `(${params.join(", ")}) => void` };
+  }
+  const ack = `ack: (result: ${func.returnType} | RpcError) => void`;
+  return { name: func.name, type: `(${[...params, ack].join(", ")}) => void` };
+}
+
+/**
+ * Emits the ClientToServerEvents / ServerToClientEvents maps. These are an optional
+ * typing aid: apply them to your own `io<ServerToClientEvents, ClientToServerEvents>(url)`
+ * (client) or `new Server<ClientToServerEvents, ServerToClientEvents>()` (server) to type
+ * raw socket usage alongside the RPC layer.
+ */
+function generateEventMaps(
+  sourceFile: SourceFile,
+  clientCallable: FunctionSignature[],
+  serverCallable: FunctionSignature[],
+): void {
+  sourceFile.addStatements(`\n// === SOCKET EVENT MAPS (optional typing aid) ===`);
+
+  const errorProp = { name: `"${RPC_ERROR_EVENT}"`, type: "(error: RpcError) => void" };
+
+  sourceFile.addInterface({
+    name: "ClientToServerEvents",
+    isExported: true,
+    docs: ["Events the client emits and the server listens for. Apply to a typed Socket/Server."],
+    properties: [...clientCallable.map(eventMapProperty), errorProp],
+  });
+
+  sourceFile.addInterface({
+    name: "ServerToClientEvents",
+    isExported: true,
+    docs: ["Events the server emits and the client listens for. Apply to a typed Socket/Server."],
+    properties: [...serverCallable.map(eventMapProperty), errorProp],
+  });
+}
+
+/**
+ * Emits the side-specific connection members (interface shape). Both sides expose
+ * `connected`; the client adds connect/disconnect/reconnect hooks, the server only
+ * the per-socket disconnect hook.
+ */
+function connectionInterfaceMembers(
+  side: "client" | "server",
+): { name: string; type?: string; isReadonly?: boolean; docs: string[] }[] {
+  const members: { name: string; type?: string; isReadonly?: boolean; docs: string[] }[] = [
+    {
+      name: "connected",
+      type: "boolean",
+      isReadonly: true,
+      docs: ["Whether the underlying socket is currently connected."],
+    },
+    {
+      name: "onDisconnect",
+      type: "(handler: (reason: string) => void) => UnsubscribeFunction",
+      docs: ["Run a handler whenever the socket disconnects. Returns an unsubscribe function."],
+    },
+  ];
+
+  if (side === "client") {
+    members.push(
+      {
+        name: "onConnect",
+        type: "(handler: () => void) => UnsubscribeFunction",
+        docs: [
+          "Run a handler on every (re)connect — use it to re-sync or re-authenticate. Returns an unsubscribe function.",
+        ],
+      },
+      {
+        name: "onReconnect",
+        type: "(handler: (attempt: number) => void) => UnsubscribeFunction",
+        docs: ["Run a handler after a successful reconnect. Returns an unsubscribe function."],
+      },
+    );
+  }
+
+  return members;
+}
+
 /**
  * Emits the RpcClient/RpcServer TypeScript interface declarations for one side,
  * including the nested Handle and target-side Call shapes.
@@ -44,6 +132,7 @@ function generateFactoryInterface(
   callFunctions: FunctionSignature[],
   handleFunctions: FunctionSignature[],
   side: "client" | "server",
+  errorMode: ResolvedConfig["errorMode"],
 ): void {
   const interfaceName = side === "client" ? "RpcClient" : "RpcServer";
   const targetSide = side === "client" ? "server" : "client";
@@ -59,15 +148,15 @@ function generateFactoryInterface(
     const returnType = func.isVoid ? "void" : func.returnType;
     return {
       name: func.name,
-      type: `(handler: (${funcParams}) => Promise<${returnType}>) => void`,
-      docs: [`Register handler for '${func.name}' - called by ${targetSide}`],
+      type: `(handler: (${funcParams}) => Promise<${returnType}>) => UnsubscribeFunction`,
+      docs: [`Register handler for '${func.name}' - called by ${targetSide}. Returns an unsubscribe function.`],
     };
   });
 
   handleProperties.push({
     name: "rpcError",
-    type: "(handler: (error: RpcError) => void) => void",
-    docs: ["Register handler for RPC errors"],
+    type: "(handler: (error: RpcError) => void) => UnsubscribeFunction",
+    docs: ["Register handler for RPC errors. Returns an unsubscribe function."],
   });
 
   sourceFile.addInterface({
@@ -82,13 +171,13 @@ function generateFactoryInterface(
     const funcParams = func.params
       .map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`)
       .join(", ");
-    const optsParam = !func.isVoid
-      ? funcParams
-        ? ", opts?: RpcCallOptions"
-        : "opts?: RpcCallOptions"
-      : "";
+    const optsParam = funcParams ? ", opts?: RpcCallOptions" : "opts?: RpcCallOptions";
     const allParams = funcParams + optsParam;
-    const returnType = func.isVoid ? "void" : `Promise<${func.returnType} | RpcError>`;
+    const returnType = func.isVoid
+      ? "void"
+      : errorMode === "throw"
+        ? `Promise<${func.returnType}>`
+        : `Promise<${func.returnType} | RpcError>`;
     return {
       name: func.name,
       type: `(${allParams}) => ${returnType}`,
@@ -129,6 +218,7 @@ function generateFactoryInterface(
         isReadonly: true,
         docs: ["The underlying socket instance"],
       },
+      ...connectionInterfaceMembers(side),
       {
         name: "disposed",
         type: "boolean",
@@ -148,18 +238,18 @@ function generateFactoryInterface(
   });
 }
 
-const RPC_ERROR_EVENT = "__rpc:error__";
-
 /**
  * Writes one entry of the `handle` object literal — a method that accepts a user
- * handler, wires it to socket.on, and records an unsubscriber. Void-returning
- * signatures become fire-and-forget listeners; signatures returning a value use
- * the socket.io acknowledgment callback.
+ * handler, wires it to the socket via `register` (which replaces any previous handler
+ * for the same event), and returns an unsubscribe function. Void-returning signatures
+ * become fire-and-forget listeners; signatures returning a value use the socket.io
+ * acknowledgment callback.
  */
 function writeHandleMethod(
   writer: CodeBlockWriter,
   func: FunctionSignature,
   trailingChar: string,
+  logFn: string,
 ): void {
   const funcParams = func.params
     .map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`)
@@ -168,7 +258,9 @@ function writeHandleMethod(
   const handlerParams = func.params.map((p) => p.name).join(", ");
   const typedParams = func.params.map((p) => `${p.name}: ${p.type}`).join(", ");
 
-  writer.writeLine(`${func.name}(handler: (${funcParams}) => Promise<${returnType}>) {`);
+  writer.writeLine(
+    `${func.name}(handler: (${funcParams}) => Promise<${returnType}>): UnsubscribeFunction {`,
+  );
   writer.indent(() => {
     writer.writeLine("checkDisposed();");
 
@@ -181,7 +273,7 @@ function writeHandleMethod(
         });
         writer.writeLine("} catch (error) {");
         writer.indent(() => {
-          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
+          writer.writeLine(`${logFn}('[${func.name}] Handler error:', error);`);
           writer.writeLine(
             `socket.emit('${RPC_ERROR_EVENT}', toRpcError(error, { origin: '${func.name}' }));`,
           );
@@ -203,7 +295,7 @@ function writeHandleMethod(
         });
         writer.writeLine("} catch (error) {");
         writer.indent(() => {
-          writer.writeLine(`console.error('[${func.name}] Handler error:', error);`);
+          writer.writeLine(`${logFn}('[${func.name}] Handler error:', error);`);
           writer.writeLine(`callback(toRpcError(error, { origin: '${func.name}' }));`);
         });
         writer.writeLine("}");
@@ -211,8 +303,7 @@ function writeHandleMethod(
       writer.writeLine("};");
     }
 
-    writer.writeLine(`socket.on('${func.name}', listener);`);
-    writer.writeLine(`unsubscribers.push(() => socket.off('${func.name}', listener));`);
+    writer.writeLine(`return register('${func.name}', listener);`);
   });
   writer.writeLine("}" + trailingChar);
 }
@@ -221,32 +312,30 @@ function writeHandleMethod(
  * Writes the built-in rpcError listener entry for the handle object.
  */
 function writeRpcErrorHandler(writer: CodeBlockWriter): void {
-  writer.writeLine("rpcError(handler: (error: RpcError) => void) {");
+  writer.writeLine("rpcError(handler: (error: RpcError) => void): UnsubscribeFunction {");
   writer.indent(() => {
     writer.writeLine("checkDisposed();");
     writer.writeLine("const listener = (error: RpcError) => handler(error);");
-    writer.writeLine(`socket.on('${RPC_ERROR_EVENT}', listener);`);
-    writer.writeLine(`unsubscribers.push(() => socket.off('${RPC_ERROR_EVENT}', listener));`);
+    writer.writeLine(`return register('${RPC_ERROR_EVENT}', listener);`);
   });
   writer.writeLine("}");
 }
 
 /**
- * Writes one entry of the target-side call object — a method that fires an
- * outbound event. Void signatures use socket.emit (fire-and-forget); returning
- * signatures use socket.timeout(...).emitWithAck and translate any thrown error
- * into an RpcError value.
+ * Writes one entry of the target-side call object. Void signatures use socket.emit
+ * (fire-and-forget); value-returning signatures use socket.timeout(...).emitWithAck.
+ * Honors `opts.volatile` (drop instead of buffer while disconnected), `opts.signal`
+ * (abort the wait), and the configured error mode (return the RpcError or throw it).
  */
 function writeCallMethod(
   writer: CodeBlockWriter,
   func: FunctionSignature,
   trailingChar: string,
   defaultTimeout: number,
+  errorMode: ResolvedConfig["errorMode"],
 ): void {
   const funcParams = func.params.map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`);
-  if (!func.isVoid) {
-    funcParams.push(`opts?: RpcCallOptions`);
-  }
+  funcParams.push(`opts?: RpcCallOptions`);
   const paramsString = funcParams.join(", ");
   const argsArray = func.params.map((p) => p.name);
   const argsString = argsArray.length > 0 ? `, ${argsArray.join(", ")}` : "";
@@ -255,22 +344,50 @@ function writeCallMethod(
     writer.writeLine(`${func.name}(${paramsString}) {`);
     writer.indent(() => {
       writer.writeLine("if (_disposed) return;");
-      writer.writeLine(`socket.emit('${func.name}'${argsString});`);
+      writer.writeLine(`(opts?.volatile ? socket.volatile : socket).emit('${func.name}'${argsString});`);
     });
     writer.writeLine("}" + trailingChar);
-  } else {
-    writer.writeLine(
-      `async ${func.name}(${paramsString}): Promise<${func.returnType} | RpcError> {`,
-    );
-    writer.indent(() => {
-      writer.writeLine(
-        `if (_disposed) return { message: 'RPC instance has been disposed', code: 'DISPOSED', origin: '${func.name}' };`,
-      );
-      writer.writeLine(`const timeout = opts?.timeout ?? ${defaultTimeout};`);
+    return;
+  }
+
+  const disposedError = `{ __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', origin: '${func.name}' }`;
+  const abortedError = `{ __rpcError: true, message: 'Request aborted', code: 'ABORTED', origin: '${func.name}' }`;
+  const returnType = errorMode === "throw" ? func.returnType : `${func.returnType} | RpcError`;
+
+  writer.writeLine(`async ${func.name}(${paramsString}): Promise<${returnType}> {`);
+  writer.indent(() => {
+    if (errorMode === "throw") {
+      writer.writeLine(`if (_disposed) throw ${disposedError} as RpcError;`);
+      writer.writeLine(`if (opts?.signal?.aborted) throw ${abortedError} as RpcError;`);
+    } else {
+      writer.writeLine(`if (_disposed) return ${disposedError};`);
+      writer.writeLine(`if (opts?.signal?.aborted) return ${abortedError};`);
+    }
+    writer.writeLine(`const timeout = opts?.timeout ?? ${defaultTimeout};`);
+    writer.writeLine("const emitter = opts?.volatile ? socket.volatile : socket;");
+
+    if (errorMode === "throw") {
+      writer.writeLine(`let result: ${func.returnType} | RpcError;`);
       writer.writeLine("try {");
       writer.indent(() => {
+        writer.writeLine(`const ack = emitter.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
         writer.writeLine(
-          `return await socket.timeout(timeout).emitWithAck('${func.name}'${argsString});`,
+          `result = await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, '${func.name}')]) : ack);`,
+        );
+      });
+      writer.writeLine("} catch (err) {");
+      writer.indent(() => {
+        writer.writeLine(`throw toRpcError(err, { origin: '${func.name}' });`);
+      });
+      writer.writeLine("}");
+      writer.writeLine("if (isRpcError(result)) throw result;");
+      writer.writeLine("return result;");
+    } else {
+      writer.writeLine("try {");
+      writer.indent(() => {
+        writer.writeLine(`const ack = emitter.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
+        writer.writeLine(
+          `return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, '${func.name}')]) : ack);`,
         );
       });
       writer.writeLine("} catch (err) {");
@@ -278,8 +395,35 @@ function writeCallMethod(
         writer.writeLine(`return toRpcError(err, { origin: '${func.name}' });`);
       });
       writer.writeLine("}");
+    }
+  });
+  writer.writeLine("}" + trailingChar);
+}
+
+/**
+ * Writes the side-specific connection members into the returned object literal:
+ * a `connected` getter plus disconnect/connect/reconnect subscription helpers that
+ * register through the shared unsubscriber list.
+ */
+function writeConnectionMembers(writer: CodeBlockWriter, side: "client" | "server"): void {
+  writer.writeLine("get connected() { return socket.connected; },");
+
+  const sub = (name: string, handlerSig: string, target: string, event: string) => {
+    writer.writeLine(`${name}(handler: ${handlerSig}): UnsubscribeFunction {`);
+    writer.indent(() => {
+      writer.writeLine("checkDisposed();");
+      writer.writeLine(`${target}.on('${event}', handler);`);
+      writer.writeLine(`const unsubscribe = () => ${target}.off('${event}', handler);`);
+      writer.writeLine("unsubscribers.push(unsubscribe);");
+      writer.writeLine("return unsubscribe;");
     });
-    writer.writeLine("}" + trailingChar);
+    writer.writeLine("},");
+  };
+
+  sub("onDisconnect", "(reason: string) => void", "socket", "disconnect");
+  if (side === "client") {
+    sub("onConnect", "() => void", "socket", "connect");
+    sub("onReconnect", "(attempt: number) => void", "socket.io", "reconnect");
   }
 }
 
@@ -333,7 +477,7 @@ function buildFactoryJsDoc(
 /**
  * Emits the createRpcClient / createRpcServer factory function. The function body
  * is composed from named section writers (writeHandleMethod, writeRpcErrorHandler,
- * writeCallMethod) so each concern lives in one small, focused helper.
+ * writeCallMethod, writeConnectionMembers) so each concern lives in one small helper.
  */
 function generateFactoryFunction(
   sourceFile: SourceFile,
@@ -346,12 +490,15 @@ function generateFactoryFunction(
   const interfaceName = side === "client" ? "RpcClient" : "RpcServer";
   const targetSide = side === "client" ? "server" : "client";
   const targetSideCapitalized = targetSide.charAt(0).toUpperCase() + targetSide.slice(1);
+  const logFn = config.errorLogger ? "errorLogger" : "console.error";
 
   sourceFile.addStatements(`\n// === FACTORY FUNCTION ===`);
 
   const bodyWriter = (writer: CodeBlockWriter) => {
-    // Shared closure state: listeners unsubscribed on dispose(), plus the dispose latch.
+    // Shared closure state: listeners unsubscribed on dispose(), the dispose latch,
+    // and a registry of the current inbound listener per event (for replace-on-reregister).
     writer.writeLine("const unsubscribers: Array<() => void> = [];");
+    writer.writeLine("const handlerRegistry = new Map<string, (...args: any[]) => void>();");
     writer.writeLine("let _disposed = false;");
     writer.writeLine("");
 
@@ -363,12 +510,37 @@ function generateFactoryFunction(
     writer.writeLine("};");
     writer.writeLine("");
 
-    // handle: one method per server-to-client (or client-to-server) inbound function,
-    // plus a catch-all rpcError listener.
+    // Register an inbound listener, replacing any previous listener for the same event
+    // so re-registration (HMR, StrictMode, remount) never double-fires acks.
+    writer.writeLine(
+      "const register = (event: string, listener: (...args: any[]) => void): UnsubscribeFunction => {",
+    );
+    writer.indent(() => {
+      writer.writeLine("const prev = handlerRegistry.get(event);");
+      writer.writeLine("if (prev) socket.off(event, prev);");
+      writer.writeLine("handlerRegistry.set(event, listener);");
+      writer.writeLine("socket.on(event, listener);");
+      writer.writeLine("const unsubscribe = () => {");
+      writer.indent(() => {
+        writer.writeLine("if (handlerRegistry.get(event) === listener) {");
+        writer.indent(() => {
+          writer.writeLine("handlerRegistry.delete(event);");
+          writer.writeLine("socket.off(event, listener);");
+        });
+        writer.writeLine("}");
+      });
+      writer.writeLine("};");
+      writer.writeLine("unsubscribers.push(unsubscribe);");
+      writer.writeLine("return unsubscribe;");
+    });
+    writer.writeLine("};");
+    writer.writeLine("");
+
+    // handle: one method per inbound function, plus a catch-all rpcError listener.
     writer.writeLine("const handle: " + interfaceName + "Handle = {");
     writer.indent(() => {
       for (const func of handleFunctions) {
-        writeHandleMethod(writer, func, ",");
+        writeHandleMethod(writer, func, ",", logFn);
       }
       writeRpcErrorHandler(writer);
     });
@@ -380,18 +552,19 @@ function generateFactoryFunction(
     writer.indent(() => {
       callFunctions.forEach((func, index) => {
         const trailing = index < callFunctions.length - 1 ? "," : "";
-        writeCallMethod(writer, func, trailing, config.defaultTimeout);
+        writeCallMethod(writer, func, trailing, config.defaultTimeout, config.errorMode);
       });
     });
     writer.writeLine("};");
     writer.writeLine("");
 
-    // Returned interface: exposes handle/call/socket plus the dispose latch.
+    // Returned interface: exposes handle/call/socket, connection helpers, plus the dispose latch.
     writer.writeLine("return {");
     writer.indent(() => {
       writer.writeLine("handle,");
       writer.writeLine(`${targetSide},`);
       writer.writeLine("get socket() { return socket; },");
+      writeConnectionMembers(writer, side);
       writer.writeLine("get disposed() { return _disposed; },");
       writer.writeLine("dispose() {");
       writer.indent(() => {
@@ -399,6 +572,7 @@ function generateFactoryFunction(
         writer.writeLine("_disposed = true;");
         writer.writeLine("unsubscribers.forEach(fn => fn());");
         writer.writeLine("unsubscribers.length = 0;");
+        writer.writeLine("handlerRegistry.clear();");
       });
       writer.writeLine("}");
     });
@@ -465,14 +639,29 @@ export function generateSideFile(
     isTypeOnly: true,
   });
 
+  // Value imports needed by the generated body. `rpcWhenAborted` is only used when there
+  // are value-returning calls; `isRpcError` only when throw mode needs to rethrow acks.
+  const hasValueCall = callFunctions.some((f) => !f.isVoid);
+  const valueImports = ["toRpcError"];
+  if (hasValueCall) valueImports.push("rpcWhenAborted");
+  if (hasValueCall && config.errorMode === "throw") valueImports.push("isRpcError");
+
   sideFile.addImportDeclaration({
     moduleSpecifier: "./types.generated",
     namedImports: [
       { name: "RpcError", isTypeOnly: true },
       { name: "RpcCallOptions", isTypeOnly: true },
-      { name: "toRpcError" },
+      { name: "UnsubscribeFunction", isTypeOnly: true },
+      ...valueImports.map((name) => ({ name })),
     ],
   });
+
+  if (config.errorLogger) {
+    sideFile.addImportDeclaration({
+      moduleSpecifier: config.errorLogger,
+      defaultImport: "errorLogger",
+    });
+  }
 
   addCustomTypeImports(sideFile, usedTypes, inputFile);
 
@@ -497,7 +686,8 @@ export function generateSideFile(
 `,
   );
 
-  generateFactoryInterface(sideFile, callFunctions, handleFunctions, side);
+  generateEventMaps(sideFile, clientFunctions, serverFunctions);
+  generateFactoryInterface(sideFile, callFunctions, handleFunctions, side, config.errorMode);
   generateFactoryFunction(sideFile, callFunctions, handleFunctions, side, config);
 
   sideFile.formatText();

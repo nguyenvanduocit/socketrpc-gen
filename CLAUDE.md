@@ -149,39 +149,55 @@ function MyComponent() {
 // RpcClient interface
 interface RpcClient {
   handle: {
-    // Register handlers for server-to-client calls
-    showError: (handler: (error: Error) => Promise<void>) => void;
-    askQuestion: (handler: (question: string) => Promise<string>) => void;
+    // Register handlers for server-to-client calls. Returns an unsubscribe function.
+    // Re-registering the same name replaces the previous handler.
+    showError: (handler: (error: Error) => Promise<void>) => UnsubscribeFunction;
+    askQuestion: (handler: (question: string) => Promise<string>) => UnsubscribeFunction;
     // ...
   };
   server: {
-    // Call server methods
-    generateText: (prompt: string, timeout?: number) => Promise<string | RpcError>;
+    // Call server methods. `opts` carries timeout / AbortSignal / volatile.
+    generateText: (prompt: string, opts?: RpcCallOptions) => Promise<string | RpcError>;
     // ...
   };
-  socket: Socket;      // Underlying socket
-  disposed: boolean;   // Whether disposed
-  dispose(): void;     // Cleanup all handlers
+  socket: Socket;        // Underlying socket
+  connected: boolean;    // Whether the socket is currently connected
+  onConnect(handler: () => void): UnsubscribeFunction;            // re-sync on (re)connect
+  onDisconnect(handler: (reason: string) => void): UnsubscribeFunction;
+  onReconnect(handler: (attempt: number) => void): UnsubscribeFunction;
+  disposed: boolean;     // Whether disposed
+  dispose(): void;       // Cleanup all handlers
 }
 
 // RpcServer interface
 interface RpcServer {
   handle: {
-    // Register handlers for client-to-server calls
-    generateText: (handler: (prompt: string) => Promise<string>) => void;
+    // Register handlers for client-to-server calls. Returns an unsubscribe function.
+    generateText: (handler: (prompt: string) => Promise<string>) => UnsubscribeFunction;
     // ...
   };
   client: {
-    // Call client methods
-    showError: (error: Error) => void;
-    askQuestion: (question: string, timeout?: number) => Promise<string | RpcError>;
+    // Call client methods. `opts` carries timeout / AbortSignal / volatile.
+    showError: (error: Error, opts?: RpcCallOptions) => void;
+    askQuestion: (question: string, opts?: RpcCallOptions) => Promise<string | RpcError>;
     // ...
   };
-  socket: Socket;      // Underlying socket
-  disposed: boolean;   // Whether disposed
-  dispose(): void;     // Cleanup all handlers
+  socket: Socket;        // Underlying socket
+  connected: boolean;    // Whether the socket is currently connected
+  onDisconnect(handler: (reason: string) => void): UnsubscribeFunction;
+  disposed: boolean;     // Whether disposed
+  dispose(): void;       // Cleanup all handlers
 }
 ```
+
+### Error model
+
+- `RpcError` is **branded** with a `__rpcError: true` field; `isRpcError()` checks the brand, so a
+  successful result shaped like `{ message, code }` is never misread as an error.
+- Handlers signal failure by **throwing** — `throw rpcError(code, message, data?)` for a typed error,
+  or any thrown value (normalized to `INTERNAL_ERROR`). Do not return `RpcError` from a handler.
+- Standard codes: `TIMEOUT`, `DISPOSED`, `DISCONNECTED`, `ABORTED`, `INTERNAL_ERROR`, `INVALID_ARGUMENT`.
+- `--error-mode throw` makes calls reject with the `RpcError` instead of returning `T | RpcError`.
 
 ### Example Structure
 ```

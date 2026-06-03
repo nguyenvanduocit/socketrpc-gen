@@ -12,7 +12,10 @@
 -   **Unopinionated:** Generates only the type-safe bindings, leaving you in full control of your `socket.io` setup.
 -   **Bidirectional Communication:** Supports both client-to-server and server-to-client RPC calls.
 -   **Simple to Use:** Get started with a single command.
--   **Error Handling:** Built-in error handling with `RpcError` type.
+-   **Robust Error Handling:** Branded `RpcError` (no shape collisions), standard error codes (`TIMEOUT`, `DISCONNECTED`, `ABORTED`, …), and a per-call `return`-or-`throw` error mode.
+-   **Connection-Aware:** `connected` state plus `onConnect` / `onDisconnect` / `onReconnect` hooks for re-syncing after reconnects.
+-   **Cancellable Calls:** Per-call `AbortSignal` and `timeout`, plus `volatile` to drop (instead of buffer) calls made while offline.
+-   **Granular Cleanup:** Every handler registration returns an unsubscribe function; re-registering a handler replaces the previous one.
 
 ## Getting Started
 
@@ -143,7 +146,7 @@ Use `createRpcServer()` to create an ergonomic server instance with `.handle` fo
 import { createServer } from "http";
 import { Server } from "socket.io";
 import { createRpcServer } from "@socket-rpc/rpc/server.generated";
-import { isRpcError, RpcError } from "@socket-rpc/rpc";
+import { isRpcError, rpcError } from "@socket-rpc/rpc";
 
 const httpServer = createServer();
 const io = new Server(httpServer);
@@ -151,8 +154,9 @@ const io = new Server(httpServer);
 io.on("connection", async (socket) => {
   const rpc = createRpcServer(socket);
 
-  // Handle the `generateText` RPC call from the client
-  rpc.handle.generateText(async (prompt): Promise<string | RpcError> => {
+  // Handle the `generateText` RPC call from the client.
+  // Handlers resolve with the value on success, or **throw** to signal an error.
+  rpc.handle.generateText(async (prompt) => {
     // Example of server calling a client function and waiting for a response
     const clientResponse = await rpc.client.askQuestion("What is your favorite color?");
 
@@ -166,12 +170,10 @@ io.on("connection", async (socket) => {
     rpc.client.showError(new Error("This is a test error from the server!"));
 
     if (prompt === "error") {
-      return {
-        code: "custom_error",
-        message: "This is a custom error",
-        data: { a: 1 },
-      } as RpcError;
+      // Throw a typed, branded RpcError (with an optional data payload).
+      throw rpcError("custom_error", "This is a custom error", { a: 1 });
     } else if (prompt === "throw") {
+      // Any thrown value is normalized into an RpcError (code INTERNAL_ERROR).
       throw new Error("This is a thrown error");
     }
 
@@ -246,7 +248,8 @@ socketrpc-gen <path> [options]
 
 -   `-p, --package-name <name>`: The npm package name for the generated RPC code. (Default: "@socket-rpc/rpc")
 -   `-t, --timeout <ms>`: Default timeout in milliseconds for RPC calls that expect a response. This can be overridden per-call. (Default: "5000")
--   `-l, --error-logger <path>`: Custom error logger import path (e.g., '@/lib/logger'). By default uses `console.error`.
+-   `-l, --error-logger <path>`: Custom error logger import path (e.g., '@/lib/logger'). The module must default-export `(message: string, ...args: unknown[]) => void`. By default uses `console.error`.
+-   `-e, --error-mode <mode>`: How call methods surface failures — `return` the `RpcError` (default, check with `isRpcError`) or `throw` it (use `try/catch`).
 -   `-w, --watch`: Watch for changes in the definition file and regenerate automatically. (Default: false)
 -   `-h, --help`: Display help for command.
 
@@ -343,9 +346,13 @@ Creates an ergonomic client RPC interface.
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `handle` | `RpcClientHandle` | Register handlers for server-to-client calls |
+| `handle` | `RpcClientHandle` | Register handlers for server-to-client calls. Each registration returns an unsubscribe function |
 | `server` | `RpcClientServer` | Call server methods |
 | `socket` | `Socket` | The underlying socket instance |
+| `connected` | `boolean` | Whether the underlying socket is currently connected |
+| `onConnect(handler)` | `(() => void) => UnsubscribeFunction` | Run a handler on every (re)connect — re-sync / re-auth here |
+| `onDisconnect(handler)` | `((reason: string) => void) => UnsubscribeFunction` | Run a handler whenever the socket disconnects |
+| `onReconnect(handler)` | `((attempt: number) => void) => UnsubscribeFunction` | Run a handler after a successful reconnect |
 | `disposed` | `boolean` | Whether this instance has been disposed |
 | `dispose()` | `() => void` | Cleanup all registered handlers |
 
@@ -357,11 +364,75 @@ Creates an ergonomic server RPC interface.
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `handle` | `RpcServerHandle` | Register handlers for client-to-server calls |
+| `handle` | `RpcServerHandle` | Register handlers for client-to-server calls. Each registration returns an unsubscribe function |
 | `client` | `RpcServerClient` | Call client methods |
 | `socket` | `Socket` | The underlying socket instance |
+| `connected` | `boolean` | Whether the underlying socket is currently connected |
+| `onDisconnect(handler)` | `((reason: string) => void) => UnsubscribeFunction` | Run a handler when this socket disconnects |
 | `disposed` | `boolean` | Whether this instance has been disposed |
 | `dispose()` | `() => void` | Cleanup all registered handlers |
+
+## Connection, Reconnect & Cancellation
+
+The generated RPC layer is connection-aware and composes with socket.io's reconnection.
+
+### Re-syncing after a reconnect
+
+Inbound handlers registered with `rpc.handle.*` keep working across reconnects (the client reuses
+the same socket). To re-run logic on every (re)connect — re-subscribe, re-authenticate, replay
+state — use the connection hooks instead of reaching into `rpc.socket`:
+
+```typescript
+const rpc = createRpcClient(socket);
+
+rpc.onConnect(() => {
+  // runs on first connect AND every reconnect
+  rpc.server.subscribe(currentRoom);
+});
+
+rpc.onDisconnect((reason) => console.warn("offline:", reason));
+rpc.onReconnect((attempt) => console.info("reconnected after", attempt, "attempts"));
+```
+
+### Calls made while disconnected
+
+A value-returning call issued while offline is **buffered** by socket.io and flushed on reconnect;
+if no reconnect completes within the timeout it resolves to an `RpcError` with code `TIMEOUT`. A
+call interrupted by a disconnect resolves with code `DISCONNECTED` (distinct from a server-side
+`INTERNAL_ERROR`, so you can safely retry). Pass `volatile: true` to **drop** a call instead of
+buffering it — use this for real-time or non-idempotent calls that must not be replayed:
+
+```typescript
+await rpc.server.getQuote(symbol, { volatile: true }); // skipped entirely if offline
+```
+
+### Timeouts and cancellation
+
+Every value-returning call accepts per-call options:
+
+```typescript
+const controller = new AbortController();
+const result = await rpc.server.search(query, {
+  timeout: 2000,          // override the default timeout for this call
+  signal: controller.signal, // abort → resolves/throws an ABORTED RpcError
+});
+// controller.abort() stops awaiting the acknowledgement.
+```
+
+### Error modes
+
+By default calls **return** `T | RpcError` and you narrow with `isRpcError`. Generate with
+`--error-mode throw` to instead get `Promise<T>` that **rejects** with the `RpcError`, so you can
+use `try/catch`:
+
+```typescript
+// generated with --error-mode throw
+try {
+  const user = await rpc.server.getUser(id); // typed as Promise<User>
+} catch (e) {
+  if (isRpcError(e)) console.error(e.code, e.message);
+}
+```
 
 ## How It Works
 
@@ -411,18 +482,14 @@ interface ServerFunctions {
 **Server Handler:**
 ```typescript
 import { createRpcServer } from './rpc/server.generated';
-import { RpcError } from './rpc/types.generated';
+import { rpcError } from './rpc/types.generated';
 
 const rpc = createRpcServer(socket);
 
-rpc.handle.updateRotation(async (settings): Promise<RotationSettings | RpcError> => {
-  // Validate settings
+rpc.handle.updateRotation(async (settings) => {
+  // Validate settings — throw a typed, branded RpcError to signal failure
   if (!settings.interval || settings.interval < 1000) {
-    return {
-      code: 'INVALID_INTERVAL',
-      message: 'Interval must be at least 1000ms',
-      data: { minInterval: 1000 }
-    } as RpcError;
+    throw rpcError('INVALID_INTERVAL', 'Interval must be at least 1000ms', { minInterval: 1000 });
   }
 
   // Update rotation settings
@@ -432,6 +499,12 @@ rpc.handle.updateRotation(async (settings): Promise<RotationSettings | RpcError>
   return updatedRotation;
 });
 ```
+
+> **Note on error signaling:** handlers return the success value or **throw**. Errors must be
+> thrown (use `throw rpcError(code, message, data?)` for a typed one, or `throw new Error(...)`),
+> not returned. Every RpcError carries a non-enumerable `__rpcError` brand so `isRpcError()` can
+> never confuse a successful result that happens to share the `{ message, code }` shape with a
+> real error.
 
 **Client Usage:**
 ```typescript

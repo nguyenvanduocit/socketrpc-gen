@@ -60,6 +60,11 @@ export function runCli(argv: string[]): void {
     )
     .option("-t, --timeout <ms>", "Default timeout for RPC calls in milliseconds", "5000")
     .option("-l, --error-logger <path>", "Custom error logger import path (e.g., '@/lib/logger')")
+    .option(
+      "-e, --error-mode <mode>",
+      "How call methods surface failures: 'return' the RpcError or 'throw' it",
+      "return",
+    )
     .option("-w, --watch", "Watch for changes and regenerate automatically", false)
     .action((filePath, options) => {
       const inputPath = path.resolve(process.cwd(), filePath);
@@ -71,12 +76,15 @@ export function runCli(argv: string[]): void {
 
       const outputDir = path.dirname(inputPath);
 
+      const errorMode = options.errorMode === "throw" ? "throw" : "return";
+
       const config: GeneratorConfig = {
         inputPath,
         outputDir,
         packageName: options.packageName,
         defaultTimeout: parseInt(options.timeout, 10),
         errorLogger: options.errorLogger,
+        errorMode,
       };
 
       const run = options.watch ? watchMode(config) : generateRpcPackage(config);

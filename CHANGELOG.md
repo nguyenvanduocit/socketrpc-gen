@@ -1,5 +1,22 @@
 # Changelog
 
+## [6.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v5.0.0...v6.0.0) (2026-06-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* RpcError is now branded with `__rpcError` and handlers must throw to signal errors (returning a bare `{ code, message }` is treated as a successful value). Consumers must regenerate both client and server.
+
+### Features
+
+* brand RpcError and add reconnect, cancellation, and error-mode controls ([cf5d9a6](https://github.com/nguyenvanduocit/socketrpc-gen/commit/cf5d9a6bfb037745d0aa9c0a1d29f10c38e5cbda))
+* harden RPC error model with codes, origin, and dispose guards ([4c70f94](https://github.com/nguyenvanduocit/socketrpc-gen/commit/4c70f9449a25d1db5d9e09ed3cc426c9a5a0a3bc))
+
+
+### Reverts
+
+* switch distribution back to the public npm registry ([2311b84](https://github.com/nguyenvanduocit/socketrpc-gen/commit/2311b843c1f59abb0e9f161b808d9f61cbfe638c))
+
 ## [5.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v4.0.2...v5.0.0) (2026-04-17)
 
 

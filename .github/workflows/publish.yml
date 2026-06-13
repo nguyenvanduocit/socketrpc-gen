@@ -37,10 +37,13 @@ jobs:
       id-token: write # OIDC token for npm trusted publishing
     steps:
       - uses: actions/checkout@v4
+      # No registry-url: setup-node's registry-url writes an .npmrc with a
+      # placeholder _authToken, which makes npm use token auth and skip the
+      # OIDC exchange. Without it, npm has no token configured and performs
+      # trusted publishing against the default registry (registry.npmjs.org).
       - uses: actions/setup-node@v4
         with:
           node-version: '22.x'
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Install bun
         run: npm install -g bun

@@ -52,4 +52,12 @@ jobs:
       - name: Install dependencies
         run: bun install
       - name: Publish to NPM (OIDC trusted publishing)
-        run: npm publish
+        run: |
+          echo "node:        $(node --version)"
+          echo "npm(before): $(npm --version)"
+          npm install -g npm@latest
+          hash -r 2>/dev/null || true
+          echo "npm(after):  $(npm --version)"
+          echo "OIDC request url present: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
+          echo "OIDC request token present: ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+yes}"
+          npm publish

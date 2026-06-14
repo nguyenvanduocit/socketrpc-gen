@@ -50,7 +50,7 @@ jobs:
       - name: Install dependencies
         run: bun install
       - name: Publish to NPM (OIDC trusted publishing)
-        run: npm publish --loglevel=verbose
+        run: npm publish
         env:
           # setup-node injects a placeholder NODE_AUTH_TOKEN when registry-url
           # is set; it takes precedence over OIDC and fails with a 404. Clearing

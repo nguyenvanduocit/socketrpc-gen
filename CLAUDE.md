@@ -20,6 +20,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `bun test` - full suite (includes Go compile, `go test -race`, and cross-language integration; requires the `go` toolchain)
 - `bun run generate:examples` - regenerate every example, then diff to spot drift
 
+### Package boundary
+
+`files` in package.json is the only thing that decides what publishes: `index.ts`, `src/`,
+README, CHANGELOG. The package ships TypeScript source, so every file under `src/` is
+runtime code and a new module belongs in nothing but that tree.
+
+There is no `.npmignore`. A denylist has to name every local artifact in advance, and npm
+reads neither a global gitignore nor an ignore file it has been superseded by — which is
+how agent state under `.omc/` came to sit in the tarball alongside tests, fixtures and
+examples. `tests/pack.test.ts` runs `npm pack --dry-run --json` and checks the result both
+ways: every entrypoint and source file present, and nothing outside the allowlist, proven
+against a sentinel it writes into `.test-tmp/` first.
+
 ## Architecture
 
 This is a TypeScript code generator for Socket.IO RPC packages. The tool generates type-safe client-server communication code from interface definitions.

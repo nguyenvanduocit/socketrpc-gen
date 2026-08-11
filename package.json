@@ -8,6 +8,12 @@
   "bin": {
     "socketrpc-gen": "index.ts"
   },
+  "files": [
+    "index.ts",
+    "src",
+    "README.md",
+    "CHANGELOG.md"
+  ],
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",

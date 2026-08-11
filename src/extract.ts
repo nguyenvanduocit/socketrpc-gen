@@ -1,12 +1,27 @@
 import * as path from "path";
 import {
   InterfaceDeclaration,
+  Node,
   Project,
   PropertySignature,
   SourceFile,
+  Symbol as MorphSymbol,
   SyntaxKind,
   Type,
 } from "ts-morph";
+import {
+  RPC_SCHEMA_VERSION,
+  SchemaExtractionError,
+  nullableType,
+  optionalType,
+  type ObjectField,
+  type RpcDirection,
+  type RpcMethod,
+  type RpcSchema,
+  type SchemaDiagnostic,
+  type TypeDeclaration,
+  type TypeRef,
+} from "./schema";
 import type { FunctionParam, FunctionSignature } from "./types";
 
 function isValidJavaScriptIdentifier(name: string): boolean {
@@ -32,14 +47,16 @@ const RESERVED_NAMES = new Set([
 /**
  * Recursively collects all base interfaces from an interface, including those from imported files
  */
-function getAllBaseInterfaces(interfaceDeclaration: InterfaceDeclaration): InterfaceDeclaration[] {
+function getAllBaseInterfaces(
+  interfaceDeclaration: InterfaceDeclaration,
+): InterfaceDeclaration[] {
   const baseInterfaces: InterfaceDeclaration[] = [];
   const visited = new Set<string>();
 
   function collectBases(iface: InterfaceDeclaration): void {
-    const ifaceName = iface.getName();
-    if (visited.has(ifaceName)) return;
-    visited.add(ifaceName);
+    const key = `${iface.getSourceFile().getFilePath()}:${iface.getStart()}`;
+    if (visited.has(key)) return;
+    visited.add(key);
 
     const baseTypes = iface.getBaseTypes();
     baseTypes.forEach((baseType) => {
@@ -61,14 +78,443 @@ function getAllBaseInterfaces(interfaceDeclaration: InterfaceDeclaration): Inter
   return baseInterfaces;
 }
 
+interface ParsedMethod {
+  method: RpcMethod;
+  /** Exact ts-morph text retained only for the existing TypeScript emitters. */
+  compatibilitySignature: FunctionSignature;
+}
+
+interface PendingNamedType {
+  key: string;
+  name: string;
+  symbol: MorphSymbol;
+  location: Node;
+}
+
+interface SchemaParseContext {
+  diagnostics: SchemaDiagnostic[];
+  namedTypes: Map<string, PendingNamedType>;
+  namedTypeQueue: string[];
+}
+
+function symbolKey(symbol: MorphSymbol): string {
+  const declaration = symbol.getDeclarations()[0];
+  if (!declaration) return symbol.getFullyQualifiedName();
+  return `${declaration.getSourceFile().getFilePath()}:${declaration.getStart()}`;
+}
+
+function isAnonymousSymbol(symbol: MorphSymbol | undefined): boolean {
+  const name = symbol?.getName();
+  return !name || name === "__type" || name === "__object";
+}
+
+function getPortableNamedSymbol(
+  type: Type,
+  ignoredSymbolKey?: string,
+): MorphSymbol | undefined {
+  const candidates = [type.getAliasSymbol(), type.getSymbol()];
+  for (const symbol of candidates) {
+    if (isAnonymousSymbol(symbol)) continue;
+    if (ignoredSymbolKey && symbolKey(symbol!) === ignoredSymbolKey) continue;
+    return symbol;
+  }
+  return undefined;
+}
+
+function isUserDeclaredSymbol(symbol: MorphSymbol): boolean {
+  return symbol.getDeclarations().some((declaration) => {
+    const sourceFile = declaration.getSourceFile();
+    return !sourceFile.isInNodeModules() && !sourceFile.isDeclarationFile();
+  });
+}
+
+function registerNamedType(
+  symbol: MorphSymbol,
+  name: string,
+  location: Node,
+  context: SchemaParseContext,
+  diagnosticPath: string,
+): void {
+  if (!isUserDeclaredSymbol(symbol)) return;
+
+  const key = symbolKey(symbol);
+  const existing = context.namedTypes.get(name);
+  if (existing && existing.key !== key) {
+    addDiagnostic(
+      context,
+      "DUPLICATE_TYPE_NAME",
+      `Two referenced declarations are both named '${name}'. Portable schemas require globally unique type names.`,
+      name,
+      location,
+      diagnosticPath,
+    );
+    return;
+  }
+  if (existing) return;
+
+  context.namedTypes.set(name, { key, name, symbol, location });
+  context.namedTypeQueue.push(name);
+}
+
+function typeText(type: Type, location: Node): string {
+  try {
+    return type.getText(location);
+  } catch {
+    return type.getText();
+  }
+}
+
+function addDiagnostic(
+  context: SchemaParseContext,
+  code: string,
+  message: string,
+  unsupportedTypeText: string,
+  location: Node,
+  diagnosticPath: string,
+): void {
+  const sourceFile = location.getSourceFile();
+  const position = sourceFile.getLineAndColumnAtPos(location.getStart());
+  context.diagnostics.push({
+    code,
+    message,
+    typeText: unsupportedTypeText,
+    location: {
+      file: sourceFile.getFilePath(),
+      line: position.line,
+      column: position.column,
+      path: diagnosticPath,
+    },
+  });
+}
+
+function unsupportedType(
+  context: SchemaParseContext,
+  code: string,
+  message: string,
+  type: Type,
+  location: Node,
+  diagnosticPath: string,
+): TypeRef {
+  const text = typeText(type, location);
+  addDiagnostic(context, code, message, text, location, diagnosticPath);
+
+  // Parsing continues so callers receive all useful diagnostics in one pass.
+  // The sentinel can never escape because extractRpcSchemaFromFile throws below.
+  return { kind: "named", name: `__unsupported_${context.diagnostics.length}` };
+}
+
+function parseUnionType(
+  type: Type,
+  location: Node,
+  context: SchemaParseContext,
+  diagnosticPath: string,
+): TypeRef {
+  const members = type.getUnionTypes();
+  const hasUndefined = members.some((member) => member.isUndefined());
+  const hasNull = members.some((member) => member.isNull());
+  const valueMembers = members.filter(
+    (member) => !member.isUndefined() && !member.isNull(),
+  );
+
+  let ref: TypeRef;
+  if (valueMembers.length === 0) {
+    if (hasNull && !hasUndefined) return { kind: "null" };
+    return unsupportedType(
+      context,
+      "UNSUPPORTED_UNDEFINED_TYPE",
+      "A standalone undefined type cannot be represented on the wire.",
+      type,
+      location,
+      diagnosticPath,
+    );
+  }
+
+  const enumValues = stringEnumValuesFromMembers(valueMembers);
+  if (enumValues) {
+    ref = { kind: "enum", values: enumValues };
+  } else if (valueMembers.length === 1) {
+    ref = parseTypeRef(valueMembers[0]!, location, context, diagnosticPath);
+  } else {
+    return unsupportedType(
+      context,
+      "UNSUPPORTED_UNION_TYPE",
+      "Only unions of string literals, plus optional undefined and nullable null modifiers, are portable.",
+      type,
+      location,
+      diagnosticPath,
+    );
+  }
+
+  if (hasNull) ref = nullableType(ref);
+  if (hasUndefined) ref = optionalType(ref);
+  return ref;
+}
+
+function stringEnumValuesFromMembers(members: Type[]): string[] | undefined {
+  const values: string[] = [];
+  for (const member of members) {
+    const value = member.getLiteralValue();
+    if (typeof value !== "string") return undefined;
+    values.push(value);
+  }
+  return values;
+}
+
+function parseObjectFields(
+  type: Type,
+  location: Node,
+  context: SchemaParseContext,
+  diagnosticPath: string,
+): ObjectField[] {
+  return type.getProperties().map((property) => {
+    const declaration = property.getDeclarations()[0] ?? location;
+    let propertyType = parseTypeRef(
+      property.getTypeAtLocation(declaration),
+      declaration,
+      context,
+      `${diagnosticPath}.fields.${property.getName()}`,
+    );
+    if (property.isOptional()) propertyType = optionalType(propertyType);
+    return { name: property.getName(), type: propertyType };
+  });
+}
+
+function parseTypeRef(
+  type: Type,
+  location: Node,
+  context: SchemaParseContext,
+  diagnosticPath: string,
+  ignoredSymbolKey?: string,
+): TypeRef {
+  if (type.isAny()) {
+    return unsupportedType(
+      context,
+      "UNSUPPORTED_ANY_TYPE",
+      "The any type has no language-neutral wire representation.",
+      type,
+      location,
+      diagnosticPath,
+    );
+  }
+  if (type.isUnknown()) {
+    return unsupportedType(
+      context,
+      "UNSUPPORTED_UNKNOWN_TYPE",
+      "The unknown type has no declared wire shape.",
+      type,
+      location,
+      diagnosticPath,
+    );
+  }
+  if (type.isNever()) {
+    return unsupportedType(
+      context,
+      "UNSUPPORTED_NEVER_TYPE",
+      "The never type cannot cross the wire.",
+      type,
+      location,
+      diagnosticPath,
+    );
+  }
+  if (type.isVoid()) return { kind: "void" };
+  if (type.isString()) return { kind: "scalar", name: "string" };
+  if (type.isNumber()) return { kind: "scalar", name: "number" };
+  if (type.isBoolean()) return { kind: "scalar", name: "boolean" };
+  if (type.isNull()) return { kind: "null" };
+  if (type.isUndefined()) {
+    return unsupportedType(
+      context,
+      "UNSUPPORTED_UNDEFINED_TYPE",
+      "A standalone undefined type cannot be represented on the wire.",
+      type,
+      location,
+      diagnosticPath,
+    );
+  }
+
+  if (type.isStringLiteral()) {
+    return { kind: "enum", values: [String(type.getLiteralValue())] };
+  }
+  if (type.isNumberLiteral()) return { kind: "scalar", name: "number" };
+  if (type.isBooleanLiteral()) return { kind: "scalar", name: "boolean" };
+
+  if (type.isArray()) {
+    const element = type.getArrayElementType();
+    if (element) {
+      return {
+        kind: "array",
+        element: parseTypeRef(
+          element,
+          location,
+          context,
+          `${diagnosticPath}.element`,
+        ),
+      };
+    }
+  }
+  if (type.isTuple()) {
+    return unsupportedType(
+      context,
+      "UNSUPPORTED_TUPLE_TYPE",
+      "Tuples do not have a portable SocketRPC representation yet; use an object instead.",
+      type,
+      location,
+      diagnosticPath,
+    );
+  }
+  if (type.isIntersection()) {
+    return unsupportedType(
+      context,
+      "UNSUPPORTED_INTERSECTION_TYPE",
+      "Intersection types are ambiguous across target languages; declare a concrete object type.",
+      type,
+      location,
+      diagnosticPath,
+    );
+  }
+
+  const symbol = getPortableNamedSymbol(type, ignoredSymbolKey);
+  const symbolName = symbol?.getName();
+  const directTypeArguments = type.getTypeArguments();
+  const typeArguments =
+    directTypeArguments.length > 0
+      ? directTypeArguments
+      : type.getAliasTypeArguments();
+
+  if (
+    (symbolName === "Array" || symbolName === "ReadonlyArray") &&
+    typeArguments.length === 1
+  ) {
+    return {
+      kind: "array",
+      element: parseTypeRef(
+        typeArguments[0]!,
+        location,
+        context,
+        `${diagnosticPath}.element`,
+      ),
+    };
+  }
+
+  if (symbolName === "Record" && typeArguments.length === 2) {
+    if (!typeArguments[0]!.isString()) {
+      return unsupportedType(
+        context,
+        "UNSUPPORTED_MAP_KEY_TYPE",
+        "Record/map keys must be strings in the portable schema.",
+        type,
+        location,
+        diagnosticPath,
+      );
+    }
+    return {
+      kind: "map",
+      value: parseTypeRef(
+        typeArguments[1]!,
+        location,
+        context,
+        `${diagnosticPath}.value`,
+      ),
+    };
+  }
+
+  if (typeArguments.length > 0) {
+    return unsupportedType(
+      context,
+      symbolName === "Promise"
+        ? "UNSUPPORTED_PROMISE_TYPE"
+        : "UNSUPPORTED_GENERIC_TYPE",
+      symbolName === "Promise"
+        ? "RPC methods must declare their wire result directly, not Promise<T>."
+        : `Generic type '${symbolName ?? typeText(type, location)}' must be resolved to a concrete portable declaration.`,
+      type,
+      location,
+      diagnosticPath,
+    );
+  }
+
+  if (symbol && symbolName) {
+    registerNamedType(symbol, symbolName, location, context, diagnosticPath);
+    return { kind: "named", name: symbolName };
+  }
+
+  if (type.isUnion()) {
+    return parseUnionType(type, location, context, diagnosticPath);
+  }
+
+  if (type.getCallSignatures().length > 0) {
+    return unsupportedType(
+      context,
+      "UNSUPPORTED_FUNCTION_TYPE",
+      "Function values cannot be serialized as RPC data.",
+      type,
+      location,
+      diagnosticPath,
+    );
+  }
+
+  if (type.isObject()) {
+    const stringIndexType = type.getStringIndexType();
+    const numberIndexType = type.getNumberIndexType();
+    const properties = type.getProperties();
+
+    if (numberIndexType) {
+      return unsupportedType(
+        context,
+        "UNSUPPORTED_INDEX_SIGNATURE",
+        "Numeric index signatures are ambiguous; use an array or a string-keyed record.",
+        type,
+        location,
+        diagnosticPath,
+      );
+    }
+    if (stringIndexType && properties.length === 0) {
+      return {
+        kind: "map",
+        value: parseTypeRef(
+          stringIndexType,
+          location,
+          context,
+          `${diagnosticPath}.value`,
+        ),
+      };
+    }
+    if (stringIndexType) {
+      return unsupportedType(
+        context,
+        "UNSUPPORTED_INDEX_SIGNATURE",
+        "Objects that mix named fields with an index signature are not portable.",
+        type,
+        location,
+        diagnosticPath,
+      );
+    }
+    return {
+      kind: "object",
+      fields: parseObjectFields(type, location, context, diagnosticPath),
+    };
+  }
+
+  return unsupportedType(
+    context,
+    "UNSUPPORTED_TYPE",
+    `Type '${typeText(type, location)}' has no portable SocketRPC representation.`,
+    type,
+    location,
+    diagnosticPath,
+  );
+}
+
 /**
  * Extracts signature from a single property if it's a valid function
  * Returns null if the property should be skipped
  */
-function extractSignatureFromProperty(
+function extractMethodFromProperty(
   property: PropertySignature,
   processedNames: Set<string>,
-): FunctionSignature | null {
+  direction: RpcDirection,
+  context: SchemaParseContext,
+): ParsedMethod | null {
   const typeNode = property.getTypeNode();
   const name = property.getName();
 
@@ -78,7 +524,9 @@ function extractSignatureFromProperty(
   if (!typeNode || typeNode.getKind() !== SyntaxKind.FunctionType) return null;
 
   if (!isValidJavaScriptIdentifier(name)) {
-    console.error(`Warning: Skipping function '${name}' - not a valid JavaScript identifier`);
+    console.error(
+      `Warning: Skipping function '${name}' - not a valid JavaScript identifier`,
+    );
     return null;
   }
 
@@ -92,8 +540,18 @@ function extractSignatureFromProperty(
   const signature = callSignatures[0];
   if (!signature) return null;
 
+  const methodParams: RpcMethod["params"] = [];
   const params: FunctionParam[] = signature.getParameters().map((param) => {
     const paramType = param.getTypeAtLocation(property);
+    const parameterDeclaration = param.getDeclarations()[0] ?? property;
+    let structuredType = parseTypeRef(
+      paramType,
+      parameterDeclaration,
+      context,
+      `${direction}.${name}.params.${param.getName()}`,
+    );
+    if (param.isOptional()) structuredType = optionalType(structuredType);
+    methodParams.push({ name: param.getName(), type: structuredType });
     return {
       name: param.getName(),
       type: paramType.getText(property),
@@ -103,12 +561,26 @@ function extractSignatureFromProperty(
 
   const returnType = signature.getReturnType();
   const returnTypeString = returnType.getText(property);
+  const structuredReturnType = parseTypeRef(
+    returnType,
+    property,
+    context,
+    `${direction}.${name}.returnType`,
+  );
 
   return {
-    name,
-    params,
-    returnType: returnTypeString,
-    isVoid: returnTypeString === "void",
+    method: {
+      name,
+      direction,
+      params: methodParams,
+      returnType: structuredReturnType,
+    },
+    compatibilitySignature: {
+      name,
+      params,
+      returnType: returnTypeString,
+      isVoid: returnTypeString === "void",
+    },
   };
 }
 
@@ -116,7 +588,9 @@ function extractSignatureFromProperty(
  * Returns an interface plus its transitive base interfaces, in walk order
  * (bases first, then the derived interface).
  */
-function getInterfaceChain(iface: InterfaceDeclaration): InterfaceDeclaration[] {
+function getInterfaceChain(
+  iface: InterfaceDeclaration,
+): InterfaceDeclaration[] {
   return [...getAllBaseInterfaces(iface), iface];
 }
 
@@ -124,23 +598,110 @@ function getInterfaceChain(iface: InterfaceDeclaration): InterfaceDeclaration[] 
  * Extracts function signatures from a TypeScript interface using ts-morph.
  * Walks the entire inheritance chain so extended interfaces' methods are included.
  */
-function extractFunctionSignatures(
+function extractInterfaceMethods(
   interfaceDeclaration: InterfaceDeclaration,
-): FunctionSignature[] {
-  const signatures: FunctionSignature[] = [];
+  direction: RpcDirection,
+  context: SchemaParseContext,
+): ParsedMethod[] {
+  const methods: ParsedMethod[] = [];
   const processedNames = new Set<string>();
 
   for (const iface of getInterfaceChain(interfaceDeclaration)) {
     for (const property of iface.getProperties()) {
-      const extracted = extractSignatureFromProperty(property, processedNames);
+      const extracted = extractMethodFromProperty(
+        property,
+        processedNames,
+        direction,
+        context,
+      );
       if (extracted) {
-        signatures.push(extracted);
-        processedNames.add(extracted.name);
+        methods.push(extracted);
+        processedNames.add(extracted.method.name);
       }
     }
   }
 
-  return signatures;
+  return methods;
+}
+
+function supportedTypeDeclaration(symbol: MorphSymbol): Node | undefined {
+  return symbol
+    .getDeclarations()
+    .find(
+      (declaration) =>
+        Node.isTypeAliasDeclaration(declaration) ||
+        Node.isInterfaceDeclaration(declaration) ||
+        Node.isEnumDeclaration(declaration),
+    );
+}
+
+function parseNamedDeclaration(
+  pending: PendingNamedType,
+  context: SchemaParseContext,
+): TypeDeclaration | undefined {
+  const declaration = supportedTypeDeclaration(pending.symbol);
+  if (!declaration) {
+    // Ambient and platform declarations (for example Error) remain external
+    // named references. A target backend can explicitly map or reject them.
+    if (!isUserDeclaredSymbol(pending.symbol)) return undefined;
+    addDiagnostic(
+      context,
+      "UNSUPPORTED_TYPE_DECLARATION",
+      `Named type '${pending.name}' must be a type alias, interface, or string enum.`,
+      pending.name,
+      pending.location,
+      `declarations.${pending.name}`,
+    );
+    return undefined;
+  }
+
+  if (Node.isEnumDeclaration(declaration)) {
+    const values: string[] = [];
+    for (const member of declaration.getMembers()) {
+      const value = member.getValue();
+      if (typeof value !== "string") {
+        addDiagnostic(
+          context,
+          "UNSUPPORTED_ENUM_TYPE",
+          `Enum '${pending.name}' must contain only explicitly initialized string values.`,
+          declaration.getText(),
+          member,
+          `declarations.${pending.name}`,
+        );
+        continue;
+      }
+      values.push(value);
+    }
+    return { kind: "enum", name: pending.name, values };
+  }
+
+  const rootType = declaration.getType();
+  const target = parseTypeRef(
+    rootType,
+    declaration,
+    context,
+    `declarations.${pending.name}`,
+    pending.key,
+  );
+
+  if (target.kind === "object") {
+    return { kind: "object", name: pending.name, fields: target.fields };
+  }
+  if (target.kind === "enum") {
+    return { kind: "enum", name: pending.name, values: target.values };
+  }
+  return { kind: "alias", name: pending.name, target };
+}
+
+function buildTypeDeclarations(context: SchemaParseContext): TypeDeclaration[] {
+  const declarations: TypeDeclaration[] = [];
+  for (let index = 0; index < context.namedTypeQueue.length; index += 1) {
+    const name = context.namedTypeQueue[index]!;
+    const pending = context.namedTypes.get(name)!;
+    const declaration = parseNamedDeclaration(pending, context);
+    if (declaration) declarations.push(declaration);
+  }
+  return declarations;
 }
 
 /**
@@ -157,7 +718,8 @@ function collectReferencedSymbols(
 
   const symbol = type.getAliasSymbol() ?? type.getSymbol();
   const name = symbol?.getName();
-  const isAnonymous = !symbol || !name || name === "__type" || name === "__object";
+  const isAnonymous =
+    !symbol || !name || name === "__type" || name === "__object";
 
   if (!isAnonymous && !out.has(name!)) {
     for (const decl of symbol!.getDeclarations()) {
@@ -170,19 +732,27 @@ function collectReferencedSymbols(
   }
 
   if (type.isUnion()) {
-    type.getUnionTypes().forEach((t) => collectReferencedSymbols(t, out, visited));
+    type
+      .getUnionTypes()
+      .forEach((t) => collectReferencedSymbols(t, out, visited));
   }
   if (type.isIntersection()) {
-    type.getIntersectionTypes().forEach((t) => collectReferencedSymbols(t, out, visited));
+    type
+      .getIntersectionTypes()
+      .forEach((t) => collectReferencedSymbols(t, out, visited));
   }
   if (type.isArray()) {
     const elem = type.getArrayElementType();
     if (elem) collectReferencedSymbols(elem, out, visited);
   }
   if (type.isTuple()) {
-    type.getTupleElements().forEach((t) => collectReferencedSymbols(t, out, visited));
+    type
+      .getTupleElements()
+      .forEach((t) => collectReferencedSymbols(t, out, visited));
   }
-  type.getTypeArguments().forEach((t) => collectReferencedSymbols(t, out, visited));
+  type
+    .getTypeArguments()
+    .forEach((t) => collectReferencedSymbols(t, out, visited));
 
   // Walk anonymous object shapes so nested named types are discovered.
   // Named object types' imports cover their own structure at the declaration site.
@@ -190,7 +760,11 @@ function collectReferencedSymbols(
     for (const prop of type.getProperties()) {
       const propDecl = prop.getDeclarations()[0];
       if (propDecl) {
-        collectReferencedSymbols(prop.getTypeAtLocation(propDecl), out, visited);
+        collectReferencedSymbols(
+          prop.getTypeAtLocation(propDecl),
+          out,
+          visited,
+        );
       }
     }
   }
@@ -215,14 +789,22 @@ function collectUsedTypes(
       if (!signature) continue;
 
       for (const param of signature.getParameters()) {
-        collectReferencedSymbols(param.getTypeAtLocation(property), out, visited);
+        collectReferencedSymbols(
+          param.getTypeAtLocation(property),
+          out,
+          visited,
+        );
       }
       collectReferencedSymbols(signature.getReturnType(), out, visited);
     }
   }
 }
 
-const PROJECT_TSCONFIG_PATH = path.resolve(import.meta.dir, "..", "tsconfig.json");
+const PROJECT_TSCONFIG_PATH = path.resolve(
+  import.meta.dir,
+  "..",
+  "tsconfig.json",
+);
 
 /**
  * Extracts interfaces and function signatures from the input file.
@@ -234,6 +816,7 @@ export async function extractInterfacesFromFile(inputPath: string): Promise<{
   serverFunctions: FunctionSignature[];
   usedTypes: Map<string, SourceFile>;
   inputFile: SourceFile;
+  schema: RpcSchema;
 }> {
   const inputProject = new Project({
     tsConfigFilePath: PROJECT_TSCONFIG_PATH,
@@ -256,8 +839,46 @@ export async function extractInterfacesFromFile(inputPath: string): Promise<{
     );
   }
 
-  const clientFunctions = extractFunctionSignatures(serverFunctionsInterface);
-  const serverFunctions = extractFunctionSignatures(clientFunctionsInterface);
+  const schemaContext: SchemaParseContext = {
+    diagnostics: [],
+    namedTypes: new Map(),
+    namedTypeQueue: [],
+  };
+
+  // Interface names describe the side that implements each method. The schema
+  // direction describes the side that initiates the call.
+  const clientToServer = extractInterfaceMethods(
+    serverFunctionsInterface,
+    "client-to-server",
+    schemaContext,
+  );
+  const serverToClient = extractInterfaceMethods(
+    clientFunctionsInterface,
+    "server-to-client",
+    schemaContext,
+  );
+
+  const schema: RpcSchema = {
+    version: RPC_SCHEMA_VERSION,
+    methods: [
+      ...clientToServer.map(({ method }) => method),
+      ...serverToClient.map(({ method }) => method),
+    ],
+    declarations: buildTypeDeclarations(schemaContext),
+  };
+
+  if (schemaContext.diagnostics.length > 0) {
+    throw new SchemaExtractionError(schemaContext.diagnostics);
+  }
+
+  // Compatibility projection for the current TypeScript emitters. These keep
+  // ts-morph's exact historical type text, so generated output does not drift.
+  const clientFunctions = clientToServer.map(
+    ({ compatibilitySignature }) => compatibilitySignature,
+  );
+  const serverFunctions = serverToClient.map(
+    ({ compatibilitySignature }) => compatibilitySignature,
+  );
 
   // Walk every signature's types and collect every user-declared type they reference.
   // Order matters: server interface is walked first so that types appearing on
@@ -267,5 +888,18 @@ export async function extractInterfacesFromFile(inputPath: string): Promise<{
   collectUsedTypes(serverFunctionsInterface, usedTypes);
   collectUsedTypes(clientFunctionsInterface, usedTypes);
 
-  return { clientFunctions, serverFunctions, usedTypes, inputFile: sourceFile };
+  return {
+    clientFunctions,
+    serverFunctions,
+    usedTypes,
+    inputFile: sourceFile,
+    schema,
+  };
+}
+
+/** Extract only the language-neutral schema for non-TypeScript backends. */
+export async function extractRpcSchemaFromFile(
+  inputPath: string,
+): Promise<RpcSchema> {
+  return (await extractInterfacesFromFile(inputPath)).schema;
 }

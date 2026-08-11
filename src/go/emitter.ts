@@ -1,5 +1,13 @@
 import type { ObjectField, RpcMethod, RpcParameter, RpcSchema } from "../schema";
-import { exportedIdentifier, generated, goString, localIdentifier, padGoColumn } from "./names";
+import {
+  clientMethodName,
+  exportedIdentifier,
+  generated,
+  goString,
+  handlerMethodName,
+  localIdentifier,
+  padGoColumn,
+} from "./names";
 import {
   GO_SERVER_FILENAME,
   GO_TYPES_FILENAME,
@@ -44,8 +52,19 @@ class GoWriter {
   }
 }
 
+/** The Go spelling of a method name, before either API's prefix is applied. */
 function methodName(method: RpcMethod): string {
   return exportedIdentifier(method.name);
+}
+
+/** The `ServerHandler` method an inbound call is served by. */
+function handlerInterfaceMethod(method: RpcMethod): string {
+  return handlerMethodName(method.name);
+}
+
+/** The `Client` method an outbound call is made through. */
+function clientCallMethod(method: RpcMethod): string {
+  return clientMethodName(method.name);
 }
 
 function paramName(param: RpcParameter): string {
@@ -445,6 +464,13 @@ function writeTypesFile(schema: RpcSchema, packageName: string): string {
   return writer.toString();
 }
 
+/**
+ * Emits the interface a server implements, one `Handle…` method per inbound call.
+ *
+ * The prefix is what keeps `go vet` clean without narrowing it: a contract may
+ * name a method `scan` or `marshalJSON`, and `stdmethods` would object to the
+ * bare name on any type at all. See `HANDLER_METHOD_PREFIX`.
+ */
 function writeHandlerInterface(writer: GoWriter, methods: readonly RpcMethod[]): void {
   if (methods.length === 0) {
     writer.line("type ServerHandler interface{}");
@@ -454,7 +480,7 @@ function writeHandlerInterface(writer: GoWriter, methods: readonly RpcMethod[]):
     for (const method of methods) {
       const resultType = resultGoType(method);
       const result = resultType ? ` (${resultType}, error)` : " error";
-      writer.line(`${methodName(method)}(${handlerParameters(method)})${result}`);
+      writer.line(`${handlerInterfaceMethod(method)}(${handlerParameters(method)})${result}`);
     }
   });
 }
@@ -884,20 +910,21 @@ function writeInboundHandlers(writer: GoWriter, methods: readonly RpcMethod[], d
         );
       });
 
+      const handle = handlerInterfaceMethod(method);
       if (!resultType) {
-        writer.line(`call.finishVoid(b.${BINDING.handler}.${methodName(method)}(${handlerCallArguments(method)}))`);
+        writer.line(`call.finishVoid(b.${BINDING.handler}.${handle}(${handlerCallArguments(method)}))`);
         return;
       }
 
       const empty = emptyCompositeLiteral(method.returnType, declarations);
       if (!empty) {
-        writer.line(`call.finish(b.${BINDING.handler}.${methodName(method)}(${handlerCallArguments(method)}))`);
+        writer.line(`call.finish(b.${BINDING.handler}.${handle}(${handlerCallArguments(method)}))`);
         return;
       }
 
       // The contract promises a slice or a map here, so the handler's nil must
       // not reach a client typed for an array or an object as JSON null.
-      writer.line(`result, err := b.${BINDING.handler}.${methodName(method)}(${handlerCallArguments(method)})`);
+      writer.line(`result, err := b.${BINDING.handler}.${handle}(${handlerCallArguments(method)})`);
       writer.block("if err == nil && result == nil", () => writer.line(`result = ${empty}`));
       writer.line("call.finish(result, err)");
     });
@@ -1120,8 +1147,11 @@ function writeClient(writer: GoWriter, methods: readonly RpcMethod[], defaultTim
     },
   );
 
+  // One `Call…` method per outbound call. The prefix keeps a contract's method
+  // names clear of both `stdmethods` and `Client`'s own exported API, so a
+  // contract is free to call a method `seek`, `dispose` or `socket`.
   for (const method of methods) {
-    const name = methodName(method);
+    const name = clientCallMethod(method);
     const origin = goString(method.name);
     const params = methodParameters(method);
     const signatureParams = params ? `ctx context.Context, ${params}` : "ctx context.Context";

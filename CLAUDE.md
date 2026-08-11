@@ -106,16 +106,25 @@ Behaviour parity worth knowing:
   `exportedIdentifier`/`localIdentifier` split on non-alphanumeric runes and so can never
   produce an underscore, which keeps the two namespaces disjoint by construction rather than by
   a reserved-word list. An inbound method may therefore be called `Disconnect` or `_disconnect`.
+- A contract method reaches the two APIs a developer writes against under its own prefix:
+  `Handle<Method>` on `ServerHandler`, `Call<Method>` on `Client` (`HANDLER_METHOD_PREFIX` /
+  `CLIENT_METHOD_PREFIX` in `src/go/names.ts`). Validation admits a method only when its derived
+  name is an exported Go identifier, and that name can hold no underscore, so a generated method
+  is always a fixed word followed by an upper-case letter — a shape no method name the standard
+  library has claimed is spelled as. `go vet`'s `stdmethods` therefore has nothing to object to
+  even when a contract names a method `scan`, `seek` or `marshalJSON`, and nothing consults a
+  list of standard library names at generation time. The same prefix puts `Client`'s own
+  `Socket`/`Done`/`Connected`/`Dispose` out of reach, so those are legal method names too. Wire
+  event names are untouched, as is every TypeScript output.
 - Contract names are refused only where a name genuinely has no sound Go projection: `ctx` as a
-  parameter, Socket.IO's own event names, `Dispose`/`Connected`/`Done`/`Socket` as *outbound*
-  methods (they are the exported `Client` API), and a declaration whose Go name is one the
-  package already exports. Object field names are never refused.
+  parameter, Socket.IO's own event names, and a declaration whose Go name is one the package
+  already exports. Object field names are never refused.
 - `tests/go-collisions.test.ts` derives its adversarial contract from the emitter's own output
   and feeds it back through every channel a contract owns — parameters, inbound and outbound
   method names, object field names, declaration names — asserting each either compiles
-  (`go build`, `go vet`, `gofmt`) or is refused by name. `go vet`'s `stdmethods` is narrowed for
-  the method-name channel alone: it objects to a *contract* method called `MarshalJSON`/`Scan`/
-  `Seek`, which is a property of the name the contract chose, not of the emitter's own output.
+  (`go build`, `go vet` with no exclusions, `gofmt`) or is refused by name. It also pins the Go
+  1.26 `stdmethods` family as a corpus, driving every canonical name through both method
+  channels and asserting the generated shape is disjoint from it.
 
 ### Interface Requirements
 - Must define `ClientFunctions` and `ServerFunctions` interfaces

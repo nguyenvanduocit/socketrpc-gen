@@ -8,7 +8,14 @@
  */
 
 import type { ObjectField, RpcMethod, RpcSchema, TypeDeclaration, TypeRef } from "../schema";
-import { exportedIdentifier, isExportedGoIdentifier, isGoIdentifier, localIdentifier } from "./names";
+import {
+  clientMethodName,
+  exportedIdentifier,
+  handlerMethodName,
+  isExportedGoIdentifier,
+  isGoIdentifier,
+  localIdentifier,
+} from "./names";
 import type { GoBackendOptions } from "./options";
 import { declarationsByName, goTypeName, unwrapOptionality } from "./project";
 
@@ -21,8 +28,6 @@ const RESERVED_EVENTS = new Set([
   "removeListener",
   "__rpc:error__",
 ]);
-
-const CLIENT_RESERVED_METHODS = new Set(["Dispose", "Connected", "Done", "Socket"]);
 
 /**
  * The only parameter name the Go backend cannot accept.
@@ -167,11 +172,19 @@ function validateObjectFields(
   });
 }
 
+/**
+ * Validates one direction of a contract.
+ *
+ * `goMethodName` is the projection that direction's methods reach Go through —
+ * `Handle…` for the interface a server implements, `Call…` for the client it is
+ * called through. Uniqueness is checked on the projected name, which is what a
+ * developer reads in the generated package.
+ */
 function validateMethods(
   methods: readonly RpcMethod[],
   path: string,
   scope: ValidationScope,
-  clientSurface: boolean,
+  goMethodName: (wireName: string) => string,
 ): void {
   const eventNames = new Set<string>();
   const goNames = new Set<string>();
@@ -187,16 +200,16 @@ function validateMethods(
     if (eventNames.has(method.name)) fail(`${methodPath}.name`, `duplicate event ${method.name}`);
     eventNames.add(method.name);
 
-    const goName = exportedIdentifier(method.name);
-    if (!isExportedGoIdentifier(goName)) {
+    // The derived name is checked before the prefix is applied: `Handle` in
+    // front of it would make anything a valid Go identifier, including the empty
+    // derivation a name of only separators produces.
+    if (!isExportedGoIdentifier(exportedIdentifier(method.name))) {
       fail(
         `${methodPath}.name`,
         `cannot derive an exported Go method name from ${JSON.stringify(method.name)}`,
       );
     }
-    if (clientSurface && CLIENT_RESERVED_METHODS.has(goName)) {
-      fail(`${methodPath}.name`, `${goName} collides with the generated Client API`);
-    }
+    const goName = goMethodName(method.name);
     if (goNames.has(goName)) {
       fail(`${methodPath}.name`, `duplicate generated method ${goName}`);
     }
@@ -401,7 +414,7 @@ export function validateGoSchema(schema: RpcSchema, options: GoBackendOptions = 
 
   const inbound = schema.methods.filter((method) => method.direction === "client-to-server");
   const outbound = schema.methods.filter((method) => method.direction === "server-to-client");
-  validateMethods(inbound, "clientToServer", scope, false);
-  validateMethods(outbound, "serverToClient", scope, true);
+  validateMethods(inbound, "clientToServer", scope, handlerMethodName);
+  validateMethods(outbound, "serverToClient", scope, clientMethodName);
   validateValueCycles(schema, scope);
 }

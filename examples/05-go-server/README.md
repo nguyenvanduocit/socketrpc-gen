@@ -43,6 +43,10 @@ Add the transport and implement the generated interface:
 go get github.com/zishang520/socket.io/servers/socket/v3
 ```
 
+A contract method `createRoom` is implemented as `HandleCreateRoom` and called
+as `CallCreateRoom` — the generated APIs prefix the contract's own names. Wire
+event names are unchanged.
+
 ```go
 package main
 
@@ -56,26 +60,26 @@ import (
 
 type handler struct{ client *rpc.Client }
 
-func (h *handler) CreateRoom(ctx context.Context, topic string, visibility rpc.Visibility) (rpc.ChatRoom, error) {
+func (h *handler) HandleCreateRoom(ctx context.Context, topic string, visibility rpc.Visibility) (rpc.ChatRoom, error) {
     return rpc.ChatRoom{ID: "r1", Topic: topic, MemberCount: 1, Visibility: visibility}, nil
 }
 
 // Returning a nil slice is safe: the binding sends [] so the client, whose
 // generated type says ChatRoom[], never has to defend against null.
-func (h *handler) ListRooms(ctx context.Context) ([]rpc.ChatRoom, error) { return nil, nil }
+func (h *handler) HandleListRooms(ctx context.Context) ([]rpc.ChatRoom, error) { return nil, nil }
 
-func (h *handler) PostMessage(ctx context.Context, roomID string, body string) (rpc.Message, error) {
+func (h *handler) HandlePostMessage(ctx context.Context, roomID string, body string) (rpc.Message, error) {
     message := rpc.Message{ID: "m1", RoomID: roomID, Body: body, SentAt: "2026-01-01T00:00:00Z"}
 
     // Call back into the TypeScript client through the generated Client.
-    _ = h.client.OnMessage(ctx, message)
+    _ = h.client.CallOnMessage(ctx, message)
 
     // Return a typed failure by returning an *RpcError; anything else becomes
     // INTERNAL_ERROR.
     return message, nil
 }
 
-func (h *handler) Typing(ctx context.Context, roomID string) error { return nil }
+func (h *handler) HandleTyping(ctx context.Context, roomID string) error { return nil }
 
 func serve(raw *socket.Socket) {
     client, err := rpc.NewClient(raw, nil)
@@ -145,7 +149,7 @@ sequence number in the payload.
 ## Errors the Client Reports Back
 
 `confirmLeave` returns a value, so a failing client handler answers through the
-acknowledgement and `ConfirmLeave` returns the error. `onMessage` is
+acknowledgement and `CallConfirmLeave` returns the error. `onMessage` is
 fire-and-forget and has no acknowledgement, so the client reports a failing
 handler on `__rpc:error__` instead. Observe those with:
 
@@ -166,3 +170,8 @@ never contain an underscore, so a parameter called `result`, `err`, `fmt` or
 `string` compiles exactly as written. The single reserved name is `ctx`, which
 is the context parameter of the generated `ServerHandler` and `Client`
 signatures.
+
+Methods live in their own namespace on top of that: `Handle…` on
+`ServerHandler`, `Call…` on `Client`. A method may therefore be named `scan`,
+`seek` or `marshalJSON` — names the standard library has claimed a signature for
+— and the package still passes `go vet` with nothing excluded.

@@ -49,15 +49,15 @@ type handler struct {
 	rpcErrors []string
 }
 
-func (h *handler) Echo(_ context.Context, id string, payload string) (rpc.Echo, error) {
+func (h *handler) HandleEcho(_ context.Context, id string, payload string) (rpc.Echo, error) {
 	// `note` is an optional field: leaving it nil proves `omitempty` keeps the key
 	// off the wire, which the TypeScript side asserts.
 	return rpc.Echo{ID: id, Payload: payload}, nil
 }
 
-// FailTyped returns a branded error with a custom code and structured data. The
+// HandleFailTyped returns a branded error with a custom code and structured data. The
 // generated binding forwards it through the same ack slot as a success.
-func (h *handler) FailTyped(_ context.Context, reason string) (rpc.Echo, error) {
+func (h *handler) HandleFailTyped(_ context.Context, reason string) (rpc.Echo, error) {
 	return rpc.Echo{}, rpc.NewRpcError(
 		rpc.RpcErrorCode("GO_REFUSED"),
 		"go server refused: "+reason,
@@ -66,20 +66,20 @@ func (h *handler) FailTyped(_ context.Context, reason string) (rpc.Echo, error) 
 	)
 }
 
-// FailPanic proves the generated recover turns a handler panic into an
+// HandleFailPanic proves the generated recover turns a handler panic into an
 // INTERNAL_ERROR acknowledgement rather than killing the process.
-func (h *handler) FailPanic(_ context.Context, reason string) (rpc.Echo, error) {
+func (h *handler) HandleFailPanic(_ context.Context, reason string) (rpc.Echo, error) {
 	panic("go handler panicked: " + reason)
 }
 
-func (h *handler) Note(_ context.Context, text string, priority rpc.Priority) error {
+func (h *handler) HandleNote(_ context.Context, text string, priority rpc.Priority) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.notes = append(h.notes, string(priority)+":"+text)
 	return nil
 }
 
-func (h *handler) ReadNotes(_ context.Context) ([]string, error) {
+func (h *handler) HandleReadNotes(_ context.Context) ([]string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]string(nil), h.notes...), nil
@@ -93,28 +93,28 @@ func (h *handler) recordRpcError(failure *rpc.RpcError) {
 	h.rpcErrors = append(h.rpcErrors, string(failure.Code)+":"+failure.Origin+":"+failure.Message)
 }
 
-// ReadRPCErrors deliberately returns a nil slice while nothing has been
+// HandleReadRPCErrors deliberately returns a nil slice while nothing has been
 // reported, so the generated normalization is exercised on a real reply: the
 // TypeScript client's type says string[] and must never see null. The name
 // comes from the contract's `readRpcErrors` through Go's initialism rules.
-func (h *handler) ReadRPCErrors(_ context.Context) ([]string, error) {
+func (h *handler) HandleReadRPCErrors(_ context.Context) ([]string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]string(nil), h.rpcErrors...), nil
 }
 
-// NeverAck blocks until the binding's context is cancelled, so the call is
+// HandleNeverAck blocks until the binding's context is cancelled, so the call is
 // answered by the TypeScript client's own timeout rather than by Go. Because the
 // generated binding dispatches each inbound event on its own goroutine, later
 // calls on the same socket keep flowing while this one hangs.
-func (h *handler) NeverAck(ctx context.Context, _ string) (rpc.Echo, error) {
+func (h *handler) HandleNeverAck(ctx context.Context, _ string) (rpc.Echo, error) {
 	<-ctx.Done()
 	return rpc.Echo{}, ctx.Err()
 }
 
-// DropWhileInFlight closes the connection with the call outstanding, so the
+// HandleDropWhileInFlight closes the connection with the call outstanding, so the
 // client settles as DISCONNECTED rather than TIMEOUT.
-func (h *handler) DropWhileInFlight(ctx context.Context, _ string) (rpc.Echo, error) {
+func (h *handler) HandleDropWhileInFlight(ctx context.Context, _ string) (rpc.Echo, error) {
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		h.socket.Disconnect(true)
@@ -123,23 +123,23 @@ func (h *handler) DropWhileInFlight(ctx context.Context, _ string) (rpc.Echo, er
 	return rpc.Echo{}, ctx.Err()
 }
 
-// Receipt returns a success that is shaped like an error. Without the
+// HandleReceipt returns a success that is shaped like an error. Without the
 // `__rpcError` brand the TypeScript side must still read it as a value.
-func (h *handler) Receipt(_ context.Context, id string) (rpc.Receipt, error) {
+func (h *handler) HandleReceipt(_ context.Context, id string) (rpc.Receipt, error) {
 	return rpc.Receipt{Message: "receipt for " + id, Code: "PAID"}, nil
 }
 
-// RoundTrip drives the generated *outbound* surface: a fire-and-forget push
+// HandleRoundTrip drives the generated *outbound* surface: a fire-and-forget push
 // followed by a value-returning call, both through rpc.Client.
-func (h *handler) RoundTrip(ctx context.Context, question string) (string, error) {
-	if err := h.client.Notify(ctx, "pushed:"+question); err != nil {
+func (h *handler) HandleRoundTrip(ctx context.Context, question string) (string, error) {
+	if err := h.client.CallNotify(ctx, "pushed:"+question); err != nil {
 		return "", err
 	}
 
 	askCtx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 
-	answer, err := h.client.Ask(askCtx, question)
+	answer, err := h.client.CallAsk(askCtx, question)
 	if err != nil {
 		return "", err
 	}

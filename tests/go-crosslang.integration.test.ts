@@ -104,6 +104,13 @@ run(
 const gofmt = Bun.spawnSync(["gofmt", "-l", goPkgDir], { stdout: "pipe", stderr: "pipe" });
 const unformatted = gofmt.stdout.toString().trim();
 
+// The full analyzer set, with nothing excluded, over the generated package *and*
+// the handler that implements it — `go test` runs only a subset, so a name the
+// standard library has claimed (`stdmethods`) would otherwise pass unnoticed
+// here even though a consumer's own `go vet` would report it.
+const vet = Bun.spawnSync(["go", "vet", "./..."], { cwd: goDir, stdout: "pipe", stderr: "pipe" });
+const vetReport = `${vet.stdout.toString()}${vet.stderr.toString()}`.trim();
+
 cpSync(join(FIXTURE_DIR, "rpc_test.go"), join(goPkgDir, "rpc_test.go"));
 
 // Compiles the generated package and the handler that consumes it, runs the
@@ -211,6 +218,11 @@ const T = 15_000;
 describe("generated Go server emits real, well-formed Go", () => {
   test("every generated file is gofmt-clean", () => {
     expect(unformatted, `gofmt reported unformatted files:\n${unformatted}`).toBe("");
+  });
+
+  test("the generated package and its handler pass go vet with no exclusions", () => {
+    expect(vetReport, `go vet reported:\n${vetReport}`).toBe("");
+    expect(vet.exitCode).toBe(0);
   });
 
   test("the CLI emits no TypeScript server when the server is Go", async () => {

@@ -101,6 +101,41 @@ export function generated(name: string): string {
   return `${GENERATED_PREFIX}${name}`;
 }
 
+/**
+ * Prefixes the contract's own methods carry in the generated Go API.
+ *
+ * `go vet`'s `stdmethods` analyzer objects to any method *named* like one the
+ * standard library gives a fixed signature — `MarshalJSON`, `Scan`, `Seek`,
+ * `WriteTo` and the rest — whoever declared it and whatever it means. A contract
+ * is free to call an RPC method `scan` or `marshalJSON`, so an unprefixed name
+ * reaches `ServerHandler` and `Client` verbatim and the generated package stops
+ * vetting.
+ *
+ * A prefix closes that class by construction rather than by a list that would
+ * have to track the standard library release by release. `exportedIdentifier`
+ * splits on every non-alphanumeric rune, so a contract-derived name is always
+ * `[A-Za-z0-9]+`, and validation admits a method only when that name is an
+ * exported Go identifier — leaving `[A-Z][A-Za-z0-9]*`. Every generated method
+ * is therefore `Handle` or `Call` followed by an upper-case letter, while every
+ * canonical method name is a bare standard-library verb. The two shapes cannot
+ * meet, so no wire name can produce a canonical one.
+ *
+ * `tests/go-collisions.test.ts` pins the whole `stdmethods` family against the
+ * shape, and vets every channel of the emitter's output with no exclusions.
+ */
+export const HANDLER_METHOD_PREFIX = "Handle";
+export const CLIENT_METHOD_PREFIX = "Call";
+
+/** The `ServerHandler` method a client-to-server contract method is implemented as. */
+export function handlerMethodName(wireName: string): string {
+  return `${HANDLER_METHOD_PREFIX}${exportedIdentifier(wireName)}`;
+}
+
+/** The `Client` method a server-to-client contract method is called through. */
+export function clientMethodName(wireName: string): string {
+  return `${CLIENT_METHOD_PREFIX}${exportedIdentifier(wireName)}`;
+}
+
 export function goString(value: string): string {
   return JSON.stringify(value);
 }

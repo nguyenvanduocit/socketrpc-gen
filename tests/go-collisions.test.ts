@@ -6,8 +6,12 @@ import { spawnSync } from "child_process";
 import { RPC_SCHEMA_VERSION, type ObjectField, type RpcMethod, type RpcSchema } from "../src/schema";
 import { generateGo } from "../src/go";
 import {
+  CLIENT_METHOD_PREFIX,
   GENERATED_PREFIX,
+  HANDLER_METHOD_PREFIX,
+  clientMethodName,
   exportedIdentifier,
+  handlerMethodName,
   isExportedGoIdentifier,
   isGoIdentifier,
   localIdentifier,
@@ -28,6 +32,10 @@ import {
  * Each channel ends in one of two places, and the suite pins which: the
  * generated package compiles, or the contract is refused by name with a
  * diagnostic. Silent non-compiling Go is what this file exists to prevent.
+ *
+ * Every channel is vetted with the analyzer set `go vet` runs by default and no
+ * exclusions, so an emitter change that reintroduces a name the standard library
+ * has claimed fails here rather than in a consumer's build.
  */
 
 const FIXTURE_DIR = path.join(import.meta.dir, "fixtures", "go-emitter");
@@ -151,15 +159,8 @@ function verdictFor(names: readonly string[], build: (name: string) => RpcSchema
   return { accepted, refused };
 }
 
-/**
- * `vetFlags` exists for one analyzer. `stdmethods` objects to a method named
- * `MarshalJSON`/`Scan`/`Seek` carrying anything but the standard library's
- * signature — a complaint about the name the *contract* chose, not about an
- * identifier the emitter owns. Refusing those names would cost a contract
- * ordinary RPC verbs, so they stay legal and the check is narrowed instead;
- * every other analyzer still runs on every channel.
- */
-function compile(label: string, sources: Record<string, string>, vetFlags: readonly string[] = []): void {
+/** Builds, vets and gofmt-checks one generated package. */
+function compile(label: string, sources: Record<string, string>): void {
   const directory = mkdtempSync(path.join(tmpdir(), "socketrpc-go-collisions-"));
   temporaryDirectories.push(directory);
   for (const [filename, source] of Object.entries(sources)) {
@@ -184,7 +185,7 @@ replace github.com/zishang520/socket.io/servers/socket/v3 => ${JSON.stringify(pa
   });
   expect(built.status, `${label}: ${built.stdout}\n${built.stderr}`).toBe(0);
 
-  const vet = spawnSync("go", ["vet", ...vetFlags, "./..."], {
+  const vet = spawnSync("go", ["vet", "./..."], {
     cwd: directory,
     encoding: "utf8",
     timeout: 60_000,
@@ -196,6 +197,40 @@ replace github.com/zishang520/socket.io/servers/socket/v3 => ${JSON.stringify(pa
 }
 
 const corpus = candidateWireNames(Object.values(generateGo(probe)));
+
+/**
+ * The method names the standard library gives a fixed signature, as of Go 1.26
+ * (`cmd/vendor/golang.org/x/tools/go/analysis/passes/stdmethods`).
+ *
+ * `go vet` objects to *any* method carrying one of these names with a different
+ * signature — on any type, whoever declared it — and a contract is free to call
+ * an RPC method `scan`, `seek` or `marshalJSON`. This list is the corpus this
+ * suite aims at the emitter, never a rule the emitter consults: generation
+ * derives nothing from it, so a later Go release adding a name cannot leave the
+ * emitter stale. What closes the class is the shape of a generated method name,
+ * which the test below pins against the whole family.
+ */
+const GO_STDMETHODS = [
+  "As",
+  "Format",
+  "GobDecode",
+  "GobEncode",
+  "Is",
+  "MarshalJSON",
+  "MarshalXML",
+  "ReadByte",
+  "ReadFrom",
+  "ReadRune",
+  "Scan",
+  "Seek",
+  "UnmarshalJSON",
+  "UnmarshalXML",
+  "UnreadByte",
+  "UnreadRune",
+  "Unwrap",
+  "WriteByte",
+  "WriteTo",
+] as const;
 
 describe("Go identifier collision safety", () => {
   test("no identifier derived from a contract can contain the generated prefix", () => {
@@ -308,21 +343,16 @@ describe("Go identifier collision safety", () => {
       ...probe,
       methods: [{ name, direction: "server-to-client", params: [], returnType: VOID }],
     }));
-    // A client-side method *is* the exported Go API, so it also has to clear the
-    // four methods `Client` declares itself.
-    for (const [name, message] of outbound.refused) {
-      expect(message, `${name} was refused for an undocumented reason`).toMatch(
-        /is reserved by Socket.IO\/SocketRPC|collides with the generated Client API/,
+    // A client-side method reaches Go as `Call…`, which `Client`'s own exported
+    // members — `Socket`, `Done`, `Connected`, `Dispose` — can never be spelled
+    // as, so this channel refuses nothing either.
+    expect([...outbound.refused.keys()]).toEqual([]);
+    for (const previouslyReserved of ["Dispose", "Connected", "Done", "Socket"]) {
+      expect(outbound.accepted, `${previouslyReserved} is no longer a legal method name`).toContain(
+        previouslyReserved,
       );
     }
-    for (const reserved of ["Dispose", "Connected", "Done", "Socket"]) {
-      expect(
-        outbound.refused.get(reserved),
-        `${reserved} no longer collides with the generated Client API`,
-      ).toContain("collides with the generated Client API");
-    }
 
-    const noStdMethods = ["-stdmethods=false"];
     compile("inbound method names", generateGo({
       ...probe,
       methods: inbound.accepted.map((name) => ({
@@ -331,7 +361,7 @@ describe("Go identifier collision safety", () => {
         params: [{ name: "value", type: scalar("string") }],
         returnType: { kind: "named", name: "Record" },
       })),
-    }), noStdMethods);
+    }));
 
     compile("outbound method names", generateGo({
       ...probe,
@@ -341,7 +371,60 @@ describe("Go identifier collision safety", () => {
         params: [{ name: "value", type: scalar("string") }],
         returnType: scalar("string"),
       })),
-    }), noStdMethods);
+    }));
+  }, 120_000);
+
+  test("no contract method name can reach a canonical standard library method name", () => {
+    // Every generated method is a prefix followed by the contract's own name,
+    // which validation admits only as an exported Go identifier — and which can
+    // hold no underscore, because both projections split on non-alphanumerics.
+    const shape = new RegExp(`^(${HANDLER_METHOD_PREFIX}|${CLIENT_METHOD_PREFIX})[A-Z][A-Za-z0-9]*$`);
+
+    // The family is disjoint from that shape, so no wire name reaches it. This
+    // is the whole argument, and it holds for the names of later Go releases as
+    // much as for the ones pinned above: a canonical method is a bare standard
+    // library verb, and a generated one never is.
+    for (const canonical of GO_STDMETHODS) {
+      expect(canonical, `${canonical} is shaped like a generated method name`).not.toMatch(shape);
+    }
+
+    for (const canonical of GO_STDMETHODS) {
+      for (const projected of [handlerMethodName(canonical), clientMethodName(canonical)]) {
+        expect(projected).toMatch(shape);
+        expect(GO_STDMETHODS, `${canonical} still reaches ${projected}`).not.toContain(projected);
+      }
+      // The lower-camel wire spelling a define file actually writes.
+      const wire = localIdentifier(canonical);
+      expect(handlerMethodName(wire)).toBe(handlerMethodName(canonical));
+      expect(clientMethodName(wire)).toBe(clientMethodName(canonical));
+    }
+
+    // …and the same names driven through the emitter, vetted with no exclusions.
+    const inbound = generateGo({
+      ...probe,
+      methods: GO_STDMETHODS.map((canonical) => ({
+        name: localIdentifier(canonical),
+        direction: "client-to-server" as const,
+        params: [{ name: "value", type: scalar("string") }],
+        returnType: { kind: "named" as const, name: "Record" },
+      })),
+    });
+    expect(inbound["server.generated.go"]).toContain(
+      "HandleMarshalJSON(ctx context.Context, value string) (Record, error)",
+    );
+    compile("canonical method names, inbound", inbound);
+
+    const outbound = generateGo({
+      ...probe,
+      methods: GO_STDMETHODS.map((canonical) => ({
+        name: localIdentifier(canonical),
+        direction: "server-to-client" as const,
+        params: [{ name: "value", type: scalar("string") }],
+        returnType: scalar("string"),
+      })),
+    });
+    expect(outbound["server.generated.go"]).toContain("func (rpc_c *Client) CallSeek(");
+    compile("canonical method names, outbound", outbound);
   }, 120_000);
 
   test("every emitter-owned identifier survives being used as an object field name", () => {

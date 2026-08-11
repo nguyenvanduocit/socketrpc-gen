@@ -97,6 +97,33 @@ describe("isolated Go emitter", () => {
     );
   });
 
+  test("gives the contract's methods their own namespace on both generated APIs", () => {
+    const server = generateGo(schema)["server.generated.go"]!;
+
+    // Both surfaces a developer writes against prefix the contract's own name.
+    // That is what keeps a contract free to call a method `marshalJSON`, `scan`
+    // or `seek` without taking the package out of `go vet`'s reach, and free to
+    // call one `dispose` or `socket` without meeting `Client`'s own API.
+    expect(server).toContain(
+      "HandleGetUser(ctx context.Context, userID string, includeDeleted bool) (User, error)",
+    );
+    expect(server).toContain("HandleDeleteUser(ctx context.Context, userID string) error");
+    expect(server).toContain(
+      "func (rpc_c *Client) CallConfirm(ctx context.Context, question string) (rpc_result bool, rpc_err error)",
+    );
+    expect(server).toContain("func (rpc_c *Client) CallNotify(ctx context.Context, message string) error");
+
+    // The binding's own dispatch members stay unexported and unprefixed: they
+    // share a namespace with `rpc_`-spelled members, not with the standard
+    // library's method set.
+    expect(server).toContain("func (b *ServerBinding) handleGetUser(rawArgs []any)");
+    expect(server).toContain("call.finish(b.rpc_handler.HandleGetUser(b.rpc_ctx, arg0, arg1))");
+
+    // Wire names are the contract and never move.
+    expect(server).toContain('rawSocket.On("getUser", binding.listenGetUser)');
+    expect(server).toContain('return rpc_emit(rpc_c, ctx, "notify", message)');
+  });
+
   test("emits gofmt-clean files", () => {
     const directory = mkdtempSync(path.join(tmpdir(), "socketrpc-go-format-"));
     temporaryDirectories.push(directory);

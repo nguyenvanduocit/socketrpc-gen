@@ -455,10 +455,15 @@ That emits `client.generated.ts` + `types.generated.ts` for the browser and
 [`zishang520/socket.io/servers/socket/v3`](https://github.com/zishang520/socket.io)
 and are gofmt-clean, `go vet`-clean and race-clean out of the box.
 
+A contract method `getUser` is implemented as `HandleGetUser` and called as
+`CallGetUser`: the generated APIs prefix the contract's own names, so a method
+may be called `scan`, `marshalJSON` or `dispose` without meeting a name Go has
+already claimed. Wire event names are the contract and are unaffected.
+
 ```go
 type handler struct{ client *rpc.Client }
 
-func (h *handler) GetUser(ctx context.Context, userID string) (rpc.User, error) {
+func (h *handler) HandleGetUser(ctx context.Context, userID string) (rpc.User, error) {
     if userID == "" {
         // Any error becomes an RpcError on the wire; return an *RpcError for a typed one.
         return rpc.User{}, rpc.NewRpcError(rpc.CodeInvalidArgument, "userID is required", "", nil)
@@ -533,14 +538,20 @@ parameter may therefore be called `result`, `err`, `fmt`, `string` or `len`, and
 a method the client calls may be named `Disconnect` or `_disconnect`, without
 consequence.
 
-Four kinds of name are refused, each with the reason and the fix in the message:
+Method names get their own namespace instead of a prefix on the generator's
+side: `Handle…` on `ServerHandler`, `Call…` on `Client`. Both shapes are a fixed
+word followed by an upper-case letter, which no method name the standard library
+has claimed is spelled as — so a contract may name a method `scan`, `seek`,
+`marshalJSON` or `unwrap` and the package still passes `go vet` with no analyzer
+excluded. The same prefix keeps `Client`'s own `Socket`, `Done`, `Connected` and
+`Dispose` out of reach, so those are legal method names too.
+
+Three kinds of name are refused, each with the reason and the fix in the message:
 
 - `ctx` as a parameter — it is the context parameter of the generated
   `ServerHandler` and `Client` signatures.
 - Socket.IO's own event names (`connect`, `disconnect`, `disconnecting`,
   `connect_error`, `newListener`, `removeListener`) as method names.
-- `Dispose`, `Connected`, `Done` and `Socket` as *server-to-client* method names:
-  those calls become methods on the exported `Client`, which declares its own.
 - A declaration whose Go name is one the generated package already exports, such
   as `ServerHandler` or `ClientOptions`.
 

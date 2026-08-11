@@ -105,10 +105,10 @@ func rpc_queuedListener(run func([]any)) func(...any) {
 }
 
 type ServerHandler interface {
-	CreateRoom(ctx context.Context, topic string, visibility Visibility) (ChatRoom, error)
-	ListRooms(ctx context.Context) ([]ChatRoom, error)
-	PostMessage(ctx context.Context, roomID string, body string) (Message, error)
-	Typing(ctx context.Context, roomID string) error
+	HandleCreateRoom(ctx context.Context, topic string, visibility Visibility) (ChatRoom, error)
+	HandleListRooms(ctx context.Context) ([]ChatRoom, error)
+	HandlePostMessage(ctx context.Context, roomID string, body string) (Message, error)
+	HandleTyping(ctx context.Context, roomID string) error
 }
 
 type ServerBinding struct {
@@ -390,7 +390,7 @@ func (b *ServerBinding) handleCreateRoom(rawArgs []any) {
 	if !call.decode(1, &arg1, "visibility") {
 		return
 	}
-	call.finish(b.rpc_handler.CreateRoom(b.rpc_ctx, arg0, arg1))
+	call.finish(b.rpc_handler.HandleCreateRoom(b.rpc_ctx, arg0, arg1))
 }
 
 func (b *ServerBinding) handleListRooms(rawArgs []any) {
@@ -402,7 +402,7 @@ func (b *ServerBinding) handleListRooms(rawArgs []any) {
 	if !call.ready() {
 		return
 	}
-	result, err := b.rpc_handler.ListRooms(b.rpc_ctx)
+	result, err := b.rpc_handler.HandleListRooms(b.rpc_ctx)
 	if err == nil && result == nil {
 		result = []ChatRoom{}
 	}
@@ -426,7 +426,7 @@ func (b *ServerBinding) handlePostMessage(rawArgs []any) {
 	if !call.decode(1, &arg1, "body") {
 		return
 	}
-	call.finish(b.rpc_handler.PostMessage(b.rpc_ctx, arg0, arg1))
+	call.finish(b.rpc_handler.HandlePostMessage(b.rpc_ctx, arg0, arg1))
 }
 
 func (b *ServerBinding) handleTyping(rawArgs []any) {
@@ -442,7 +442,7 @@ func (b *ServerBinding) handleTyping(rawArgs []any) {
 	if !call.decode(0, &arg0, "roomId") {
 		return
 	}
-	call.finishVoid(b.rpc_handler.Typing(b.rpc_ctx, arg0))
+	call.finishVoid(b.rpc_handler.HandleTyping(b.rpc_ctx, arg0))
 }
 
 type ClientOptions struct {
@@ -666,11 +666,11 @@ func rpc_request(c *Client, ctx context.Context, origin string, target any, args
 	return nil
 }
 
-func (rpc_c *Client) OnMessage(ctx context.Context, message Message) error {
+func (rpc_c *Client) CallOnMessage(ctx context.Context, message Message) error {
 	return rpc_emit(rpc_c, ctx, "onMessage", message)
 }
 
-func (rpc_c *Client) ConfirmLeave(ctx context.Context, roomID string) (rpc_result bool, rpc_err error) {
+func (rpc_c *Client) CallConfirmLeave(ctx context.Context, roomID string) (rpc_result bool, rpc_err error) {
 	rpc_err = rpc_request(rpc_c, ctx, "confirmLeave", &rpc_result, roomID)
 	return
 }

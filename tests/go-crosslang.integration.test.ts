@@ -104,6 +104,12 @@ run(
 const gofmt = Bun.spawnSync(["gofmt", "-l", goPkgDir], { stdout: "pipe", stderr: "pipe" });
 const unformatted = gofmt.stdout.toString().trim();
 
+// Fetches the module graph first, so the report below is the analyzers speaking
+// and nothing else: on a cold module cache the first Go command to touch the
+// module writes `go: downloading …` progress to the same stderr the report is
+// read from, which is invisible on a developer's warm machine and fails on CI.
+run(["go", "mod", "download"], goDir, "go mod download");
+
 // The full analyzer set, with nothing excluded, over the generated package *and*
 // the handler that implements it — `go test` runs only a subset, so a name the
 // standard library has claimed (`stdmethods`) would otherwise pass unnoticed

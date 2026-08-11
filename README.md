@@ -11,6 +11,7 @@
 -   **Ergonomic API:** Clean `client.handle.*` / `client.server.*` pattern with automatic cleanup.
 -   **Unopinionated:** Generates only the type-safe bindings, leaving you in full control of your `socket.io` setup.
 -   **Bidirectional Communication:** Supports both client-to-server and server-to-client RPC calls.
+-   **Multi-Language:** Generate a TypeScript client with either a TypeScript or a **Go** server, from one contract.
 -   **Simple to Use:** Get started with a single command.
 -   **Robust Error Handling:** Branded `RpcError` (no shape collisions), standard error codes (`TIMEOUT`, `DISCONNECTED`, `ABORTED`, …), and a per-call `return`-or-`throw` error mode.
 -   **Connection-Aware:** `connected` state plus `onConnect` / `onDisconnect` / `onReconnect` hooks for re-syncing after reconnects.
@@ -29,6 +30,7 @@ Check out the [`examples/`](./examples) directory for comprehensive examples:
 - **[01-basic](./examples/01-basic/)** - Simple interface definitions without extension
 - **[02-single-extension](./examples/02-single-extension/)** - Single-level interface inheritance
 - **[03-multi-level-extension](./examples/03-multi-level-extension/)** - Multi-layer architecture patterns
+- **[05-go-server](./examples/05-go-server/)** - TypeScript client with a Go server
 
 See the [examples README](./examples/README.md) for detailed comparisons and use cases.
 
@@ -250,6 +252,11 @@ socketrpc-gen <path> [options]
 -   `-t, --timeout <ms>`: Default timeout in milliseconds for RPC calls that expect a response. This can be overridden per-call. (Default: "5000")
 -   `-l, --error-logger <path>`: Custom error logger import path (e.g., '@/lib/logger'). The module must default-export `(message: string, ...args: unknown[]) => void`. By default uses `console.error`.
 -   `-e, --error-mode <mode>`: How call methods surface failures — `return` the `RpcError` (default, check with `isRpcError`) or `throw` it (use `try/catch`).
+-   `-c, --client <language>`: Language of the generated client. (Default: "typescript")
+-   `-s, --server <language>`: Language of the generated server — `typescript` or `go`. (Default: "typescript")
+-   `--go-package <name>`: Go package clause for the generated server. (Default: "rpc")
+-   `--go-out <dir>`: Directory for the generated Go files. (Default: the input file's directory)
+-   `--go-socket-import <path>`: Go Socket.IO server import path the bindings are written against. (Default: "github.com/zishang520/socket.io/servers/socket/v3")
 -   `-w, --watch`: Watch for changes in the definition file and regenerate automatically. (Default: false)
 -   `-h, --help`: Display help for command.
 
@@ -433,6 +440,73 @@ try {
   if (isRpcError(e)) console.error(e.code, e.message);
 }
 ```
+
+## Go Server
+
+A TypeScript client can talk to a Go server generated from the same `define.ts`:
+
+```bash
+bunx socketrpc-gen ./rpc/define.ts --client typescript --server go --go-out ./rpc/go
+```
+
+That emits `client.generated.ts` + `types.generated.ts` for the browser and
+`types.generated.go` + `server.generated.go` for the server. No
+`server.generated.ts` is produced. The Go bindings are written against
+[`zishang520/socket.io/servers/socket/v3`](https://github.com/zishang520/socket.io)
+and are gofmt-clean, `go vet`-clean and race-clean out of the box.
+
+```go
+type handler struct{ client *rpc.Client }
+
+func (h *handler) GetUser(ctx context.Context, userID string) (rpc.User, error) {
+    if userID == "" {
+        // Any error becomes an RpcError on the wire; return an *RpcError for a typed one.
+        return rpc.User{}, rpc.NewRpcError(rpc.CodeInvalidArgument, "userID is required", "", nil)
+    }
+    return rpc.User{ID: userID, Name: "Ada"}, nil
+}
+
+func serve(raw *socket.Socket) {
+    client, _ := rpc.NewClient(raw, nil)          // calls INTO the TypeScript client
+    binding, _ := rpc.BindServer(raw, &handler{client: client})
+    go func() { <-binding.Context().Done(); client.Dispose() }()
+}
+```
+
+### What the Go backend accepts
+
+The TypeScript backend reads your signatures as written, so it accepts anything
+TypeScript accepts. The Go backend reads the portable `RpcSchema` IR, so it only
+accepts contracts with a sound Go spelling — and names the declaration to write
+when it refuses one:
+
+| Accepted | Becomes in Go |
+| --- | --- |
+| `string` / `number` / `boolean` | `string` / `float64` / `bool` |
+| named `type`/`interface` object | an exported struct with JSON tags |
+| named string-literal union | a string enum with `Valid`/`MarshalJSON`/`UnmarshalJSON` |
+| `T[]`, `Record<string, T>` | `[]T`, `map[string]T` |
+| `T \| null`, optional `field?` | `*T` (plus `,omitempty` for optional fields) |
+| `void` return | a fire-and-forget method |
+
+Refused, with the fix named in the error: inline object literals, inline string
+unions, ambient host types (`Error`, `Date`, `Map`), tuples, intersections,
+generics, `any`/`unknown`, and optional *positional* parameters — an omitted
+trailing argument is indistinguishable from a Socket.IO ack callback.
+
+Identifiers are derived idiomatically, so no per-field overrides are needed:
+`id` → `ID`, `roomId` → `RoomID`, `apiUrl` → `APIURL`.
+
+### Behaviour parity
+
+The Go server gives each RPC method its own serialized dispatch queue: repeated
+calls to one method are handled in the order Socket.IO delivered them, matching
+the TypeScript server, while a blocked handler stalls only its own method. Calls
+to *different* methods run concurrently, so contracts that need cross-method
+ordering should carry an explicit sequence number.
+
+Nil slices and maps returned by a handler are normalized to `[]` / `{}` before
+they are acknowledged, so a client typed `string[]` never receives `null`.
 
 ## How It Works
 

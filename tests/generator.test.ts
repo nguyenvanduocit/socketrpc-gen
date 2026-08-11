@@ -12,7 +12,14 @@ const GENERATED_FILES = [
   "types.generated.ts",
 ] as const;
 
-type Example = { dir: string; deps: string[] };
+type Example = {
+  dir: string;
+  deps: string[];
+  /** Extra CLI flags. Absent means the default all-TypeScript invocation. */
+  flags?: string[];
+  /** Generated files to compare, relative to the example directory. */
+  files?: readonly string[];
+};
 
 // Each example's define.ts is the input. `deps` lists sibling .ts files the define.ts imports from.
 const EXAMPLES: Example[] = [
@@ -24,6 +31,19 @@ const EXAMPLES: Example[] = [
   },
   { dir: "examples/04-zod-integration", deps: [] },
   { dir: "examples/00-full-app/pkg/rpc", deps: [] },
+  {
+    // TypeScript client + Go server. No server.generated.ts is emitted, and the
+    // Go package lands in its own directory so its name matches the folder.
+    dir: "examples/05-go-server",
+    deps: [],
+    flags: ["--client", "typescript", "--server", "go", "--go-out", "rpc"],
+    files: [
+      "client.generated.ts",
+      "types.generated.ts",
+      "rpc/types.generated.go",
+      "rpc/server.generated.go",
+    ],
+  },
 ];
 
 // Generated headers embed the CLI invocation with the absolute input path
@@ -34,9 +54,13 @@ function normalizeHeader(content: string): string {
   return content.replace(/bunx (@[\w-]+\/)?socketrpc-gen .+$/gm, "bunx socketrpc-gen <PATH>");
 }
 
-function runGenerator(inputFile: string): { exitCode: number; stderr: string; stdout: string } {
-  const result = spawnSync("bun", ["run", GENERATOR_PATH, inputFile], {
+function runGenerator(
+  inputFile: string,
+  flags: string[] = [],
+): { exitCode: number; stderr: string; stdout: string } {
+  const result = spawnSync("bun", ["run", GENERATOR_PATH, inputFile, ...flags], {
     encoding: "utf-8",
+    cwd: path.dirname(inputFile),
   });
   return {
     exitCode: result.status ?? -1,
@@ -79,10 +103,10 @@ describe("generator snapshot tests", () => {
       }
 
       const tmpInput = path.join(tmp, "define.ts");
-      const { exitCode, stderr } = runGenerator(tmpInput);
+      const { exitCode, stderr } = runGenerator(tmpInput, ex.flags);
       expect(exitCode, `generator failed for ${ex.dir}: ${stderr}`).toBe(0);
 
-      for (const gen of GENERATED_FILES) {
+      for (const gen of ex.files ?? GENERATED_FILES) {
         const actual = readFileSync(path.join(tmp, gen), "utf-8");
         const expected = readFileSync(path.join(exampleDir, gen), "utf-8");
         expect(normalizeHeader(actual), `drift in ${ex.dir}/${gen}`).toBe(

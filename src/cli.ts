@@ -2,7 +2,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
 import { generateRpcPackage } from "./generate";
-import type { GeneratorConfig } from "./types";
+import { DEFAULT_GO_PACKAGE_NAME, DEFAULT_GO_SOCKET_IMPORT } from "./go";
+import { TARGET_LANGUAGES, type GeneratorConfig } from "./types";
 
 /**
  * Watches the input file for changes and regenerates on modification.
@@ -65,6 +66,19 @@ export function runCli(argv: string[]): void {
       "How call methods surface failures: 'return' the RpcError or 'throw' it",
       "return",
     )
+    .option("-c, --client <language>", "Language of the generated client", "typescript")
+    .option(
+      "-s, --server <language>",
+      `Language of the generated server (${TARGET_LANGUAGES.join(" | ")})`,
+      "typescript",
+    )
+    .option("--go-package <name>", "Go package clause for the generated server", DEFAULT_GO_PACKAGE_NAME)
+    .option("--go-out <dir>", "Directory for generated Go files (defaults to the input file's directory)")
+    .option(
+      "--go-socket-import <path>",
+      "Go Socket.IO server import path the bindings are written against",
+      DEFAULT_GO_SOCKET_IMPORT,
+    )
     .option("-w, --watch", "Watch for changes and regenerate automatically", false)
     .action((filePath, options) => {
       const inputPath = path.resolve(process.cwd(), filePath);
@@ -85,6 +99,11 @@ export function runCli(argv: string[]): void {
         defaultTimeout: parseInt(options.timeout, 10),
         errorLogger: options.errorLogger,
         errorMode,
+        clientLanguage: options.client,
+        serverLanguage: options.server,
+        goOutputDir: options.goOut ? path.resolve(process.cwd(), options.goOut) : outputDir,
+        goPackageName: options.goPackage,
+        goSocketImport: options.goSocketImport,
       };
 
       const run = options.watch ? watchMode(config) : generateRpcPackage(config);

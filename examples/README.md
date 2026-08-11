@@ -101,6 +101,24 @@ framework.define.ts → platform.define.ts → define.ts
 
 ---
 
+### [05-go-server](./05-go-server/) - TypeScript Client, Go Server
+
+**What it demonstrates:**
+- Generating a Go server and a TypeScript client from one `define.ts`
+- The portable subset of TypeScript the Go backend accepts, and what it refuses
+- Idiomatic Go output: exported structs, string enums with validation, `RpcError`
+- The `--client` / `--server` / `--go-out` / `--go-package` flags
+
+**Complexity:** ⭐⭐ Intermediate
+
+**Use when:**
+- Your server is Go and your frontend is TypeScript
+- You want one contract to drive both languages
+
+**Functions generated:** 6 total (4 server, 2 client)
+
+---
+
 ### [04-zod-integration](./04-zod-integration/) - Zod Schema Compatibility
 
 **What it demonstrates:**

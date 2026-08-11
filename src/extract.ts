@@ -918,13 +918,21 @@ export async function extractInterfacesFromFile(
 }
 
 /**
+ * Narrows an extraction to its portable schema, or refuses with every reason
+ * the contract could not be modelled. Backends call this instead of reading
+ * `schema` directly so an unsupported-type sentinel can never reach an emitter.
+ */
+export function requireRpcSchema(extracted: ExtractedInterfaces): RpcSchema {
+  if (!extracted.schema) throw new SchemaExtractionError(extracted.diagnostics);
+  return extracted.schema;
+}
+
+/**
  * Extract only the language-neutral schema for non-TypeScript backends.
  * Throws SchemaExtractionError when the contract cannot be modelled portably.
  */
 export async function extractRpcSchemaFromFile(
   inputPath: string,
 ): Promise<RpcSchema> {
-  const { schema, diagnostics } = await extractInterfacesFromFile(inputPath);
-  if (!schema) throw new SchemaExtractionError(diagnostics);
-  return schema;
+  return requireRpcSchema(await extractInterfacesFromFile(inputPath));
 }

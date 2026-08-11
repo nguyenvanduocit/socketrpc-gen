@@ -18,6 +18,21 @@ export function validateInputFile(inputPath: string): void {
  * Generates the package.json shape for the output RPC package.
  */
 function generatePackageJson(config: ResolvedConfig): object {
+  // A Go server needs no socket.io server package here, and exposes no
+  // ./server.generated entry point, so the scaffold advertises only what exists.
+  const hasTypeScriptServer = config.serverLanguage === "typescript";
+
+  const serverEntries = hasTypeScriptServer
+    ? {
+        "./server.generated": {
+          types: "./dist/server.generated.d.ts",
+          default: "./dist/server.generated.js",
+        },
+      }
+    : {};
+  const serverDependency = hasTypeScriptServer ? { "socket.io": "^4.8.1" } : {};
+  const serverPeerDependency = hasTypeScriptServer ? { "socket.io": "^4.0.0" } : {};
+
   return {
     name: config.packageName,
     version: "1.0.0",
@@ -36,10 +51,7 @@ function generatePackageJson(config: ResolvedConfig): object {
         types: "./dist/client.generated.d.ts",
         default: "./dist/client.generated.js",
       },
-      "./server.generated": {
-        types: "./dist/server.generated.d.ts",
-        default: "./dist/server.generated.js",
-      },
+      ...serverEntries,
       "./types.generated": {
         types: "./dist/types.generated.d.ts",
         default: "./dist/types.generated.js",
@@ -50,7 +62,7 @@ function generatePackageJson(config: ResolvedConfig): object {
       dev: "tsc --watch",
     },
     dependencies: {
-      "socket.io": "^4.8.1",
+      ...serverDependency,
       "socket.io-client": "^4.8.1",
     },
     devDependencies: {
@@ -58,7 +70,7 @@ function generatePackageJson(config: ResolvedConfig): object {
       typescript: "^5.0.0",
     },
     peerDependencies: {
-      "socket.io": "^4.0.0",
+      ...serverPeerDependency,
       "socket.io-client": "^4.0.0",
     },
   };

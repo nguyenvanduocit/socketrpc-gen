@@ -9,7 +9,7 @@
  *   client.server.methodName(args);
  *   client.dispose();
  *
- * To regenerate: bunx socketrpc-gen /Users/firegroup/orca/workspaces/socketrpc-gen/socketrpc-go-wire/tests/fixtures/go-wire/define.ts
+ * To regenerate: bunx socketrpc-gen ./define.ts
  */
 
 import type { Socket } from "socket.io-client";

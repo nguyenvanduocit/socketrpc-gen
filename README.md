@@ -611,6 +611,24 @@ gives the method up and each of its required slice and map fields is spelled wit
 a generated type that normalizes itself. Those types convert freely to and from
 the plain Go type, so handler code is unchanged.
 
+### Coming from v6
+
+Go server generation arrives with v7, so there is no generated Go to migrate:
+`--server go`, the `Handle…`/`Call…` method namespace, and `unknown` are all new
+surface. Point the generator at a contract you already have and it produces the
+Go package described above.
+
+An existing TypeScript project has nothing to do. Every byte of TypeScript output
+is what v6 emitted for the same contract — the Go backend reads the same
+`RpcSchema` IR but writes its own files, and `--client`/`--server` both default to
+`typescript`, so an invocation that worked on v6 still emits exactly what it did.
+
+The one thing worth knowing before writing a contract for Go: methods reach the
+generated API prefixed, so `getUser` is implemented as `HandleGetUser` and called
+as `CallGetUser`. That prefix is what buys a clean `go vet ./...` with no analyzer
+excluded, and it is why a method may be named `scan`, `marshalJSON`, `dispose` or
+`socket` without meeting a name Go has already claimed.
+
 ## How It Works
 
 The `socket-rpc` tool works by parsing your TypeScript interface file and generating a set of functions and handlers that wrap the `socket.io` communication layer.

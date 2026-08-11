@@ -173,3 +173,36 @@ func (v User) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(rpc_copy)
 }
+
+type Payload struct {
+	MarshalJSON    string             `json:"marshalJSON"`
+	Labels         rpc_payload_Labels `json:"labels"`
+	Counts         rpc_payload_Counts `json:"counts"`
+	OptionalLabels *[]string          `json:"optionalLabels,omitempty"`
+}
+
+// rpc_payload_Labels keeps Payload.Labels off the wire as JSON null.
+// Payload declares a field named after the marshaller, so the
+// normalization Go would otherwise reach through the struct's own
+// MarshalJSON is spelled on the field's type instead.
+type rpc_payload_Labels []string
+
+func (v rpc_payload_Labels) MarshalJSON() ([]byte, error) {
+	if v == nil {
+		return json.Marshal([]string{})
+	}
+	return json.Marshal([]string(v))
+}
+
+// rpc_payload_Counts keeps Payload.Counts off the wire as JSON null.
+// Payload declares a field named after the marshaller, so the
+// normalization Go would otherwise reach through the struct's own
+// MarshalJSON is spelled on the field's type instead.
+type rpc_payload_Counts map[string]float64
+
+func (v rpc_payload_Counts) MarshalJSON() ([]byte, error) {
+	if v == nil {
+		return json.Marshal(map[string]float64{})
+	}
+	return json.Marshal(map[string]float64(v))
+}

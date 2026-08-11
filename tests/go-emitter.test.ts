@@ -35,6 +35,22 @@ const schema: RpcSchema = {
         { name: "status", type: { kind: "named", name: "Status" } },
       ],
     },
+    {
+      // A wire field named after Go's marshalling hook. The struct cannot carry
+      // both, so the required slice and map are normalized by their own types
+      // instead — same guarantee, reached without the method.
+      kind: "object",
+      name: "Payload",
+      fields: [
+        { name: "marshalJSON", type: scalar("string") },
+        { name: "labels", type: { kind: "array", element: scalar("string") } },
+        { name: "counts", type: { kind: "map", value: scalar("number") } },
+        {
+          name: "optionalLabels",
+          type: { kind: "optional", type: { kind: "array", element: scalar("string") } },
+        },
+      ],
+    },
   ],
   methods: [
     {
@@ -312,6 +328,28 @@ describe("isolated Go emitter", () => {
     expect(types).not.toContain("rpc_copy.NullableTags");
     // A struct with nothing nilable carries no marshaller at all.
     expect(types).not.toContain("func (v Plain) MarshalJSON()");
+  });
+
+  test("normalizes through the field type when a field claims the marshaller", () => {
+    const types = generateGo(schema)["types.generated.go"]!;
+
+    // Go allows a type one member of a given name, and `encoding/json` dictates
+    // the method's spelling — so the field keeps the name and the struct gives
+    // the method up. Normalization has to survive that move, not be dropped.
+    expect(types).toContain('MarshalJSON    string             `json:"marshalJSON"`');
+    expect(types).not.toContain("func (v Payload) MarshalJSON()");
+    expect(types).toContain("type rpc_payload_Labels []string");
+    expect(types).toContain("type rpc_payload_Counts map[string]float64");
+    expect(types).toContain("func (v rpc_payload_Labels) MarshalJSON() ([]byte, error)");
+    // Optional fields are pointers, so null is what the contract asks for and
+    // the field keeps its plain type.
+    expect(types).toContain('OptionalLabels *[]string          `json:"optionalLabels,omitempty"`');
+    expect(types).not.toContain("rpc_payload_OptionalLabels");
+
+    // The move is scoped to the struct that forced it: every other struct keeps
+    // the single marshaller, which stays the readable default.
+    expect(types).toContain("func (v User) MarshalJSON() ([]byte, error)");
+    expect(types).toContain("rpc_copy.Attributes = map[string]string{}");
   });
 
   test("projects aliases, nested optionality, and empty structs", () => {

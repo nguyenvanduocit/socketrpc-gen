@@ -182,6 +182,50 @@ func TestRequiredMapFieldNeverEncodesAsNull(t *testing.T) {
 	}
 }
 
+// A wire field named after the marshalling hook takes the struct's method
+// namespace with it: Go allows a type one member of a given name, and
+// `encoding/json` fixes the method's spelling. The normalization the method
+// would have performed has to survive the move to the field types — including
+// one level in, where the value travels as an element of a slice.
+func TestFieldNamedAfterTheMarshallerKeepsNormalization(t *testing.T) {
+	payload := Payload{MarshalJSON: "the field wins"}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	const want = `{"marshalJSON":"the field wins","labels":[],"counts":{}}`
+	if string(encoded) != want {
+		t.Fatalf("got  %s\nwant %s", encoded, want)
+	}
+	if payload.Labels != nil || payload.Counts != nil {
+		t.Error("normalization mutated the caller's value")
+	}
+
+	nested, err := json.Marshal([]Payload{{}})
+	if err != nil {
+		t.Fatalf("marshal slice: %v", err)
+	}
+	if !strings.Contains(string(nested), `"labels":[]`) {
+		t.Errorf("a nested value was not normalized: %s", nested)
+	}
+
+	// The field types stay assignable from the plain Go types a handler writes.
+	payload.Labels = []string{"a"}
+	payload.Counts = map[string]float64{"n": 1}
+	var labels []string = payload.Labels
+	if len(labels) != 1 {
+		t.Fatal("the generated field type is not assignable to its underlying type")
+	}
+
+	var decoded Payload
+	if err := rpc_decodeValue(map[string]any{"labels": []any{"x"}}, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(decoded.Labels) != 1 || decoded.Labels[0] != "x" {
+		t.Fatalf("decoded %#v", decoded)
+	}
+}
+
 // A required enum left at its zero value cannot be encoded. Socket.IO's write
 // path discards that failure, so without the guard the caller would wait out its
 // own timeout instead of learning what went wrong.

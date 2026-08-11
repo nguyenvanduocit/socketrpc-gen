@@ -3,9 +3,15 @@ import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import * as path from "path";
 import { spawnSync } from "child_process";
-import { RPC_SCHEMA_VERSION, type RpcMethod, type RpcSchema } from "../src/schema";
+import { RPC_SCHEMA_VERSION, type ObjectField, type RpcMethod, type RpcSchema } from "../src/schema";
 import { generateGo } from "../src/go";
-import { GENERATED_PREFIX, exportedIdentifier, isGoIdentifier, localIdentifier } from "../src/go/names";
+import {
+  GENERATED_PREFIX,
+  exportedIdentifier,
+  isExportedGoIdentifier,
+  isGoIdentifier,
+  localIdentifier,
+} from "../src/go/names";
 
 /**
  * Guards the property the Go backend's collision-safety rests on.
@@ -14,9 +20,14 @@ import { GENERATED_PREFIX, exportedIdentifier, isGoIdentifier, localIdentifier }
  * by whoever edits the emitter next, and shipped Go that did not compile once
  * that step was missed. This suite derives its adversarial contract *from the
  * emitter's own output* instead: it generates a package, harvests every Go
- * identifier in it, keeps the ones a contract could actually name, and feeds
- * them back in as parameter names. Adding an unprefixed local to the emitter
+ * identifier in it, and feeds each one back through *every channel a contract
+ * owns* — parameter names, method names in both directions, object field names
+ * and declaration names. Adding an unprefixed identifier to the emitter
  * therefore breaks this test on the next run, with no list to remember.
+ *
+ * Each channel ends in one of two places, and the suite pins which: the
+ * generated package compiles, or the contract is refused by name with a
+ * diagnostic. Silent non-compiling Go is what this file exists to prevent.
  */
 
 const FIXTURE_DIR = path.join(import.meta.dir, "fixtures", "go-emitter");
@@ -73,19 +84,43 @@ function harvestIdentifiers(sources: readonly string[]): string[] {
 }
 
 /**
- * Narrows the harvest to names a contract can actually hand the emitter.
+ * The wire names worth aiming at an emitter identifier.
  *
- * A parameter name reaches Go through `localIdentifier`, so only its fixed
- * points are reachable — which is exactly why the `rpc_` prefix works: no wire
- * name survives the round trip with an underscore intact. Go keywords are
- * refused by validation before the emitter sees them, and `ctx` is the one
- * documented reservation.
+ * A contract name reaches Go through `localIdentifier` or `exportedIdentifier`,
+ * so the harvest alone would only ever hit the emitter's lower-camel names. Both
+ * projections of each harvested identifier are added, which is what turns the
+ * `disconnect` the emitter writes as an event string into the `Disconnect` a
+ * method name can actually produce.
  */
-function reachableAsParameterName(identifier: string): boolean {
-  return (
-    isGoIdentifier(identifier) && localIdentifier(identifier) === identifier && identifier !== "ctx"
-  );
+function candidateWireNames(sources: readonly string[]): string[] {
+  const candidates = new Set<string>();
+  for (const identifier of harvestIdentifiers(sources)) {
+    candidates.add(identifier);
+    candidates.add(exportedIdentifier(identifier));
+    candidates.add(localIdentifier(identifier));
+  }
+  // Names the review found shipping broken Go, kept explicit so a change in the
+  // emitter's wording can never quietly drop them from the corpus.
+  for (const regression of ["Disconnect", "_disconnect", "MarshalJSON", "marshalJSON", "RpcError"]) {
+    candidates.add(regression);
+  }
+  candidates.delete("");
+  return [...candidates].sort();
 }
+
+/**
+ * Narrows the corpus to names that survive the round trip a channel applies.
+ *
+ * Only fixed points are useful: a wire name whose projection differs from itself
+ * aims at a Go identifier the emitter never wrote. `exportedIdentifier` and
+ * `localIdentifier` split on every non-alphanumeric rune, which is exactly why
+ * the `rpc_` prefix works — no wire name survives with an underscore intact.
+ */
+const reachableAs = {
+  parameter: (name: string) => isGoIdentifier(name) && localIdentifier(name) === name,
+  exported: (name: string) =>
+    isExportedGoIdentifier(name) && exportedIdentifier(name) === name,
+} as const;
 
 /** Splits the harvest into methods small enough to stay readable when one fails. */
 function chunk<T>(values: readonly T[], size: number): T[][] {
@@ -96,37 +131,75 @@ function chunk<T>(values: readonly T[], size: number): T[][] {
   return chunks;
 }
 
-function hostileSchema(names: readonly string[]): RpcSchema {
-  const methods: RpcMethod[] = [];
-
-  chunk(names, 10).forEach((group, index) => {
-    const params = group.map((name) => ({ name, type: scalar("string") }));
-    // All four body shapes the emitter writes: an inbound handler with and
-    // without an acknowledgement, and a client method with and without a result.
-    methods.push(
-      {
-        name: `inboundValue${index}`,
-        direction: "client-to-server",
-        params,
-        returnType: { kind: "named", name: "Record" },
-      },
-      { name: `inboundVoid${index}`, direction: "client-to-server", params, returnType: VOID },
-      {
-        name: `outboundValue${index}`,
-        direction: "server-to-client",
-        params,
-        returnType: scalar("string"),
-      },
-      { name: `outboundVoid${index}`, direction: "server-to-client", params, returnType: VOID },
-    );
-  });
-
-  return { ...probe, methods };
+interface Verdict {
+  readonly accepted: string[];
+  readonly refused: Map<string, string>;
 }
+
+/** Runs one name through one channel and records whether the backend took it. */
+function verdictFor(names: readonly string[], build: (name: string) => RpcSchema): Verdict {
+  const accepted: string[] = [];
+  const refused = new Map<string, string>();
+  for (const name of names) {
+    try {
+      generateGo(build(name));
+      accepted.push(name);
+    } catch (error) {
+      refused.set(name, (error as Error).message);
+    }
+  }
+  return { accepted, refused };
+}
+
+/**
+ * `vetFlags` exists for one analyzer. `stdmethods` objects to a method named
+ * `MarshalJSON`/`Scan`/`Seek` carrying anything but the standard library's
+ * signature — a complaint about the name the *contract* chose, not about an
+ * identifier the emitter owns. Refusing those names would cost a contract
+ * ordinary RPC verbs, so they stay legal and the check is narrowed instead;
+ * every other analyzer still runs on every channel.
+ */
+function compile(label: string, sources: Record<string, string>, vetFlags: readonly string[] = []): void {
+  const directory = mkdtempSync(path.join(tmpdir(), "socketrpc-go-collisions-"));
+  temporaryDirectories.push(directory);
+  for (const [filename, source] of Object.entries(sources)) {
+    writeFileSync(path.join(directory, filename), source);
+  }
+  writeFileSync(
+    path.join(directory, "go.mod"),
+    `module socketrpc.collisions.test
+
+go 1.22
+
+require github.com/zishang520/socket.io/servers/socket/v3 v3.0.0
+
+replace github.com/zishang520/socket.io/servers/socket/v3 => ${JSON.stringify(path.join(FIXTURE_DIR, "socketstub"))}
+`,
+  );
+
+  const built = spawnSync("go", ["build", "./..."], {
+    cwd: directory,
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+  expect(built.status, `${label}: ${built.stdout}\n${built.stderr}`).toBe(0);
+
+  const vet = spawnSync("go", ["vet", ...vetFlags, "./..."], {
+    cwd: directory,
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+  expect(vet.status, `${label}: ${vet.stdout}\n${vet.stderr}`).toBe(0);
+
+  const formatted = spawnSync("gofmt", ["-l", directory], { encoding: "utf8" });
+  expect(formatted.stdout.trim(), `${label} is not gofmt-clean`).toBe("");
+}
+
+const corpus = candidateWireNames(Object.values(generateGo(probe)));
 
 describe("Go identifier collision safety", () => {
   test("no identifier derived from a contract can contain the generated prefix", () => {
-    const corpus = [
+    const names = [
       "rpc_call",
       "rpc call",
       "rpc-call",
@@ -140,7 +213,7 @@ describe("Go identifier collision safety", () => {
       "mixed_Case-name.here",
     ];
 
-    for (const name of corpus) {
+    for (const name of names) {
       expect(localIdentifier(name)).not.toContain("_");
       expect(exportedIdentifier(name)).not.toContain("_");
     }
@@ -149,67 +222,232 @@ describe("Go identifier collision safety", () => {
   });
 
   test("every emitter-owned identifier survives being used as a parameter name", () => {
-    const generated = generateGo(probe);
-    const harvested = harvestIdentifiers(Object.values(generated));
-    const hostile = harvested.filter(reachableAsParameterName);
+    const hostile = corpus.filter(reachableAs.parameter);
 
     // A harvest that collapsed to nothing would make this suite vacuous.
     expect(hostile.length).toBeGreaterThan(20);
-    // The names the review found shipping broken Go must be in the corpus.
     for (const regression of ["b", "c", "result", "err", "response", "fmt", "sync", "context"]) {
       expect(hostile, `${regression} is no longer covered by the harvest`).toContain(regression);
     }
 
-    const directory = mkdtempSync(path.join(tmpdir(), "socketrpc-go-collisions-"));
-    temporaryDirectories.push(directory);
+    const { accepted, refused } = verdictFor(hostile, (name) => ({
+      ...probe,
+      methods: [
+        {
+          name: "probe",
+          direction: "client-to-server",
+          params: [{ name, type: scalar("string") }],
+          returnType: VOID,
+        },
+      ],
+    }));
+    // `ctx` names the context parameter of the signature developers implement.
+    expect([...refused.keys()]).toEqual(["ctx"]);
+    expect(refused.get("ctx")).toContain("names the context parameter");
 
-    const sources = generateGo(hostileSchema(hostile));
-    for (const [filename, source] of Object.entries(sources)) {
-      writeFileSync(path.join(directory, filename), source);
-    }
-    writeFileSync(
-      path.join(directory, "go.mod"),
-      `module socketrpc.collisions.test
-
-go 1.22
-
-require github.com/zishang520/socket.io/servers/socket/v3 v3.0.0
-
-replace github.com/zishang520/socket.io/servers/socket/v3 => ${JSON.stringify(path.join(FIXTURE_DIR, "socketstub"))}
-`,
-    );
-
-    const build = spawnSync("go", ["build", "./..."], {
-      cwd: directory,
-      encoding: "utf8",
-      timeout: 60_000,
+    const methods: RpcMethod[] = [];
+    chunk(accepted, 10).forEach((group, index) => {
+      const params = group.map((name) => ({ name, type: scalar("string") }));
+      // All four body shapes the emitter writes: an inbound handler with and
+      // without an acknowledgement, and a client method with and without a result.
+      methods.push(
+        {
+          name: `inboundValue${index}`,
+          direction: "client-to-server",
+          params,
+          returnType: { kind: "named", name: "Record" },
+        },
+        { name: `inboundVoid${index}`, direction: "client-to-server", params, returnType: VOID },
+        {
+          name: `outboundValue${index}`,
+          direction: "server-to-client",
+          params,
+          returnType: scalar("string"),
+        },
+        { name: `outboundVoid${index}`, direction: "server-to-client", params, returnType: VOID },
+      );
     });
-    expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
 
-    const vet = spawnSync("go", ["vet", "./..."], {
-      cwd: directory,
-      encoding: "utf8",
-      timeout: 60_000,
-    });
-    expect(vet.status, `${vet.stdout}\n${vet.stderr}`).toBe(0);
-
-    const formatted = spawnSync("gofmt", ["-l", directory], { encoding: "utf8" });
-    expect(formatted.stdout.trim(), "hostile contract is not gofmt-clean").toBe("");
+    compile("parameter names", generateGo({ ...probe, methods }));
   }, 90_000);
 
-  test("the context parameter stays the single documented reservation", () => {
-    expect(() =>
-      generateGo({
-        ...probe,
-        methods: [
-          {
-            name: "clash",
-            direction: "client-to-server",
-            params: [{ name: "ctx", type: scalar("string") }],
-            returnType: VOID,
-          },
-        ],
-      }),
-    ).toThrow("names the context parameter");
+  test("every emitter-owned identifier survives being used as a method name", () => {
+    const hostile = corpus.filter(reachableAs.exported);
+    expect(hostile.length).toBeGreaterThan(20);
+    // The inbound listener field and dispatch method are derived from the method
+    // name, which is how `Disconnect` used to redeclare the emitter's own.
+    for (const regression of ["Disconnect", "Handler", "Dispose", "Context", "MarshalJSON"]) {
+      expect(hostile, `${regression} is no longer covered by the harvest`).toContain(regression);
+    }
+
+    const inbound = verdictFor(hostile, (name) => ({
+      ...probe,
+      methods: [{ name, direction: "client-to-server", params: [], returnType: VOID }],
+    }));
+    // A server-side method reaches Go as an unexported `listen…`/`handle…`
+    // member, which the emitter's own members stay clear of by construction, so
+    // nothing in the harvest is out of bounds here.
+    expect([...inbound.refused.keys()]).toEqual([]);
+    expect(inbound.accepted).toContain("Disconnect");
+
+    // Socket.IO's own events remain refused, and that check is on the raw wire
+    // name — `Disconnect` above is a different name that merely projects onto
+    // the same Go identifier the emitter's disconnect listener once used.
+    const reserved = verdictFor(["disconnect", "connect", "newListener", "removeListener"], (name) => ({
+      ...probe,
+      methods: [{ name, direction: "client-to-server", params: [], returnType: VOID }],
+    }));
+    expect(reserved.accepted).toEqual([]);
+    for (const [name, message] of reserved.refused) {
+      expect(message, `${name} was refused for an undocumented reason`).toContain(
+        "is reserved by Socket.IO/SocketRPC",
+      );
+    }
+
+    const outbound = verdictFor(hostile, (name) => ({
+      ...probe,
+      methods: [{ name, direction: "server-to-client", params: [], returnType: VOID }],
+    }));
+    // A client-side method *is* the exported Go API, so it also has to clear the
+    // four methods `Client` declares itself.
+    for (const [name, message] of outbound.refused) {
+      expect(message, `${name} was refused for an undocumented reason`).toMatch(
+        /is reserved by Socket.IO\/SocketRPC|collides with the generated Client API/,
+      );
+    }
+    for (const reserved of ["Dispose", "Connected", "Done", "Socket"]) {
+      expect(
+        outbound.refused.get(reserved),
+        `${reserved} no longer collides with the generated Client API`,
+      ).toContain("collides with the generated Client API");
+    }
+
+    const noStdMethods = ["-stdmethods=false"];
+    compile("inbound method names", generateGo({
+      ...probe,
+      methods: inbound.accepted.map((name) => ({
+        name,
+        direction: "client-to-server",
+        params: [{ name: "value", type: scalar("string") }],
+        returnType: { kind: "named", name: "Record" },
+      })),
+    }), noStdMethods);
+
+    compile("outbound method names", generateGo({
+      ...probe,
+      methods: outbound.accepted.map((name) => ({
+        name,
+        direction: "server-to-client",
+        params: [{ name: "value", type: scalar("string") }],
+        returnType: scalar("string"),
+      })),
+    }), noStdMethods);
+  }, 120_000);
+
+  test("every emitter-owned identifier survives being used as an object field name", () => {
+    const hostile = corpus.filter(reachableAs.exported);
+    expect(hostile).toContain("MarshalJSON");
+
+    // A struct's method namespace is the one the emitter cannot move behind the
+    // `rpc_` prefix, because `encoding/json` dictates the spelling. No field is
+    // refused for it: the struct gives the name up and normalizes per field.
+    const { accepted, refused } = verdictFor(hostile, (name) => ({
+      ...probe,
+      declarations: [
+        ...probe.declarations,
+        { kind: "object", name: "Probe", fields: [{ name, type: scalar("string") }] },
+      ],
+    }));
+    expect([...refused.keys()]).toEqual([]);
+
+    const fields: ObjectField[] = accepted.map((name) => ({ name, type: scalar("string") }));
+    compile("object field names", generateGo({
+      ...probe,
+      declarations: [
+        ...probe.declarations,
+        // The nilable fields are what makes the marshaller necessary, and a
+        // conditional collision is what made the old failure so easy to miss.
+        {
+          kind: "object",
+          name: "Probe",
+          fields: [
+            ...fields,
+            { name: "tagsRequired", type: { kind: "array", element: scalar("string") } },
+            { name: "countsRequired", type: { kind: "map", value: scalar("number") } },
+            { name: "aliasedRequired", type: { kind: "named", name: "Names" } },
+          ],
+        },
+      ],
+      methods: [
+        {
+          name: "probeFields",
+          direction: "client-to-server",
+          params: [],
+          returnType: { kind: "named", name: "Probe" },
+        },
+      ],
+    }));
+  }, 90_000);
+
+  test("every emitter-owned identifier survives being used as a declaration name", () => {
+    const hostile = corpus.filter(reachableAs.exported);
+
+    const { accepted, refused } = verdictFor(hostile, (name) => ({
+      ...probe,
+      declarations: [{ kind: "object", name, fields: [{ name: "value", type: scalar("string") }] }],
+      methods: [],
+    }));
+    for (const [name, message] of refused) {
+      expect(message, `${name} was refused for an undocumented reason`).toContain(
+        "collides with the generated package API",
+      );
+    }
+    for (const reserved of ["ServerHandler", "ServerBinding", "Client", "ClientOptions"]) {
+      expect(refused.get(reserved), `${reserved} no longer collides`).toBeDefined();
+    }
+
+    compile("declaration names", generateGo({
+      ...probe,
+      declarations: accepted.map((name) => ({
+        kind: "object",
+        name,
+        fields: [{ name: "value", type: scalar("string") }],
+      })),
+      methods: [],
+    }));
+  }, 90_000);
+
+  test("ServerBinding's own members stay inside the reserved namespace", () => {
+    const server = generateGo(probe)["server.generated.go"]!;
+    const struct = server.match(/type ServerBinding struct \{\n([\s\S]*?)\n\}/)?.[1];
+    expect(struct, "ServerBinding is no longer a struct literal in the output").toBeDefined();
+
+    const members = [
+      ...[...struct!.matchAll(/^\t([A-Za-z_][A-Za-z0-9_]*)\s/gm)].map(([, name]) => name!),
+      ...[...server.matchAll(/^func \(b \*ServerBinding\) ([A-Za-z_][A-Za-z0-9_]*)\(/gm)].map(
+        ([, name]) => name!,
+      ),
+    ];
+    // The contract's own members are derived from a method name, so they can
+    // never contain an underscore. Everything else the emitter puts on this type
+    // therefore has to carry the prefix — or be part of the exported API, which
+    // a `listen…`/`handle…` member can never be.
+    const contractDerived = probe.methods
+      .filter((method) => method.direction === "client-to-server")
+      .flatMap((method) => [
+        `listen${exportedIdentifier(method.name)}`,
+        `handle${exportedIdentifier(method.name)}`,
+      ]);
+    expect(members.length).toBeGreaterThan(contractDerived.length);
+    for (const member of members) {
+      if (contractDerived.includes(member)) continue;
+      expect(
+        member.startsWith(GENERATED_PREFIX) || isExportedGoIdentifier(member),
+        `ServerBinding.${member} is neither exported API nor in the ${GENERATED_PREFIX} namespace`,
+      ).toBe(true);
+    }
+    for (const derived of contractDerived) {
+      expect(members, `${derived} is no longer emitted`).toContain(derived);
+    }
   });
 });

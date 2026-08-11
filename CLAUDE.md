@@ -92,16 +92,30 @@ Behaviour parity worth knowing:
   (recursively, since each struct carries its own `MarshalJSON`). Optional and nullable values
   are pointers and keep their `null`. Normalization works on a copy, so handler values are
   never mutated.
+- A struct with a field named `marshalJSON` keeps the field: `encoding/json` fixes the method's
+  spelling, so the struct gives the method up and its required slice/map fields are spelled with
+  generated `rpc_<type>_<Field>` types that normalize themselves. Those types convert freely to
+  and from the plain Go type, so a handler still writes `Payload{Labels: []string{"a"}}`.
 - A payload the JSON encoder refuses — typically a required enum at its zero value — answers
   with `INTERNAL_ERROR` instead of letting Socket.IO drop the reply and the caller time out.
 - `ServerBinding.OnRpcError` observes `__rpc:error__` reports from the client, matching
   `rpc.handle.rpcError` on the TypeScript server.
-- Generated Go identifiers are `rpc_`-prefixed inside every body that also holds contract
-  identifiers. `exportedIdentifier`/`localIdentifier` split on non-alphanumeric runes and so
-  can never produce an underscore, which keeps the two namespaces disjoint by construction
-  rather than by a reserved-word list. `ctx` is the single reserved parameter name;
-  `tests/go-collisions.test.ts` derives its adversarial contract from the emitter's own output
-  so the guarantee cannot silently drift.
+- Generated Go identifiers are `rpc_`-prefixed in every scope that also holds contract
+  identifiers — including `ServerBinding`'s own fields and methods, whose namespace it shares
+  with the contract-derived `listen<Method>` / `handle<Method>` members.
+  `exportedIdentifier`/`localIdentifier` split on non-alphanumeric runes and so can never
+  produce an underscore, which keeps the two namespaces disjoint by construction rather than by
+  a reserved-word list. An inbound method may therefore be called `Disconnect` or `_disconnect`.
+- Contract names are refused only where a name genuinely has no sound Go projection: `ctx` as a
+  parameter, Socket.IO's own event names, `Dispose`/`Connected`/`Done`/`Socket` as *outbound*
+  methods (they are the exported `Client` API), and a declaration whose Go name is one the
+  package already exports. Object field names are never refused.
+- `tests/go-collisions.test.ts` derives its adversarial contract from the emitter's own output
+  and feeds it back through every channel a contract owns — parameters, inbound and outbound
+  method names, object field names, declaration names — asserting each either compiles
+  (`go build`, `go vet`, `gofmt`) or is refused by name. `go vet`'s `stdmethods` is narrowed for
+  the method-name channel alone: it objects to a *contract* method called `MarshalJSON`/`Scan`/
+  `Seek`, which is a property of the name the contract chose, not of the emitter's own output.
 
 ### Interface Requirements
 - Must define `ClientFunctions` and `ServerFunctions` interfaces

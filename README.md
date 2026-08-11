@@ -526,12 +526,29 @@ server-to-client call throws has no acknowledgement to answer through, so it
 emits the error instead. This mirrors `rpc.handle.rpcError(...)` on the
 TypeScript server.
 
-Every identifier the generator writes into a Go body carries an `rpc_` prefix,
-and identifiers derived from your contract can never contain an underscore — the
-two namespaces are disjoint by construction. A parameter may therefore be called
-`result`, `err`, `fmt`, `string` or `len` without consequence. The one reserved
-name is `ctx`, which is the context parameter of the generated `ServerHandler`
-and `Client` signatures.
+Every identifier the generator declares in a scope your contract also reaches
+carries an `rpc_` prefix, and identifiers derived from your contract can never
+contain an underscore — the two namespaces are disjoint by construction. A
+parameter may therefore be called `result`, `err`, `fmt`, `string` or `len`, and
+a method the client calls may be named `Disconnect` or `_disconnect`, without
+consequence.
+
+Four kinds of name are refused, each with the reason and the fix in the message:
+
+- `ctx` as a parameter — it is the context parameter of the generated
+  `ServerHandler` and `Client` signatures.
+- Socket.IO's own event names (`connect`, `disconnect`, `disconnecting`,
+  `connect_error`, `newListener`, `removeListener`) as method names.
+- `Dispose`, `Connected`, `Done` and `Socket` as *server-to-client* method names:
+  those calls become methods on the exported `Client`, which declares its own.
+- A declaration whose Go name is one the generated package already exports, such
+  as `ServerHandler` or `ClientOptions`.
+
+Object field names are never refused. A field named `marshalJSON` keeps its wire
+name: `encoding/json` fixes the spelling of the marshalling method, so the struct
+gives the method up and each of its required slice and map fields is spelled with
+a generated type that normalizes itself. Those types convert freely to and from
+the plain Go type, so handler code is unchanged.
 
 ## How It Works
 

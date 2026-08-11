@@ -83,8 +83,16 @@ export function localIdentifier(value: string): string {
  * `localIdentifier` are incapable of producing one. Spelling the emitter's own
  * identifiers with a leading underscore-bearing prefix therefore keeps the two
  * namespaces disjoint *by construction*, rather than by a reserved-word list
- * that has to be kept in step with the emitter by hand. `names.test.ts` pins
- * the property the guarantee rests on.
+ * that has to be kept in step with the emitter by hand.
+ *
+ * "Scope" includes a *type's member namespace*: `ServerBinding` carries one
+ * member per contract method, so every member the emitter adds to that type is
+ * prefixed too. The one namespace this cannot reach is the method set
+ * `encoding/json` dictates — see `STRUCT_METHODS` in the emitter for how a
+ * field named after the marshaller is served instead of refused.
+ *
+ * `tests/go-collisions.test.ts` pins both halves: the property this rests on,
+ * and the emitter's own output fed back through every channel a contract owns.
  */
 export const GENERATED_PREFIX = "rpc_";
 

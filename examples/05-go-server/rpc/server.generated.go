@@ -94,6 +94,16 @@ func (q *rpc_eventQueue) drain() {
 	}
 }
 
+// queuedListener gives one event its own queue. Building it here rather than
+// in BindServer keeps the registration site free of per-method locals, so the
+// only contract-derived identifiers in that scope are struct field selectors.
+func rpc_queuedListener(run func([]any)) func(...any) {
+	queue := rpc_newEventQueue(run)
+	return func(rawArgs ...any) {
+		queue.push(append([]any(nil), rawArgs...))
+	}
+}
+
 type ServerHandler interface {
 	CreateRoom(ctx context.Context, topic string, visibility Visibility) (ChatRoom, error)
 	ListRooms(ctx context.Context) ([]ChatRoom, error)
@@ -102,23 +112,23 @@ type ServerHandler interface {
 }
 
 type ServerBinding struct {
-	socket    *socket.Socket
-	emitState *rpc_socketEmitState
-	handler   ServerHandler
-	ctx       context.Context
-	cancel    context.CancelFunc
+	rpc_socket    *socket.Socket
+	rpc_emitState *rpc_socketEmitState
+	rpc_handler   ServerHandler
+	rpc_ctx       context.Context
+	rpc_cancel    context.CancelFunc
 
-	mu              sync.RWMutex
-	disposed        bool
-	rpcErrorHandler func(*RpcError)
-	disposeOnce     sync.Once
+	rpc_mu            sync.RWMutex
+	rpc_disposed      bool
+	rpc_errorObserver func(*RpcError)
+	rpc_disposeOnce   sync.Once
 
-	listenCreateRoom  func(...any)
-	listenListRooms   func(...any)
-	listenPostMessage func(...any)
-	listenTyping      func(...any)
-	listenRpcError    func(...any)
-	listenDisconnect  func(...any)
+	listenCreateRoom     func(...any)
+	listenListRooms      func(...any)
+	listenPostMessage    func(...any)
+	listenTyping         func(...any)
+	rpc_listenRpcError   func(...any)
+	rpc_listenDisconnect func(...any)
 }
 
 func BindServer(rawSocket *socket.Socket, handler ServerHandler) (*ServerBinding, error) {
@@ -130,41 +140,29 @@ func BindServer(rawSocket *socket.Socket, handler ServerHandler) (*ServerBinding
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	binding := &ServerBinding{
-		socket:    rawSocket,
-		emitState: rpc_acquireSocketEmitState(rawSocket),
-		handler:   handler,
-		ctx:       ctx,
-		cancel:    cancel,
+		rpc_socket:    rawSocket,
+		rpc_emitState: rpc_acquireSocketEmitState(rawSocket),
+		rpc_handler:   handler,
+		rpc_ctx:       ctx,
+		rpc_cancel:    cancel,
 	}
 
-	queueCreateRoom := rpc_newEventQueue(binding.handleCreateRoom)
-	binding.listenCreateRoom = func(rawArgs ...any) {
-		queueCreateRoom.push(append([]any(nil), rawArgs...))
-	}
+	binding.listenCreateRoom = rpc_queuedListener(binding.handleCreateRoom)
 	if err := rawSocket.On("createRoom", binding.listenCreateRoom); err != nil {
 		binding.Dispose()
 		return nil, fmt.Errorf("register createRoom: %w", err)
 	}
-	queueListRooms := rpc_newEventQueue(binding.handleListRooms)
-	binding.listenListRooms = func(rawArgs ...any) {
-		queueListRooms.push(append([]any(nil), rawArgs...))
-	}
+	binding.listenListRooms = rpc_queuedListener(binding.handleListRooms)
 	if err := rawSocket.On("listRooms", binding.listenListRooms); err != nil {
 		binding.Dispose()
 		return nil, fmt.Errorf("register listRooms: %w", err)
 	}
-	queuePostMessage := rpc_newEventQueue(binding.handlePostMessage)
-	binding.listenPostMessage = func(rawArgs ...any) {
-		queuePostMessage.push(append([]any(nil), rawArgs...))
-	}
+	binding.listenPostMessage = rpc_queuedListener(binding.handlePostMessage)
 	if err := rawSocket.On("postMessage", binding.listenPostMessage); err != nil {
 		binding.Dispose()
 		return nil, fmt.Errorf("register postMessage: %w", err)
 	}
-	queueTyping := rpc_newEventQueue(binding.handleTyping)
-	binding.listenTyping = func(rawArgs ...any) {
-		queueTyping.push(append([]any(nil), rawArgs...))
-	}
+	binding.listenTyping = rpc_queuedListener(binding.handleTyping)
 	if err := rawSocket.On("typing", binding.listenTyping); err != nil {
 		binding.Dispose()
 		return nil, fmt.Errorf("register typing: %w", err)
@@ -172,18 +170,15 @@ func BindServer(rawSocket *socket.Socket, handler ServerHandler) (*ServerBinding
 
 	// The peer reports a failed fire-and-forget handler out of band, because
 	// such a call has no acknowledgement to answer through.
-	queueRpcError := rpc_newEventQueue(binding.handleRpcError)
-	binding.listenRpcError = func(rawArgs ...any) {
-		queueRpcError.push(append([]any(nil), rawArgs...))
-	}
-	if err := rawSocket.On(RPCErrorEvent, binding.listenRpcError); err != nil {
+	binding.rpc_listenRpcError = rpc_queuedListener(binding.rpc_handleRpcError)
+	if err := rawSocket.On(RPCErrorEvent, binding.rpc_listenRpcError); err != nil {
 		binding.Dispose()
 		return nil, fmt.Errorf("register %s: %w", RPCErrorEvent, err)
 	}
-	binding.listenDisconnect = func(...any) {
+	binding.rpc_listenDisconnect = func(...any) {
 		binding.Dispose()
 	}
-	if err := rawSocket.On("disconnect", binding.listenDisconnect); err != nil {
+	if err := rawSocket.On("disconnect", binding.rpc_listenDisconnect); err != nil {
 		binding.Dispose()
 		return nil, fmt.Errorf("register disconnect: %w", err)
 	}
@@ -191,13 +186,13 @@ func BindServer(rawSocket *socket.Socket, handler ServerHandler) (*ServerBinding
 }
 
 func (b *ServerBinding) Context() context.Context {
-	return b.ctx
+	return b.rpc_ctx
 }
 
 func (b *ServerBinding) Disposed() bool {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.disposed
+	b.rpc_mu.RLock()
+	defer b.rpc_mu.RUnlock()
+	return b.rpc_disposed
 }
 
 // OnRpcError observes the failures the peer reports out of band: a client
@@ -208,16 +203,16 @@ func (b *ServerBinding) OnRpcError(handler func(*RpcError)) {
 	if b == nil {
 		return
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.rpcErrorHandler = handler
+	b.rpc_mu.Lock()
+	defer b.rpc_mu.Unlock()
+	b.rpc_errorObserver = handler
 }
 
-func (b *ServerBinding) handleRpcError(rawArgs []any) {
-	b.mu.RLock()
-	observer := b.rpcErrorHandler
-	disposed := b.disposed
-	b.mu.RUnlock()
+func (b *ServerBinding) rpc_handleRpcError(rawArgs []any) {
+	b.rpc_mu.RLock()
+	observer := b.rpc_errorObserver
+	disposed := b.rpc_disposed
+	b.rpc_mu.RUnlock()
 	if observer == nil || disposed || len(rawArgs) == 0 {
 		return
 	}
@@ -236,51 +231,51 @@ func (b *ServerBinding) Dispose() {
 	if b == nil {
 		return
 	}
-	b.disposeOnce.Do(func() {
-		if b.emitState != nil {
-			b.emitState.mu.Lock()
-			defer b.emitState.mu.Unlock()
+	b.rpc_disposeOnce.Do(func() {
+		if b.rpc_emitState != nil {
+			b.rpc_emitState.mu.Lock()
+			defer b.rpc_emitState.mu.Unlock()
 		}
-		b.mu.Lock()
-		b.disposed = true
-		b.mu.Unlock()
-		b.cancel()
-		if b.socket != nil && b.listenCreateRoom != nil {
-			b.socket.RemoveListener("createRoom", b.listenCreateRoom)
+		b.rpc_mu.Lock()
+		b.rpc_disposed = true
+		b.rpc_mu.Unlock()
+		b.rpc_cancel()
+		if b.rpc_socket != nil && b.listenCreateRoom != nil {
+			b.rpc_socket.RemoveListener("createRoom", b.listenCreateRoom)
 		}
-		if b.socket != nil && b.listenListRooms != nil {
-			b.socket.RemoveListener("listRooms", b.listenListRooms)
+		if b.rpc_socket != nil && b.listenListRooms != nil {
+			b.rpc_socket.RemoveListener("listRooms", b.listenListRooms)
 		}
-		if b.socket != nil && b.listenPostMessage != nil {
-			b.socket.RemoveListener("postMessage", b.listenPostMessage)
+		if b.rpc_socket != nil && b.listenPostMessage != nil {
+			b.rpc_socket.RemoveListener("postMessage", b.listenPostMessage)
 		}
-		if b.socket != nil && b.listenTyping != nil {
-			b.socket.RemoveListener("typing", b.listenTyping)
+		if b.rpc_socket != nil && b.listenTyping != nil {
+			b.rpc_socket.RemoveListener("typing", b.listenTyping)
 		}
-		if b.socket != nil && b.listenRpcError != nil {
-			b.socket.RemoveListener(RPCErrorEvent, b.listenRpcError)
+		if b.rpc_socket != nil && b.rpc_listenRpcError != nil {
+			b.rpc_socket.RemoveListener(RPCErrorEvent, b.rpc_listenRpcError)
 		}
-		if b.socket != nil && b.listenDisconnect != nil {
-			b.socket.RemoveListener("disconnect", b.listenDisconnect)
+		if b.rpc_socket != nil && b.rpc_listenDisconnect != nil {
+			b.rpc_socket.RemoveListener("disconnect", b.rpc_listenDisconnect)
 		}
-		rpc_releaseSocketEmitState(b.socket, b.emitState)
+		rpc_releaseSocketEmitState(b.rpc_socket, b.rpc_emitState)
 	})
 }
 
-func (b *ServerBinding) emitError(err *RpcError) {
-	if err == nil || b.socket == nil || b.emitState == nil || b.Disposed() {
+func (b *ServerBinding) rpc_emitError(err *RpcError) {
+	if err == nil || b.rpc_socket == nil || b.rpc_emitState == nil || b.Disposed() {
 		return
 	}
 	// Data is caller-supplied and may not encode; the report must survive it.
 	if rpc_ensureEncodable(err, err.Origin) != nil {
 		err = NewRpcError(err.Code, err.Message, err.Origin, nil)
 	}
-	b.emitState.mu.Lock()
-	defer b.emitState.mu.Unlock()
-	if !b.socket.Connected() || b.Disposed() {
+	b.rpc_emitState.mu.Lock()
+	defer b.rpc_emitState.mu.Unlock()
+	if !b.rpc_socket.Connected() || b.Disposed() {
 		return
 	}
-	_ = b.socket.Emit(RPCErrorEvent, err)
+	_ = b.rpc_socket.Emit(RPCErrorEvent, err)
 }
 
 type rpc_inboundCall struct {
@@ -299,12 +294,12 @@ func rpc_beginInbound(b *ServerBinding, origin string, want int, wantAck bool, r
 	args := rawArgs
 	if wantAck {
 		if len(args) == 0 {
-			b.emitError(NewRpcError(CodeInvalidArgument, "missing acknowledgement callback", origin, nil))
+			b.rpc_emitError(NewRpcError(CodeInvalidArgument, "missing acknowledgement callback", origin, nil))
 			return nil
 		}
 		callback, isAck := args[len(args)-1].(socket.Ack)
 		if !isAck {
-			b.emitError(NewRpcError(CodeInvalidArgument, "missing acknowledgement callback", origin, nil))
+			b.rpc_emitError(NewRpcError(CodeInvalidArgument, "missing acknowledgement callback", origin, nil))
 			return nil
 		}
 		pending.ack = callback
@@ -323,7 +318,7 @@ func rpc_beginInbound(b *ServerBinding, origin string, want int, wantAck bool, r
 func (c *rpc_inboundCall) reply(value any) {
 	if c.ack == nil {
 		if failure, ok := value.(*RpcError); ok {
-			c.binding.emitError(failure)
+			c.binding.rpc_emitError(failure)
 		}
 		return
 	}
@@ -395,7 +390,7 @@ func (b *ServerBinding) handleCreateRoom(rawArgs []any) {
 	if !call.decode(1, &arg1, "visibility") {
 		return
 	}
-	call.finish(b.handler.CreateRoom(b.ctx, arg0, arg1))
+	call.finish(b.rpc_handler.CreateRoom(b.rpc_ctx, arg0, arg1))
 }
 
 func (b *ServerBinding) handleListRooms(rawArgs []any) {
@@ -407,7 +402,7 @@ func (b *ServerBinding) handleListRooms(rawArgs []any) {
 	if !call.ready() {
 		return
 	}
-	result, err := b.handler.ListRooms(b.ctx)
+	result, err := b.rpc_handler.ListRooms(b.rpc_ctx)
 	if err == nil && result == nil {
 		result = []ChatRoom{}
 	}
@@ -431,7 +426,7 @@ func (b *ServerBinding) handlePostMessage(rawArgs []any) {
 	if !call.decode(1, &arg1, "body") {
 		return
 	}
-	call.finish(b.handler.PostMessage(b.ctx, arg0, arg1))
+	call.finish(b.rpc_handler.PostMessage(b.rpc_ctx, arg0, arg1))
 }
 
 func (b *ServerBinding) handleTyping(rawArgs []any) {
@@ -447,7 +442,7 @@ func (b *ServerBinding) handleTyping(rawArgs []any) {
 	if !call.decode(0, &arg0, "roomId") {
 		return
 	}
-	call.finishVoid(b.handler.Typing(b.ctx, arg0))
+	call.finishVoid(b.rpc_handler.Typing(b.rpc_ctx, arg0))
 }
 
 type ClientOptions struct {

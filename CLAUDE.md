@@ -23,15 +23,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Package boundary
 
 `files` in package.json is the only thing that decides what publishes: `index.ts`, `src/`,
-README, CHANGELOG. The package ships TypeScript source, so every file under `src/` is
-runtime code and a new module belongs in nothing but that tree.
+`tsconfig.json`, README, CHANGELOG. The package ships TypeScript source, so every file
+under `src/` is runtime code and a new module belongs in nothing but that tree.
+
+`tsconfig.json` is product, not tooling: `src/extract.ts` loads it as the compiler options
+it parses a contract with, the same way `src/cli.ts` reads `package.json` for `--version`.
+Both are reached as `path.resolve(import.meta.dir, "..", …)`, and `tests/pack.test.ts`
+reads that pattern back out of the source, so a third such file is covered the day it is
+first reached for rather than the day someone remembers to list it.
 
 There is no `.npmignore`. A denylist has to name every local artifact in advance, and npm
 reads neither a global gitignore nor an ignore file it has been superseded by — which is
 how agent state under `.omc/` came to sit in the tarball alongside tests, fixtures and
 examples. `tests/pack.test.ts` runs `npm pack --dry-run --json` and checks the result both
-ways: every entrypoint and source file present, and nothing outside the allowlist, proven
-against a sentinel it writes into `.test-tmp/` first.
+ways: every runtime file present, and nothing outside the allowlist, proven against a
+sentinel it writes into `.test-tmp/` first.
+
+A boundary test alone cannot say whether the tarball *works*, because every other gate
+runs the generator from the working tree, where a file is present whether or not it ships.
+`tests/pack-install.test.ts` closes that gap: it packs, installs the tarball into a
+directory outside the repository, and runs the binary the installation put on disk against
+a small contract. That run is the only evidence that what publishes is the product.
 
 ## Architecture
 

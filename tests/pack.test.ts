@@ -23,6 +23,7 @@ const ALLOWED = (packedPath: string) =>
   ALWAYS_PACKED.test(packedPath) ||
   packedPath === "index.ts" ||
   packedPath === "CHANGELOG.md" ||
+  packedPath === "tsconfig.json" ||
   packedPath.startsWith("src/");
 
 // Local state that lives on a developer's machine and in no commit. Writing it
@@ -76,6 +77,30 @@ function sourceFiles(directory = path.join(PROJECT_ROOT, "src")): string[] {
   });
 }
 
+/**
+ * `path.resolve(import.meta.dir, "..", "x")` is how a module reaches a file that
+ * ships beside src/ rather than inside it. Reading those names back out of the
+ * source is what makes this gate cover a file the day it is first reached for.
+ *
+ * A list written by hand here would have the blind spot that shipped 7.0.0
+ * unusable: `tsconfig.json` travelled in every earlier tarball only because the
+ * package had no `files` allowlist at all, so when the allowlist arrived and
+ * named the trees a reader thinks of as the product, the parser config the
+ * extractor loads at runtime stopped shipping and nothing said so.
+ */
+function rootRelativeRuntimeFiles(): string[] {
+  const readers = [path.join(PROJECT_ROOT, "index.ts"), ...sourceFiles().map((f) => path.join(PROJECT_ROOT, f))];
+  const pattern = /import\.meta\.dir\s*,\s*"\.\."\s*,\s*"([^"]+)"/g;
+
+  const names = new Set<string>();
+  for (const reader of readers) {
+    for (const [, name] of readFileSync(reader, "utf-8").matchAll(pattern)) {
+      names.add(name as string);
+    }
+  }
+  return [...names].sort();
+}
+
 describe("published package boundary", () => {
   test(
     "carries every file the CLI and library need at runtime",
@@ -99,8 +124,18 @@ describe("published package boundary", () => {
         expect(packed, `source ${source} is missing from the tarball`).toContain(source);
       }
 
-      // src/cli.ts reads ../package.json for --version.
-      expect(packed).toContain("package.json");
+      // Files the running code opens beside src/ rather than inside it: cli.ts
+      // reads ../package.json for --version, extract.ts loads ../tsconfig.json as
+      // the compiler options it parses a contract with. Missing one of these
+      // installs cleanly and then fails on the consumer's first run.
+      const ancillary = rootRelativeRuntimeFiles();
+      expect(ancillary, "no root-relative runtime file was detected — has the pattern changed?").toContain(
+        "tsconfig.json",
+      );
+      for (const runtimeFile of ancillary) {
+        expect(packed, `${runtimeFile} is read at runtime but missing from the tarball`).toContain(runtimeFile);
+      }
+
       expect(packed).toContain("README.md");
       expect(packed).toContain("CHANGELOG.md");
     },
@@ -126,8 +161,9 @@ describe("published package boundary", () => {
         (packedPath: string) => packedPath.startsWith("examples/"),
         (packedPath: string) => packedPath.startsWith(".github/"),
         (packedPath: string) => packedPath.includes("node_modules/"),
-        // Repo-local tooling config, meaningless to a consumer.
-        (packedPath: string) => packedPath === "tsconfig.json",
+        // Repo-local tooling config, meaningless to a consumer. tsconfig.json is
+        // absent here on purpose: the extractor reads it at runtime, so it is
+        // product, not tooling, and the test above requires it.
         (packedPath: string) => packedPath === "bun.lock",
         (packedPath: string) => packedPath.endsWith(".tgz"),
       ];

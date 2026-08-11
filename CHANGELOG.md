@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.0.1](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v7.0.0...v7.0.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* publish the tsconfig the extractor reads at runtime ([a70d9b7](https://github.com/nguyenvanduocit/socketrpc-gen/commit/a70d9b71fe7f8f3d07d0427193f57c09394f1382))
+
 ## [7.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v6.0.0...v7.0.0) (2026-08-11)
 
 

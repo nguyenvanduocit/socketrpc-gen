@@ -74,7 +74,8 @@ describe("SocketRPC schema extraction", () => {
       });
 
       const extracted = await extractInterfacesFromFile(inputPath);
-      const { schema } = extracted;
+      expect(extracted.diagnostics).toEqual([]);
+      const schema = extracted.schema!;
 
       expect(schema.version).toBe(1);
       expect(
@@ -240,6 +241,78 @@ describe("SocketRPC schema extraction", () => {
       expect(error.diagnostics.every(({ location }) => location.line > 0)).toBe(
         true,
       );
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "keeps TypeScript extraction working for contracts the portable IR rejects",
+    async () => {
+      const inputPath = createFixture({
+        "define.ts": `
+        export interface ServerFunctions {
+          search: (query: string | number) => string;
+          touch: (at: Date) => void;
+          raw: (payload: any) => void;
+          lookup: (index: Map<string, string>) => void;
+        }
+
+        export interface ClientFunctions {
+          ping: () => void;
+        }
+      `,
+      });
+
+      const extracted = await extractInterfacesFromFile(inputPath);
+
+      // No portable schema is published, so unsupported sentinels cannot escape.
+      expect(extracted.schema).toBeUndefined();
+      expect(extracted.diagnostics.map(({ code }) => code)).toEqual([
+        "UNSUPPORTED_UNION_TYPE",
+        "UNSUPPORTED_ANY_TYPE",
+        "UNSUPPORTED_GENERIC_TYPE",
+      ]);
+
+      // TypeScript emission keeps the exact historical type text for all of them.
+      expect(extracted.clientFunctions).toEqual([
+        {
+          name: "search",
+          params: [
+            { name: "query", type: "string | number", isOptional: false },
+          ],
+          returnType: "string",
+          isVoid: false,
+        },
+        {
+          name: "touch",
+          params: [{ name: "at", type: "Date", isOptional: false }],
+          returnType: "void",
+          isVoid: true,
+        },
+        {
+          name: "raw",
+          params: [{ name: "payload", type: "any", isOptional: false }],
+          returnType: "void",
+          isVoid: true,
+        },
+        {
+          name: "lookup",
+          params: [
+            { name: "index", type: "Map<string, string>", isOptional: false },
+          ],
+          returnType: "void",
+          isVoid: true,
+        },
+      ]);
+
+      // The portable backends still refuse the very same contract.
+      let caught: unknown;
+      try {
+        await extractRpcSchemaFromFile(inputPath);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(SchemaExtractionError);
     },
     TEST_TIMEOUT_MS,
   );

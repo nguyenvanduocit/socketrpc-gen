@@ -806,18 +806,33 @@ const PROJECT_TSCONFIG_PATH = path.resolve(
   "tsconfig.json",
 );
 
-/**
- * Extracts interfaces and function signatures from the input file.
- * Also returns the map of every user-declared type referenced by those signatures,
- * so emission can add matching type-only imports.
- */
-export async function extractInterfacesFromFile(inputPath: string): Promise<{
+export interface ExtractedInterfaces {
   clientFunctions: FunctionSignature[];
   serverFunctions: FunctionSignature[];
   usedTypes: Map<string, SourceFile>;
   inputFile: SourceFile;
-  schema: RpcSchema;
-}> {
+  /**
+   * Portable IR for non-TypeScript backends. Undefined whenever `diagnostics`
+   * is non-empty, so unsupported-type sentinels can never reach a consumer.
+   */
+  schema: RpcSchema | undefined;
+  /** Every reason the contract is not portable. Empty when `schema` is set. */
+  diagnostics: SchemaDiagnostic[];
+}
+
+/**
+ * Extracts interfaces and function signatures from the input file.
+ * Also returns the map of every user-declared type referenced by those signatures,
+ * so emission can add matching type-only imports.
+ *
+ * TypeScript emission accepts every type TypeScript itself accepts: it reads only
+ * the string signatures below, so a contract the portable IR cannot model is
+ * reported through `diagnostics` rather than raised. Backends that need the IR
+ * call extractRpcSchemaFromFile, which refuses those contracts.
+ */
+export async function extractInterfacesFromFile(
+  inputPath: string,
+): Promise<ExtractedInterfaces> {
   const inputProject = new Project({
     tsConfigFilePath: PROJECT_TSCONFIG_PATH,
     skipAddingFilesFromTsConfig: true,
@@ -858,18 +873,22 @@ export async function extractInterfacesFromFile(inputPath: string): Promise<{
     schemaContext,
   );
 
-  const schema: RpcSchema = {
-    version: RPC_SCHEMA_VERSION,
-    methods: [
-      ...clientToServer.map(({ method }) => method),
-      ...serverToClient.map(({ method }) => method),
-    ],
-    declarations: buildTypeDeclarations(schemaContext),
-  };
+  // Resolving declarations can surface further diagnostics, so it runs before
+  // the portability check below.
+  const declarations = buildTypeDeclarations(schemaContext);
+  const { diagnostics } = schemaContext;
 
-  if (schemaContext.diagnostics.length > 0) {
-    throw new SchemaExtractionError(schemaContext.diagnostics);
-  }
+  const schema: RpcSchema | undefined =
+    diagnostics.length > 0
+      ? undefined
+      : {
+          version: RPC_SCHEMA_VERSION,
+          methods: [
+            ...clientToServer.map(({ method }) => method),
+            ...serverToClient.map(({ method }) => method),
+          ],
+          declarations,
+        };
 
   // Compatibility projection for the current TypeScript emitters. These keep
   // ts-morph's exact historical type text, so generated output does not drift.
@@ -894,12 +913,18 @@ export async function extractInterfacesFromFile(inputPath: string): Promise<{
     usedTypes,
     inputFile: sourceFile,
     schema,
+    diagnostics,
   };
 }
 
-/** Extract only the language-neutral schema for non-TypeScript backends. */
+/**
+ * Extract only the language-neutral schema for non-TypeScript backends.
+ * Throws SchemaExtractionError when the contract cannot be modelled portably.
+ */
 export async function extractRpcSchemaFromFile(
   inputPath: string,
 ): Promise<RpcSchema> {
-  return (await extractInterfacesFromFile(inputPath)).schema;
+  const { schema, diagnostics } = await extractInterfacesFromFile(inputPath);
+  if (!schema) throw new SchemaExtractionError(diagnostics);
+  return schema;
 }

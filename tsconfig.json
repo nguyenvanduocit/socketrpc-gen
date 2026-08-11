@@ -23,5 +23,14 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+
+  // The nested demo application under examples/00-full-app/pkg/{client,server}
+  // is a separate package: it has its own tsconfig.json and its own
+  // dependencies (@shopify/shopify-api, the generated RPC package resolved by
+  // npm name), none of which are installed at the repo root. Sweeping it in
+  // here produced six unresolvable-module errors on every run, which made
+  // `tsc --noEmit` useless as a gate. Its rpc/ contract stays included, because
+  // the snapshot suite generates from it.
+  "exclude": ["node_modules", "examples/00-full-app/pkg/client", "examples/00-full-app/pkg/server"]
 }

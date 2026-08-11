@@ -11,6 +11,7 @@
   "files": [
     "index.ts",
     "src",
+    "tsconfig.json",
     "README.md",
     "CHANGELOG.md"
   ],

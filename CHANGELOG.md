@@ -1,5 +1,16 @@
 # Changelog
 
+## [7.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v6.0.0...v7.0.0) (2026-08-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* regenerating an existing contract rewrites the header comment of every generated TypeScript file. The regenerate hint is now a path relative to the output directory rather than the absolute path of the machine that last ran the generator, and the header's blank line no longer carries a trailing space. The generated code itself is unchanged and no invocation needs new flags.
+
+### Features
+
+* add type-safe Go server generation ([d7e1614](https://github.com/nguyenvanduocit/socketrpc-gen/commit/d7e1614cfe323c7114ce0cf5b96cee5cba0e50c1))
+
 ## [6.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v5.0.0...v6.0.0) (2026-06-03)
 
 

@@ -52,6 +52,14 @@ export interface ServerFunctions {
   /** Reads back what `note` recorded, so fire-and-forget delivery is observable. */
   readNotes: () => string[];
 
+  /**
+   * Reads back the out-of-band failures the client reported. A client handler
+   * for a fire-and-forget server-to-client call has no acknowledgement to fail
+   * through, so it emits `__rpc:error__` instead; this makes what the Go binding
+   * observed through `OnRpcError` visible to the test.
+   */
+  readRpcErrors: () => string[];
+
   /** Go blocks until the binding is torn down, exercising the client TIMEOUT path. */
   neverAck: (id: string) => Echo;
 

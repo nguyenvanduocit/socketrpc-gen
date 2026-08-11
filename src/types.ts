@@ -1,3 +1,4 @@
+import * as path from "path";
 import { DEFAULT_GO_PACKAGE_NAME, DEFAULT_GO_SOCKET_IMPORT } from "./go/options";
 
 /**
@@ -103,4 +104,18 @@ export function resolveConfig(userConfig: GeneratorConfig): ResolvedConfig {
 
   assertSupportedLanguages(resolved);
   return resolved;
+}
+
+/**
+ * The regenerate hint written into every generated header.
+ *
+ * The path is relative to the output directory, and always POSIX-separated,
+ * because the header is committed next to the file it describes: an absolute
+ * path would bake in whichever machine last ran the generator, so `bun run
+ * generate:examples` would report a diff on every checkout and could never serve
+ * as the drift gate it is documented to be.
+ */
+export function regenerateCommand(config: ResolvedConfig): string {
+  const relative = path.relative(config.outputDir, config.inputPath).split(path.sep).join("/");
+  return `bunx socketrpc-gen ${relative.startsWith(".") ? relative : `./${relative}`}`;
 }

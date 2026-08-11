@@ -12,44 +12,48 @@ import (
 	socket "github.com/zishang520/socket.io/servers/socket/v3"
 )
 
-type socketEmitState struct {
+// Socket.IO carries the ack timeout as a flag mutated on the socket and
+// consumed by the next Emit, so two concurrent calls on one connection can
+// steal each other's timeout. Every emit the generated code performs is
+// serialized through the per-socket lock below to keep that pairing intact.
+type rpc_socketEmitState struct {
 	mu   sync.Mutex
 	refs int
 }
 
-var socketEmitStates = struct {
+var rpc_socketEmitStates = struct {
 	sync.Mutex
-	states map[*socket.Socket]*socketEmitState
-}{states: make(map[*socket.Socket]*socketEmitState)}
+	states map[*socket.Socket]*rpc_socketEmitState
+}{states: make(map[*socket.Socket]*rpc_socketEmitState)}
 
-func acquireSocketEmitState(rawSocket *socket.Socket) *socketEmitState {
-	socketEmitStates.Lock()
-	defer socketEmitStates.Unlock()
-	state := socketEmitStates.states[rawSocket]
-	if state == nil {
-		state = &socketEmitState{}
-		socketEmitStates.states[rawSocket] = state
+func rpc_acquireSocketEmitState(rawSocket *socket.Socket) *rpc_socketEmitState {
+	rpc_socketEmitStates.Lock()
+	defer rpc_socketEmitStates.Unlock()
+	shared := rpc_socketEmitStates.states[rawSocket]
+	if shared == nil {
+		shared = &rpc_socketEmitState{}
+		rpc_socketEmitStates.states[rawSocket] = shared
 	}
-	state.refs++
-	return state
+	shared.refs++
+	return shared
 }
 
-func releaseSocketEmitState(rawSocket *socket.Socket, state *socketEmitState) {
-	if rawSocket == nil || state == nil {
+func rpc_releaseSocketEmitState(rawSocket *socket.Socket, shared *rpc_socketEmitState) {
+	if rawSocket == nil || shared == nil {
 		return
 	}
-	socketEmitStates.Lock()
-	defer socketEmitStates.Unlock()
-	if socketEmitStates.states[rawSocket] != state {
+	rpc_socketEmitStates.Lock()
+	defer rpc_socketEmitStates.Unlock()
+	if rpc_socketEmitStates.states[rawSocket] != shared {
 		return
 	}
-	state.refs--
-	if state.refs == 0 {
-		delete(socketEmitStates.states, rawSocket)
+	shared.refs--
+	if shared.refs == 0 {
+		delete(rpc_socketEmitStates.states, rawSocket)
 	}
 }
 
-type eventQueue struct {
+type rpc_eventQueue struct {
 	run func([]any)
 
 	mu      sync.Mutex
@@ -57,13 +61,13 @@ type eventQueue struct {
 	running bool
 }
 
-func newEventQueue(run func([]any)) *eventQueue {
-	return &eventQueue{run: run}
+func rpc_newEventQueue(run func([]any)) *rpc_eventQueue {
+	return &rpc_eventQueue{run: run}
 }
 
 // push never blocks: the Socket.IO listener must stay free to deliver the
 // next packet even while this method's handler is still running.
-func (q *eventQueue) push(args []any) {
+func (q *rpc_eventQueue) push(args []any) {
 	q.mu.Lock()
 	q.pending = append(q.pending, args)
 	if q.running {
@@ -75,7 +79,7 @@ func (q *eventQueue) push(args []any) {
 	go q.drain()
 }
 
-func (q *eventQueue) drain() {
+func (q *rpc_eventQueue) drain() {
 	for {
 		q.mu.Lock()
 		if len(q.pending) == 0 {
@@ -99,19 +103,21 @@ type ServerHandler interface {
 
 type ServerBinding struct {
 	socket    *socket.Socket
-	emitState *socketEmitState
+	emitState *rpc_socketEmitState
 	handler   ServerHandler
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	mu          sync.RWMutex
-	disposed    bool
-	disposeOnce sync.Once
+	mu              sync.RWMutex
+	disposed        bool
+	rpcErrorHandler func(*RpcError)
+	disposeOnce     sync.Once
 
 	listenCreateRoom  func(...any)
 	listenListRooms   func(...any)
 	listenPostMessage func(...any)
 	listenTyping      func(...any)
+	listenRpcError    func(...any)
 	listenDisconnect  func(...any)
 }
 
@@ -125,47 +131,54 @@ func BindServer(rawSocket *socket.Socket, handler ServerHandler) (*ServerBinding
 	ctx, cancel := context.WithCancel(context.Background())
 	binding := &ServerBinding{
 		socket:    rawSocket,
-		emitState: acquireSocketEmitState(rawSocket),
+		emitState: rpc_acquireSocketEmitState(rawSocket),
 		handler:   handler,
 		ctx:       ctx,
 		cancel:    cancel,
 	}
 
-	queueCreateRoom := newEventQueue(binding.handleCreateRoom)
+	queueCreateRoom := rpc_newEventQueue(binding.handleCreateRoom)
 	binding.listenCreateRoom = func(rawArgs ...any) {
-		args := append([]any(nil), rawArgs...)
-		queueCreateRoom.push(args)
+		queueCreateRoom.push(append([]any(nil), rawArgs...))
 	}
 	if err := rawSocket.On("createRoom", binding.listenCreateRoom); err != nil {
 		binding.Dispose()
 		return nil, fmt.Errorf("register createRoom: %w", err)
 	}
-	queueListRooms := newEventQueue(binding.handleListRooms)
+	queueListRooms := rpc_newEventQueue(binding.handleListRooms)
 	binding.listenListRooms = func(rawArgs ...any) {
-		args := append([]any(nil), rawArgs...)
-		queueListRooms.push(args)
+		queueListRooms.push(append([]any(nil), rawArgs...))
 	}
 	if err := rawSocket.On("listRooms", binding.listenListRooms); err != nil {
 		binding.Dispose()
 		return nil, fmt.Errorf("register listRooms: %w", err)
 	}
-	queuePostMessage := newEventQueue(binding.handlePostMessage)
+	queuePostMessage := rpc_newEventQueue(binding.handlePostMessage)
 	binding.listenPostMessage = func(rawArgs ...any) {
-		args := append([]any(nil), rawArgs...)
-		queuePostMessage.push(args)
+		queuePostMessage.push(append([]any(nil), rawArgs...))
 	}
 	if err := rawSocket.On("postMessage", binding.listenPostMessage); err != nil {
 		binding.Dispose()
 		return nil, fmt.Errorf("register postMessage: %w", err)
 	}
-	queueTyping := newEventQueue(binding.handleTyping)
+	queueTyping := rpc_newEventQueue(binding.handleTyping)
 	binding.listenTyping = func(rawArgs ...any) {
-		args := append([]any(nil), rawArgs...)
-		queueTyping.push(args)
+		queueTyping.push(append([]any(nil), rawArgs...))
 	}
 	if err := rawSocket.On("typing", binding.listenTyping); err != nil {
 		binding.Dispose()
 		return nil, fmt.Errorf("register typing: %w", err)
+	}
+
+	// The peer reports a failed fire-and-forget handler out of band, because
+	// such a call has no acknowledgement to answer through.
+	queueRpcError := rpc_newEventQueue(binding.handleRpcError)
+	binding.listenRpcError = func(rawArgs ...any) {
+		queueRpcError.push(append([]any(nil), rawArgs...))
+	}
+	if err := rawSocket.On(RPCErrorEvent, binding.listenRpcError); err != nil {
+		binding.Dispose()
+		return nil, fmt.Errorf("register %s: %w", RPCErrorEvent, err)
 	}
 	binding.listenDisconnect = func(...any) {
 		binding.Dispose()
@@ -185,6 +198,38 @@ func (b *ServerBinding) Disposed() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.disposed
+}
+
+// OnRpcError observes the failures the peer reports out of band: a client
+// whose handler for a fire-and-forget server-to-client call fails has no
+// acknowledgement to answer through, so it emits the error instead. Without
+// an observer here that report is dropped and this side never learns of it.
+func (b *ServerBinding) OnRpcError(handler func(*RpcError)) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.rpcErrorHandler = handler
+}
+
+func (b *ServerBinding) handleRpcError(rawArgs []any) {
+	b.mu.RLock()
+	observer := b.rpcErrorHandler
+	disposed := b.disposed
+	b.mu.RUnlock()
+	if observer == nil || disposed || len(rawArgs) == 0 {
+		return
+	}
+	failure, ok := rpc_decodeRpcError(rawArgs[0])
+	if !ok {
+		failure = NewRpcError(CodeInternalError, fmt.Sprint(rawArgs[0]), RPCErrorEvent, nil)
+	}
+	// An observer that panics must not take the queue goroutine down with it.
+	defer func() {
+		_ = recover()
+	}()
+	observer(failure)
 }
 
 func (b *ServerBinding) Dispose() {
@@ -212,16 +257,23 @@ func (b *ServerBinding) Dispose() {
 		if b.socket != nil && b.listenTyping != nil {
 			b.socket.RemoveListener("typing", b.listenTyping)
 		}
+		if b.socket != nil && b.listenRpcError != nil {
+			b.socket.RemoveListener(RPCErrorEvent, b.listenRpcError)
+		}
 		if b.socket != nil && b.listenDisconnect != nil {
 			b.socket.RemoveListener("disconnect", b.listenDisconnect)
 		}
-		releaseSocketEmitState(b.socket, b.emitState)
+		rpc_releaseSocketEmitState(b.socket, b.emitState)
 	})
 }
 
 func (b *ServerBinding) emitError(err *RpcError) {
 	if err == nil || b.socket == nil || b.emitState == nil || b.Disposed() {
 		return
+	}
+	// Data is caller-supplied and may not encode; the report must survive it.
+	if rpc_ensureEncodable(err, err.Origin) != nil {
+		err = NewRpcError(err.Code, err.Message, err.Origin, nil)
 	}
 	b.emitState.mu.Lock()
 	defer b.emitState.mu.Unlock()
@@ -231,180 +283,185 @@ func (b *ServerBinding) emitError(err *RpcError) {
 	_ = b.socket.Emit(RPCErrorEvent, err)
 }
 
-func inboundAck(rawArgs []any, want int, origin string) (socket.Ack, []any, *RpcError) {
-	if len(rawArgs) == 0 {
-		return nil, nil, NewRpcError(CodeInvalidArgument, "missing acknowledgement callback", origin, nil)
+type rpc_inboundCall struct {
+	binding *ServerBinding
+	origin  string
+	ack     socket.Ack
+	args    []any
+	once    sync.Once
+}
+
+// beginInbound splits the acknowledgement callback off the raw argument list
+// and checks arity. It returns nil when the event cannot be carried any
+// further, having already reported why.
+func rpc_beginInbound(b *ServerBinding, origin string, want int, wantAck bool, rawArgs []any) *rpc_inboundCall {
+	pending := &rpc_inboundCall{binding: b, origin: origin}
+	args := rawArgs
+	if wantAck {
+		if len(args) == 0 {
+			b.emitError(NewRpcError(CodeInvalidArgument, "missing acknowledgement callback", origin, nil))
+			return nil
+		}
+		callback, isAck := args[len(args)-1].(socket.Ack)
+		if !isAck {
+			b.emitError(NewRpcError(CodeInvalidArgument, "missing acknowledgement callback", origin, nil))
+			return nil
+		}
+		pending.ack = callback
+		args = args[:len(args)-1]
 	}
-	ack, ok := rawArgs[len(rawArgs)-1].(socket.Ack)
-	if !ok {
-		return nil, nil, NewRpcError(CodeInvalidArgument, "missing acknowledgement callback", origin, nil)
+	if len(args) != want {
+		pending.fail(CodeInvalidArgument, fmt.Sprintf("expected %d arguments, got %d", want, len(args)))
+		return nil
 	}
-	payload := rawArgs[:len(rawArgs)-1]
-	if len(payload) != want {
-		message := fmt.Sprintf("expected %d arguments, got %d", want, len(payload))
-		return ack, nil, NewRpcError(CodeInvalidArgument, message, origin, nil)
+	pending.args = args
+	return pending
+}
+
+// reply answers exactly once. A fire-and-forget call has no acknowledgement
+// slot, so its failures travel on the out-of-band error event instead.
+func (c *rpc_inboundCall) reply(value any) {
+	if c.ack == nil {
+		if failure, ok := value.(*RpcError); ok {
+			c.binding.emitError(failure)
+		}
+		return
 	}
-	return ack, payload, nil
+	c.once.Do(func() {
+		c.ack([]any{value}, nil)
+	})
+}
+
+func (c *rpc_inboundCall) fail(code RpcErrorCode, message string) {
+	c.reply(NewRpcError(code, message, c.origin, nil))
+}
+
+// recoverPanic is deferred directly by the handler, which is what lets the
+// builtin recover see a panic unwinding through it.
+func (c *rpc_inboundCall) recoverPanic() {
+	if value := recover(); value != nil {
+		c.reply(rpc_errorFromPanic(value, c.origin))
+	}
+}
+
+func (c *rpc_inboundCall) ready() bool {
+	if c.binding.Disposed() {
+		c.fail(CodeDisposed, "server binding is disposed")
+		return false
+	}
+	return true
+}
+
+func (c *rpc_inboundCall) decode(index int, target any, name string) bool {
+	if err := rpc_decodeValue(c.args[index], target); err != nil {
+		c.fail(CodeInvalidArgument, fmt.Sprintf("invalid argument %s: %v", name, err))
+		return false
+	}
+	return true
+}
+
+func (c *rpc_inboundCall) finish(value any, err error) {
+	if err != nil {
+		c.reply(rpc_errorFromError(err, c.origin))
+		return
+	}
+	if failure := rpc_ensureEncodable(value, c.origin); failure != nil {
+		c.reply(failure)
+		return
+	}
+	c.reply(value)
+}
+
+func (c *rpc_inboundCall) finishVoid(err error) {
+	if err != nil {
+		c.reply(rpc_errorFromError(err, c.origin))
+	}
 }
 
 func (b *ServerBinding) handleCreateRoom(rawArgs []any) {
-	ack, rawArgs, protocolErr := inboundAck(rawArgs, 2, "createRoom")
-	if ack == nil {
-		b.emitError(protocolErr)
+	call := rpc_beginInbound(b, "createRoom", 2, true, rawArgs)
+	if call == nil {
 		return
 	}
-	var ackOnce sync.Once
-	reply := func(value any) {
-		ackOnce.Do(func() {
-			ack([]any{value}, nil)
-		})
-	}
-	defer func() {
-		if value := recover(); value != nil {
-			reply(rpcErrorFromPanic(value, "createRoom"))
-		}
-	}()
-	if protocolErr != nil {
-		reply(protocolErr)
+	defer call.recoverPanic()
+	if !call.ready() {
 		return
 	}
-	if b.Disposed() {
-		reply(NewRpcError(CodeDisposed, "server binding is disposed", "createRoom", nil))
+	var arg0 string
+	if !call.decode(0, &arg0, "topic") {
 		return
 	}
-	var topic string
-	if err := decodeValue(rawArgs[0], &topic); err != nil {
-		reply(NewRpcError(CodeInvalidArgument, fmt.Sprintf("invalid argument topic: %v", err), "createRoom", nil))
+	var arg1 Visibility
+	if !call.decode(1, &arg1, "visibility") {
 		return
 	}
-	var visibility Visibility
-	if err := decodeValue(rawArgs[1], &visibility); err != nil {
-		reply(NewRpcError(CodeInvalidArgument, fmt.Sprintf("invalid argument visibility: %v", err), "createRoom", nil))
-		return
-	}
-	result, err := b.handler.CreateRoom(b.ctx, topic, visibility)
-	if err != nil {
-		reply(rpcErrorFromError(err, "createRoom"))
-		return
-	}
-	reply(result)
+	call.finish(b.handler.CreateRoom(b.ctx, arg0, arg1))
 }
 
 func (b *ServerBinding) handleListRooms(rawArgs []any) {
-	ack, rawArgs, protocolErr := inboundAck(rawArgs, 0, "listRooms")
-	if ack == nil {
-		b.emitError(protocolErr)
+	call := rpc_beginInbound(b, "listRooms", 0, true, rawArgs)
+	if call == nil {
 		return
 	}
-	var ackOnce sync.Once
-	reply := func(value any) {
-		ackOnce.Do(func() {
-			ack([]any{value}, nil)
-		})
-	}
-	defer func() {
-		if value := recover(); value != nil {
-			reply(rpcErrorFromPanic(value, "listRooms"))
-		}
-	}()
-	if protocolErr != nil {
-		reply(protocolErr)
-		return
-	}
-	if b.Disposed() {
-		reply(NewRpcError(CodeDisposed, "server binding is disposed", "listRooms", nil))
+	defer call.recoverPanic()
+	if !call.ready() {
 		return
 	}
 	result, err := b.handler.ListRooms(b.ctx)
-	if err != nil {
-		reply(rpcErrorFromError(err, "listRooms"))
-		return
-	}
-	if result == nil {
+	if err == nil && result == nil {
 		result = []ChatRoom{}
 	}
-	reply(result)
+	call.finish(result, err)
 }
 
 func (b *ServerBinding) handlePostMessage(rawArgs []any) {
-	ack, rawArgs, protocolErr := inboundAck(rawArgs, 2, "postMessage")
-	if ack == nil {
-		b.emitError(protocolErr)
+	call := rpc_beginInbound(b, "postMessage", 2, true, rawArgs)
+	if call == nil {
 		return
 	}
-	var ackOnce sync.Once
-	reply := func(value any) {
-		ackOnce.Do(func() {
-			ack([]any{value}, nil)
-		})
-	}
-	defer func() {
-		if value := recover(); value != nil {
-			reply(rpcErrorFromPanic(value, "postMessage"))
-		}
-	}()
-	if protocolErr != nil {
-		reply(protocolErr)
+	defer call.recoverPanic()
+	if !call.ready() {
 		return
 	}
-	if b.Disposed() {
-		reply(NewRpcError(CodeDisposed, "server binding is disposed", "postMessage", nil))
+	var arg0 string
+	if !call.decode(0, &arg0, "roomId") {
 		return
 	}
-	var roomID string
-	if err := decodeValue(rawArgs[0], &roomID); err != nil {
-		reply(NewRpcError(CodeInvalidArgument, fmt.Sprintf("invalid argument roomId: %v", err), "postMessage", nil))
+	var arg1 string
+	if !call.decode(1, &arg1, "body") {
 		return
 	}
-	var body string
-	if err := decodeValue(rawArgs[1], &body); err != nil {
-		reply(NewRpcError(CodeInvalidArgument, fmt.Sprintf("invalid argument body: %v", err), "postMessage", nil))
-		return
-	}
-	result, err := b.handler.PostMessage(b.ctx, roomID, body)
-	if err != nil {
-		reply(rpcErrorFromError(err, "postMessage"))
-		return
-	}
-	reply(result)
+	call.finish(b.handler.PostMessage(b.ctx, arg0, arg1))
 }
 
 func (b *ServerBinding) handleTyping(rawArgs []any) {
-	defer func() {
-		if value := recover(); value != nil {
-			b.emitError(rpcErrorFromPanic(value, "typing"))
-		}
-	}()
-	if len(rawArgs) != 1 {
-		message := fmt.Sprintf("expected %d arguments, got %d", 1, len(rawArgs))
-		b.emitError(NewRpcError(CodeInvalidArgument, message, "typing", nil))
+	call := rpc_beginInbound(b, "typing", 1, false, rawArgs)
+	if call == nil {
 		return
 	}
-	if b.Disposed() {
+	defer call.recoverPanic()
+	if !call.ready() {
 		return
 	}
-	var roomID string
-	if err := decodeValue(rawArgs[0], &roomID); err != nil {
-		b.emitError(NewRpcError(CodeInvalidArgument, fmt.Sprintf("invalid argument roomId: %v", err), "typing", nil))
+	var arg0 string
+	if !call.decode(0, &arg0, "roomId") {
 		return
 	}
-	if err := b.handler.Typing(b.ctx, roomID); err != nil {
-		b.emitError(rpcErrorFromError(err, "typing"))
-	}
+	call.finishVoid(b.handler.Typing(b.ctx, arg0))
 }
 
 type ClientOptions struct {
 	Timeout time.Duration
 }
 
-type clientAckResult struct {
+type rpc_ackResult struct {
 	args []any
 	err  error
 }
 
 type Client struct {
 	socket    *socket.Socket
-	emitState *socketEmitState
+	emitState *rpc_socketEmitState
 	timeout   time.Duration
 
 	mu sync.RWMutex
@@ -431,7 +488,7 @@ func NewClient(rawSocket *socket.Socket, options *ClientOptions) (*Client, error
 	}
 	client := &Client{
 		socket:    rawSocket,
-		emitState: acquireSocketEmitState(rawSocket),
+		emitState: rpc_acquireSocketEmitState(rawSocket),
 		timeout:   timeout,
 		done:      make(chan struct{}),
 	}
@@ -484,7 +541,7 @@ func (c *Client) markDisconnected() {
 
 func (c *Client) releaseEmitState() {
 	c.releaseOnce.Do(func() {
-		releaseSocketEmitState(c.socket, c.emitState)
+		rpc_releaseSocketEmitState(c.socket, c.emitState)
 	})
 }
 
@@ -522,7 +579,7 @@ func (c *Client) Dispose() {
 	c.releaseEmitState()
 }
 
-func rpcErrorFromContext(ctx context.Context, origin string) *RpcError {
+func rpc_errorFromContext(ctx context.Context, origin string) *RpcError {
 	if ctx == nil {
 		return NewRpcError(CodeInvalidArgument, "context must not be nil", origin, nil)
 	}
@@ -535,7 +592,7 @@ func rpcErrorFromContext(ctx context.Context, origin string) *RpcError {
 	return nil
 }
 
-func rpcErrorFromTransport(err error, origin string) *RpcError {
+func rpc_errorFromTransport(err error, origin string) *RpcError {
 	if err == nil {
 		return nil
 	}
@@ -548,62 +605,77 @@ func rpcErrorFromTransport(err error, origin string) *RpcError {
 	return NewRpcError(CodeInternalError, err.Error(), origin, nil)
 }
 
-func (c *Client) OnMessage(ctx context.Context, message Message) error {
-	if err := rpcErrorFromContext(ctx, "onMessage"); err != nil {
+// emit performs one fire-and-forget call.
+func rpc_emit(c *Client, ctx context.Context, origin string, args ...any) error {
+	if err := rpc_errorFromContext(ctx, origin); err != nil {
+		return err
+	}
+	if err := rpc_ensureEncodable(args, origin); err != nil {
 		return err
 	}
 	c.emitState.mu.Lock()
 	defer c.emitState.mu.Unlock()
-	if err := c.stateError("onMessage"); err != nil {
+	if err := c.stateError(origin); err != nil {
 		return err
 	}
-	if err := c.socket.Emit("onMessage", message); err != nil {
-		return rpcErrorFromTransport(err, "onMessage")
+	if err := c.socket.Emit(origin, args...); err != nil {
+		return rpc_errorFromTransport(err, origin)
 	}
 	return nil
 }
 
-func (c *Client) ConfirmLeave(ctx context.Context, roomID string) (bool, error) {
-	var zero bool
-	if err := rpcErrorFromContext(ctx, "confirmLeave"); err != nil {
-		return zero, err
+// request performs one acknowledged call and decodes the answer into target.
+func rpc_request(c *Client, ctx context.Context, origin string, target any, args ...any) error {
+	if err := rpc_errorFromContext(ctx, origin); err != nil {
+		return err
 	}
-	response := make(chan clientAckResult, 1)
+	if err := rpc_ensureEncodable(args, origin); err != nil {
+		return err
+	}
+	response := make(chan rpc_ackResult, 1)
 	c.emitState.mu.Lock()
-	if err := c.stateError("confirmLeave"); err != nil {
+	if err := c.stateError(origin); err != nil {
 		c.emitState.mu.Unlock()
-		return zero, err
+		return err
 	}
-	c.socket.Timeout(c.timeout).EmitWithAck("confirmLeave", roomID)(func(args []any, err error) {
+	c.socket.Timeout(c.timeout).EmitWithAck(origin, args...)(func(values []any, err error) {
 		select {
-		case response <- clientAckResult{args: args, err: err}:
+		case response <- rpc_ackResult{args: values, err: err}:
 		default:
 		}
 	})
 	c.emitState.mu.Unlock()
 
-	var acknowledged clientAckResult
+	var acknowledged rpc_ackResult
 	select {
 	case <-ctx.Done():
-		return zero, rpcErrorFromContext(ctx, "confirmLeave")
+		return rpc_errorFromContext(ctx, origin)
 	case <-c.done:
-		return zero, c.stateError("confirmLeave")
+		return c.stateError(origin)
 	case acknowledged = <-response:
 	}
 	if acknowledged.err != nil {
-		return zero, rpcErrorFromTransport(acknowledged.err, "confirmLeave")
+		return rpc_errorFromTransport(acknowledged.err, origin)
 	}
 	if len(acknowledged.args) != 1 {
 		message := fmt.Sprintf("expected one acknowledgement value, got %d", len(acknowledged.args))
-		return zero, NewRpcError(CodeInvalidArgument, message, "confirmLeave", nil)
+		return NewRpcError(CodeInvalidArgument, message, origin, nil)
 	}
-	if rpcErr, ok := decodeRpcError(acknowledged.args[0]); ok {
-		return zero, rpcErr
+	if failure, ok := rpc_decodeRpcError(acknowledged.args[0]); ok {
+		return failure
 	}
-	var result bool
-	if err := decodeValue(acknowledged.args[0], &result); err != nil {
+	if err := rpc_decodeInto(acknowledged.args[0], target); err != nil {
 		message := fmt.Sprintf("invalid acknowledgement payload: %v", err)
-		return zero, NewRpcError(CodeInvalidArgument, message, "confirmLeave", nil)
+		return NewRpcError(CodeInvalidArgument, message, origin, nil)
 	}
-	return result, nil
+	return nil
+}
+
+func (rpc_c *Client) OnMessage(ctx context.Context, message Message) error {
+	return rpc_emit(rpc_c, ctx, "onMessage", message)
+}
+
+func (rpc_c *Client) ConfirmLeave(ctx context.Context, roomID string) (rpc_result bool, rpc_err error) {
+	rpc_err = rpc_request(rpc_c, ctx, "confirmLeave", &rpc_result, roomID)
+	return
 }

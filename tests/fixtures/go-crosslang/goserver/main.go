@@ -44,8 +44,9 @@ type handler struct {
 	// assigned once, before the binding starts dispatching, so no lock is needed.
 	client *rpc.Client
 
-	mu    sync.Mutex
-	notes []string
+	mu        sync.Mutex
+	notes     []string
+	rpcErrors []string
 }
 
 func (h *handler) Echo(_ context.Context, id string, payload string) (rpc.Echo, error) {
@@ -82,6 +83,24 @@ func (h *handler) ReadNotes(_ context.Context) ([]string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]string(nil), h.notes...), nil
+}
+
+// recordRpcError is wired to the binding's OnRpcError observer, which is the
+// only way this side learns that a fire-and-forget call into the client failed.
+func (h *handler) recordRpcError(failure *rpc.RpcError) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.rpcErrors = append(h.rpcErrors, string(failure.Code)+":"+failure.Origin+":"+failure.Message)
+}
+
+// ReadRPCErrors deliberately returns a nil slice while nothing has been
+// reported, so the generated normalization is exercised on a real reply: the
+// TypeScript client's type says string[] and must never see null. The name
+// comes from the contract's `readRpcErrors` through Go's initialism rules.
+func (h *handler) ReadRPCErrors(_ context.Context) ([]string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.rpcErrors...), nil
 }
 
 // NeverAck blocks until the binding's context is cancelled, so the call is
@@ -143,6 +162,8 @@ func serve(raw *socket.Socket) {
 		fmt.Fprintf(os.Stderr, "bind server: %v\n", err)
 		return
 	}
+
+	binding.OnRpcError(h.recordRpcError)
 
 	// The binding removes its own listeners on disconnect; the outbound client
 	// has to be released alongside it.

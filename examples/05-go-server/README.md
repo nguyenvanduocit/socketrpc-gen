@@ -60,6 +60,8 @@ func (h *handler) CreateRoom(ctx context.Context, topic string, visibility rpc.V
     return rpc.ChatRoom{ID: "r1", Topic: topic, MemberCount: 1, Visibility: visibility}, nil
 }
 
+// Returning a nil slice is safe: the binding sends [] so the client, whose
+// generated type says ChatRoom[], never has to defend against null.
 func (h *handler) ListRooms(ctx context.Context) ([]rpc.ChatRoom, error) { return nil, nil }
 
 func (h *handler) PostMessage(ctx context.Context, roomID string, body string) (rpc.Message, error) {
@@ -139,3 +141,28 @@ blocked handler stalls only its own method and never the connection.
 Calls to *different* methods still run concurrently on a Go server, so a
 contract that depends on cross-method ordering should carry an explicit
 sequence number in the payload.
+
+## Errors the Client Reports Back
+
+`confirmLeave` returns a value, so a failing client handler answers through the
+acknowledgement and `ConfirmLeave` returns the error. `onMessage` is
+fire-and-forget and has no acknowledgement, so the client reports a failing
+handler on `__rpc:error__` instead. Observe those with:
+
+```go
+binding.OnRpcError(func(failure *rpc.RpcError) {
+    log.Printf("client handler failed: %s", failure)
+})
+```
+
+This is the Go counterpart to `rpc.handle.rpcError(...)` on the TypeScript
+server.
+
+## Naming
+
+Nothing in a contract can collide with the generated Go. Identifiers the
+generator owns are written `rpc_`-prefixed, and names derived from the contract
+never contain an underscore, so a parameter called `result`, `err`, `fmt` or
+`string` compiles exactly as written. The single reserved name is `ctx`, which
+is the context parameter of the generated `ServerHandler` and `Client`
+signatures.

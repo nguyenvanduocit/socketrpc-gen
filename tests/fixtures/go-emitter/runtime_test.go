@@ -2,7 +2,9 @@ package rpc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -157,7 +159,72 @@ func TestClientTimeoutAndContextCancellation(t *testing.T) {
 
 func TestEnumRejectsUnknownWireValue(t *testing.T) {
 	var status Status
-	if err := decodeValue("not-a-status", &status); err == nil {
+	if err := rpc_decodeValue("not-a-status", &status); err == nil {
 		t.Fatal("expected unknown enum value to fail decoding")
+	}
+}
+
+// A required map field is nil in a zero value, and encoding/json writes nil as
+// null — which would break a client whose generated type says the key is always
+// an object. The generated MarshalJSON normalizes it without touching the value
+// the handler still holds.
+func TestRequiredMapFieldNeverEncodesAsNull(t *testing.T) {
+	user := User{ID: "u1", DisplayName: "Ada", Status: StatusActive}
+	encoded, err := json.Marshal(user)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"attributes":{}`) {
+		t.Errorf("expected an empty object for the nil map, got %s", encoded)
+	}
+	if user.Attributes != nil {
+		t.Error("MarshalJSON mutated the caller's value")
+	}
+}
+
+// A required enum left at its zero value cannot be encoded. Socket.IO's write
+// path discards that failure, so without the guard the caller would wait out its
+// own timeout instead of learning what went wrong.
+func TestUnencodableResultBecomesTypedError(t *testing.T) {
+	failure := rpc_ensureEncodable(User{ID: "u1"}, "getUser")
+	if failure == nil {
+		t.Fatal("expected a zero-valued required enum to be refused")
+	}
+	if failure.Code != CodeInternalError || !failure.RPCError {
+		t.Fatalf("unexpected failure: %#v", failure)
+	}
+}
+
+// A peer whose handler for a fire-and-forget call fails has no acknowledgement
+// to answer through, so it reports out of band. The binding must route that to
+// an observer instead of dropping it.
+func TestOnRpcErrorReceivesPeerReports(t *testing.T) {
+	raw := socket.NewSocket()
+	binding, err := BindServer(raw, &testHandler{deleted: make(chan string, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer binding.Dispose()
+
+	reports := make(chan *RpcError, 1)
+	binding.OnRpcError(func(failure *RpcError) { reports <- failure })
+
+	raw.Trigger(RPCErrorEvent, map[string]any{
+		"__rpcError": true,
+		"code":       "INTERNAL_ERROR",
+		"message":    "client handler exploded",
+		"origin":     "notify",
+	})
+
+	select {
+	case failure := <-reports:
+		if failure.Code != CodeInternalError || failure.Message != "client handler exploded" {
+			t.Fatalf("unexpected report: %#v", failure)
+		}
+		if failure.Origin != "notify" {
+			t.Fatalf("origin = %q", failure.Origin)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("out-of-band error report never reached the observer")
 	}
 }

@@ -228,6 +228,92 @@ describe("isolated Go emitter", () => {
     expect(server).not.toContain("result = float64");
   });
 
+  test("normalizes nil through named aliases and required struct fields", () => {
+    const shapes: RpcSchema = {
+      version: RPC_SCHEMA_VERSION,
+      declarations: [
+        { kind: "alias", name: "Counts", target: { kind: "map", value: scalar("number") } },
+        { kind: "alias", name: "Tags", target: { kind: "array", element: scalar("string") } },
+        // An alias whose target admits null: nil is a value the contract allows.
+        {
+          kind: "alias",
+          name: "MaybeTags",
+          target: { kind: "nullable", type: { kind: "array", element: scalar("string") } },
+        },
+        {
+          kind: "object",
+          name: "Bundle",
+          fields: [
+            { name: "tags", type: { kind: "array", element: scalar("string") } },
+            { name: "counts", type: { kind: "map", value: scalar("number") } },
+            { name: "label", type: scalar("string") },
+            {
+              name: "optionalTags",
+              type: { kind: "optional", type: { kind: "array", element: scalar("string") } },
+            },
+            {
+              name: "nullableTags",
+              type: { kind: "nullable", type: { kind: "array", element: scalar("string") } },
+            },
+          ],
+        },
+        // Nothing nilable, so no marshaller is warranted.
+        {
+          kind: "object",
+          name: "Plain",
+          fields: [{ name: "label", type: scalar("string") }],
+        },
+      ],
+      methods: [
+        {
+          name: "aliasedMap",
+          direction: "client-to-server",
+          params: [],
+          returnType: { kind: "named", name: "Counts" },
+        },
+        {
+          name: "aliasedSlice",
+          direction: "client-to-server",
+          params: [],
+          returnType: { kind: "named", name: "Tags" },
+        },
+        {
+          name: "aliasedNullable",
+          direction: "client-to-server",
+          params: [],
+          returnType: { kind: "named", name: "MaybeTags" },
+        },
+        {
+          name: "bundle",
+          direction: "client-to-server",
+          params: [],
+          returnType: { kind: "named", name: "Bundle" },
+        },
+      ],
+    };
+
+    const generated = generateGo(shapes);
+    const server = generated["server.generated.go"];
+    const types = generated["types.generated.go"];
+
+    // A Go alias *is* the slice or map it names, so its nil needs the same
+    // normalization a bare one gets.
+    expect(server).toContain("result = map[string]float64{}");
+    expect(server).toContain("result = []string{}");
+    // The alias that admits null keeps it, as does a struct (never nil by value).
+    expect(server.match(/result == nil/g)).toHaveLength(2);
+
+    // Required slice and map fields are normalized where every path sees it.
+    expect(types).toContain("func (v Bundle) MarshalJSON() ([]byte, error)");
+    expect(types).toContain("rpc_copy.Tags = []string{}");
+    expect(types).toContain("rpc_copy.Counts = map[string]float64{}");
+    // Optional and nullable fields are pointers: null is what the contract asks for.
+    expect(types).not.toContain("rpc_copy.OptionalTags");
+    expect(types).not.toContain("rpc_copy.NullableTags");
+    // A struct with nothing nilable carries no marshaller at all.
+    expect(types).not.toContain("func (v Plain) MarshalJSON()");
+  });
+
   test("projects aliases, nested optionality, and empty structs", () => {
     const aliased: RpcSchema = {
       version: RPC_SCHEMA_VERSION,

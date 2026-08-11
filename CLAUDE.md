@@ -83,9 +83,25 @@ and `void`. Inline object literals, inline unions, ambient types (`Error`, `Date
 intersections, generics, `any`, and optional *positional* parameters are refused with the
 declaration to write instead. See `examples/05-go-server/`.
 
-Behaviour parity worth knowing: the Go server serializes dispatch per RPC method (same-method
-calls keep Socket.IO's arrival order, a blocked handler stalls only its own method), and nil
-slices/maps returned from a handler are normalized so a client typed `T[]` never sees `null`.
+Behaviour parity worth knowing:
+
+- Dispatch is serialized per RPC method: same-method calls keep Socket.IO's arrival order and
+  a blocked handler stalls only its own method.
+- Anything the client's type calls an array or an object arrives as `[]` / `{}`: a slice or map
+  result, a named alias for one, and every required slice/map field of a returned struct
+  (recursively, since each struct carries its own `MarshalJSON`). Optional and nullable values
+  are pointers and keep their `null`. Normalization works on a copy, so handler values are
+  never mutated.
+- A payload the JSON encoder refuses — typically a required enum at its zero value — answers
+  with `INTERNAL_ERROR` instead of letting Socket.IO drop the reply and the caller time out.
+- `ServerBinding.OnRpcError` observes `__rpc:error__` reports from the client, matching
+  `rpc.handle.rpcError` on the TypeScript server.
+- Generated Go identifiers are `rpc_`-prefixed inside every body that also holds contract
+  identifiers. `exportedIdentifier`/`localIdentifier` split on non-alphanumeric runes and so
+  can never produce an underscore, which keeps the two namespaces disjoint by construction
+  rather than by a reserved-word list. `ctx` is the single reserved parameter name;
+  `tests/go-collisions.test.ts` derives its adversarial contract from the emitter's own output
+  so the guarantee cannot silently drift.
 
 ### Interface Requirements
 - Must define `ClientFunctions` and `ServerFunctions` interfaces

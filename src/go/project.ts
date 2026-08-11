@@ -6,8 +6,11 @@
  * and `emitter.ts` writes only shapes that survived validation.
  */
 
-import type { RpcMethod, RpcSchema, TypeDeclaration, TypeRef } from "../schema";
+import type { ArrayTypeRef, MapTypeRef, RpcMethod, RpcSchema, TypeDeclaration, TypeRef } from "../schema";
 import { exportedIdentifier } from "./names";
+
+/** The declarations an emptiness question has to be resolved against. */
+export type DeclarationScope = ReadonlyMap<string, TypeDeclaration>;
 
 /** Go identifier for an IR declaration name. */
 export function goTypeName(name: string): string {
@@ -88,21 +91,53 @@ export function outboundMethods(schema: RpcSchema): RpcMethod[] {
 }
 
 /**
- * The empty literal for a result whose Go zero value is nil but whose contract
- * promises a value.
+ * Follows named aliases down to the slice or map they ultimately spell.
+ *
+ * `type Tags = string[]` is a Go alias, so a value typed `Tags` *is* a slice and
+ * its zero value is the same nil a bare `[]string` has. Emptiness therefore has
+ * to be decided on the resolved type, not on the syntactic one. A nilable hop
+ * ends the walk: once the contract admits null, nil is a legitimate value and
+ * must be left alone.
+ */
+function resolveComposite(
+  ref: TypeRef,
+  declarations: DeclarationScope,
+  seen: ReadonlySet<string> = new Set(),
+): ArrayTypeRef | MapTypeRef | undefined {
+  if (ref.kind === "array" || ref.kind === "map") return ref;
+  if (ref.kind !== "named" || seen.has(ref.name)) return undefined;
+
+  const declaration = declarations.get(ref.name);
+  if (declaration?.kind !== "alias") return undefined;
+
+  const { core, nilable } = unwrapOptionality(declaration.target);
+  if (nilable) return undefined;
+  return resolveComposite(core, declarations, new Set([...seen, ref.name]));
+}
+
+/**
+ * The empty literal for a value whose Go zero value is nil but whose contract
+ * promises a slice or a map.
  *
  * Go's zero slice and map are nil, and `encoding/json` writes nil as `null`. A
  * contract that declares `() => string[]` would then deliver `null` to a client
  * whose generated type says `string[]` — the generator would be emitting a
- * type-safe client and a server able to violate it. Returns undefined when nil
- * is a legitimate value (an optional or nullable result) or when the Go zero
- * value already encodes correctly.
+ * type-safe client and a server able to violate it. The same holds one level in:
+ * a required `tags: string[]` field of a returned struct is nil in a zero value
+ * and would serialize as null.
+ *
+ * Returns undefined when nil is a legitimate value (an optional or nullable
+ * declaration) or when the Go zero value already encodes correctly.
  */
-export function emptyResultLiteral(ref: TypeRef): string | undefined {
+export function emptyCompositeLiteral(
+  ref: TypeRef,
+  declarations: DeclarationScope,
+): string | undefined {
   const { core, nilable } = unwrapOptionality(ref);
   if (nilable) return undefined;
-  if (core.kind !== "array" && core.kind !== "map") return undefined;
-  return `${renderGoType(core)}{}`;
+  const resolved = resolveComposite(core, declarations);
+  if (!resolved) return undefined;
+  return `${renderGoType(resolved)}{}`;
 }
 
 /** A method's Go result type, or undefined when it is fire-and-forget. */

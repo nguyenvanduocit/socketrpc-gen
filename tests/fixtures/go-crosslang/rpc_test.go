@@ -73,7 +73,7 @@ func TestRpcErrorCarriesBrandAndUnwraps(t *testing.T) {
 
 	// A success value shaped like an error carries no brand, so decoding it as
 	// one must fail — the same soundness property the TypeScript side asserts.
-	if _, ok := decodeRpcError(Receipt{Message: "receipt", Code: "PAID"}); ok {
+	if _, ok := rpc_decodeRpcError(Receipt{Message: "receipt", Code: "PAID"}); ok {
 		t.Fatal("an unbranded payload must not decode as an RpcError")
 	}
 }
@@ -88,7 +88,7 @@ func TestEventQueuePreservesArrivalOrder(t *testing.T) {
 	seen := make([]string, 0, total)
 	done := make(chan struct{})
 
-	queue := newEventQueue(func(args []any) {
+	queue := rpc_newEventQueue(func(args []any) {
 		mu.Lock()
 		seen = append(seen, args[0].(string))
 		finished := len(seen) == total
@@ -124,13 +124,13 @@ func TestEventQueuePreservesArrivalOrder(t *testing.T) {
 func TestEventQueuesAreIndependentPerMethod(t *testing.T) {
 	release := make(chan struct{})
 	entered := make(chan struct{}, 2)
-	blocking := newEventQueue(func([]any) {
+	blocking := rpc_newEventQueue(func([]any) {
 		entered <- struct{}{}
 		<-release
 	})
 
 	progressed := make(chan struct{}, 1)
-	independent := newEventQueue(func([]any) { progressed <- struct{}{} })
+	independent := rpc_newEventQueue(func([]any) { progressed <- struct{}{} })
 
 	blocking.push(nil)
 	<-entered // the first call is inside its handler, holding its own queue

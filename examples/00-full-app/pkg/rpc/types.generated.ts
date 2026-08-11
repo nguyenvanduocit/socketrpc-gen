@@ -4,7 +4,7 @@
  * Auto-generated types for the RPC package
  *
  * To regenerate this file, run:
- * bunx socketrpc-gen /Volumes/Data/Projects/socket-rpc/examples/00-full-app/pkg/rpc/define.ts
+ * bunx socketrpc-gen ./define.ts
  */
 /** Function to unsubscribe from an event listener. Call this to clean up the listener. */
 export type UnsubscribeFunction = () => void;

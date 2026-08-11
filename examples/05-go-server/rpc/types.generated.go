@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 )
 
 const RPCErrorEvent = "__rpc:error__"
@@ -48,24 +49,36 @@ func IsRpcError(err error) bool {
 	return errors.As(err, &rpcErr) && rpcErr != nil && rpcErr.RPCError
 }
 
-func rpcErrorFromError(err error, origin string) *RpcError {
+func rpc_errorFromError(err error, origin string) *RpcError {
 	var rpcErr *RpcError
 	if errors.As(err, &rpcErr) && rpcErr != nil {
-		copy := *rpcErr
-		copy.RPCError = true
-		if copy.Origin == "" {
-			copy.Origin = origin
+		clone := *rpcErr
+		clone.RPCError = true
+		if clone.Origin == "" {
+			clone.Origin = origin
 		}
-		return &copy
+		return &clone
 	}
 	return NewRpcError(CodeInternalError, err.Error(), origin, nil)
 }
 
-func rpcErrorFromPanic(value any, origin string) *RpcError {
+func rpc_errorFromPanic(value any, origin string) *RpcError {
 	return NewRpcError(CodeInternalError, fmt.Sprint(value), origin, nil)
 }
 
-func decodeValue(value any, target any) error {
+// A payload the JSON encoder refuses would be dropped by Socket.IO's write
+// path without an error anywhere, leaving the peer to wait out its own
+// timeout. Checking before the value is handed over turns that silence into
+// an immediate answer that names the offending value — the common cause
+// being a required string enum left at its zero value.
+func rpc_ensureEncodable(value any, origin string) *RpcError {
+	if _, err := json.Marshal(value); err != nil {
+		return NewRpcError(CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), origin, nil)
+	}
+	return nil
+}
+
+func rpc_decodeValue(value any, target any) error {
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return err
@@ -76,9 +89,23 @@ func decodeValue(value any, target any) error {
 	return nil
 }
 
-func decodeRpcError(value any) (*RpcError, bool) {
+// decodeInto leaves target at its zero value when the payload does not fit,
+// so a failed call still yields the zero result a caller expects alongside
+// the error rather than a half-populated one.
+func rpc_decodeInto(value any, target any) error {
+	if err := rpc_decodeValue(value, target); err != nil {
+		pointer := reflect.ValueOf(target)
+		if pointer.Kind() == reflect.Pointer && !pointer.IsNil() {
+			pointer.Elem().Set(reflect.Zero(pointer.Elem().Type()))
+		}
+		return err
+	}
+	return nil
+}
+
+func rpc_decodeRpcError(value any) (*RpcError, bool) {
 	var rpcErr RpcError
-	if err := decodeValue(value, &rpcErr); err != nil {
+	if err := rpc_decodeValue(value, &rpcErr); err != nil {
 		return nil, false
 	}
 	if !rpcErr.RPCError {

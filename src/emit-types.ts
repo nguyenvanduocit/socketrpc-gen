@@ -1,6 +1,6 @@
 import * as path from "path";
 import { Project, VariableDeclarationKind } from "ts-morph";
-import type { ResolvedConfig } from "./types";
+import { regenerateCommand, type ResolvedConfig } from "./types";
 
 // Leading " * " with a trailing space — preserves the exact header layout used by
 // the pre-split generator so snapshot baselines remain byte-identical.
@@ -27,7 +27,7 @@ ${HEADER_BLANK_LINE}
  * Auto-generated types for the RPC package
  *
  * To regenerate this file, run:
- * bunx socketrpc-gen ${config.inputPath}
+ * ${regenerateCommand(config)}
  */
 
 `,

@@ -24,7 +24,22 @@ const RESERVED_EVENTS = new Set([
 
 const CLIENT_RESERVED_METHODS = new Set(["Dispose", "Connected", "Done", "Socket"]);
 
-const LOCAL_RESERVED_NAMES = new Set(["ctx", "rawArgs", "ack", "reply", "result", "err", "zero"]);
+/**
+ * The only parameter name the Go backend cannot accept.
+ *
+ * Every other identifier the emitter owns is out of a contract's reach by
+ * construction rather than by this list: handler bodies bind their arguments to
+ * positional locals and hold no contract identifier at all, and the emitter's
+ * package-level helpers, receivers and locals all carry the `rpc_` prefix, which
+ * `exportedIdentifier`/`localIdentifier` cannot produce because they split on
+ * every non-alphanumeric rune.
+ *
+ * `ctx` is listed because it is not a body local: it is the context parameter of
+ * the generated `ServerHandler` and `Client` signatures, where a second `ctx`
+ * would be a duplicate parameter. Keeping it readable there is worth one
+ * refusal, since that signature is the surface developers implement against.
+ */
+const RESERVED_PARAMETER_NAMES = new Set(["ctx"]);
 
 const RESERVED_DECLARATIONS = new Set([
   "RpcError",
@@ -197,10 +212,16 @@ function validateMethods(
         );
       }
       const paramName = localIdentifier(param.name);
-      if (!isGoIdentifier(paramName) || LOCAL_RESERVED_NAMES.has(paramName)) {
+      if (!isGoIdentifier(paramName)) {
         fail(
           `${paramPath}.name`,
-          `${JSON.stringify(param.name)} maps to the invalid or reserved Go identifier ${JSON.stringify(paramName)}`,
+          `${JSON.stringify(param.name)} maps to ${JSON.stringify(paramName)}, which is not a Go identifier`,
+        );
+      }
+      if (RESERVED_PARAMETER_NAMES.has(paramName)) {
+        fail(
+          `${paramPath}.name`,
+          `${JSON.stringify(param.name)} maps to ${JSON.stringify(paramName)}, which names the context parameter of the generated signature. Rename it — every other name is accepted.`,
         );
       }
       if (paramNames.has(paramName)) {

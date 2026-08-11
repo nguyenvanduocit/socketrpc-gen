@@ -167,6 +167,23 @@ async function connect() {
  * handled. This waits for that visibility; it never reorders anything, so the
  * list it returns is exactly the order the `note` queue produced.
  */
+/**
+ * Reads the Go binding's out-of-band error log until it holds an entry.
+ *
+ * The client emits `__rpc:error__` after its rejected handler settles, so the
+ * report races the reply to whatever call triggered it; polling waits for the
+ * report to land without imposing an order on anything.
+ */
+async function rpcErrorsWhenVisible(rpc: any, expected: number): Promise<unknown> {
+  let latest: unknown = [];
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    latest = await rpc.server.readRpcErrors();
+    if (Array.isArray(latest) && latest.length >= expected) return latest;
+    await Bun.sleep(10);
+  }
+  return latest;
+}
+
 async function notesWhenVisible(rpc: any, expected: number): Promise<unknown> {
   let latest: unknown = [];
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -356,6 +373,34 @@ describe("generated TypeScript client against the generated Go server", () => {
       expect(isRpcError(result)).toBe(false);
       expect(result).toBe("go saw: ts answered ping");
       expect(notified).toEqual(["pushed:ping"]);
+    },
+    T,
+  );
+
+  test(
+    "a failed client handler for a fire-and-forget call reaches the Go binding",
+    async () => {
+      const { rpc } = await connect();
+
+      // Nothing has been reported yet: the Go handler returns a nil slice here,
+      // which must still arrive as [] because the client's type says string[].
+      const before = await rpc.server.readRpcErrors();
+      expect(before).toEqual([]);
+
+      // Replaces the passing handler registered by connect(). A fire-and-forget
+      // call has no acknowledgement, so the only channel back is __rpc:error__.
+      rpc.handle.notify(async () => {
+        throw new Error("client notify exploded");
+      });
+
+      const result = await rpc.server.roundTrip("boom");
+      expect(isRpcError(result)).toBe(false);
+
+      const reported = (await rpcErrorsWhenVisible(rpc, 1)) as string[];
+      expect(reported).toHaveLength(1);
+      expect(reported[0]).toContain("client notify exploded");
+      // Origin survives the hop, so the observer learns which call failed.
+      expect(reported[0]).toContain("notify");
     },
     T,
   );

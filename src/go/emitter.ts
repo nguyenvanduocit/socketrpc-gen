@@ -1,5 +1,5 @@
 import type { ObjectField, RpcMethod, RpcParameter, RpcSchema } from "../schema";
-import { exportedIdentifier, goString, localIdentifier, padGoColumn } from "./names";
+import { exportedIdentifier, generated, goString, localIdentifier, padGoColumn } from "./names";
 import {
   GO_SERVER_FILENAME,
   GO_TYPES_FILENAME,
@@ -9,13 +9,15 @@ import {
   type ResolvedGoBackendOptions,
 } from "./options";
 import {
-  emptyResultLiteral,
+  declarationsByName,
+  emptyCompositeLiteral,
   goTypeName,
   inboundMethods,
   outboundMethods,
   renderGoType,
   resultGoType,
   unwrapOptionality,
+  type DeclarationScope,
 } from "./project";
 import { validateGoSchema } from "./validate";
 
@@ -58,6 +60,21 @@ function listenerField(method: RpcMethod): string {
   return `listen${methodName(method)}`;
 }
 
+/**
+ * The local a handler body binds one decoded argument to.
+ *
+ * Deliberately positional rather than the contract's parameter name: a handler
+ * body is the one generated scope that would otherwise hold both the emitter's
+ * locals and the contract's identifiers. Keeping the contract's names out of it
+ * entirely makes the body immune to every collision at once — reserved words,
+ * predeclared types, imported package names and the emitter's own helpers — and
+ * costs nothing, because the readable names still appear in the `ServerHandler`
+ * signature that developers actually implement against.
+ */
+function argumentLocal(index: number): string {
+  return `arg${index}`;
+}
+
 function methodParameters(method: RpcMethod): string {
   return method.params.map((param) => `${paramName(param)} ${renderGoType(param.type)}`).join(", ");
 }
@@ -67,18 +84,67 @@ function handlerParameters(method: RpcMethod): string {
   return params ? `ctx context.Context, ${params}` : "ctx context.Context";
 }
 
-function callArguments(method: RpcMethod): string {
-  const params = method.params.map(paramName).join(", ");
-  return params ? `b.ctx, ${params}` : "b.ctx";
+/** The arguments a handler body forwards, bound to positional locals. */
+function handlerCallArguments(method: RpcMethod): string {
+  return ["b.ctx", ...method.params.map((_, index) => argumentLocal(index))].join(", ");
 }
 
-function emitArguments(method: RpcMethod): string {
+/** The arguments a client method forwards, using the contract's own names. */
+function outboundArguments(method: RpcMethod): string {
   const params = method.params.map(paramName).join(", ");
   return params ? `, ${params}` : "";
 }
 
+/**
+ * Emits `MarshalJSON` for a struct that has at least one required slice or map
+ * field.
+ *
+ * A required `tags: string[]` is `[]string` in Go, whose zero value is nil, and
+ * `encoding/json` writes nil as `null` — so a handler returning a zero-valued
+ * struct would put `"tags": null` on the wire against a client whose generated
+ * type says `string[]`. Normalizing here rather than at the reply site covers
+ * every path a struct can travel: a bare result, an element of a returned slice,
+ * a map value, or a field of an enclosing struct, whose own `MarshalJSON` calls
+ * into this one.
+ *
+ * The conversion to a defined type strips the method set, so the inner
+ * `json.Marshal` does not re-enter this function. It copies the struct, so the
+ * normalization is never visible to the handler that returned the value.
+ *
+ * Optional and nullable fields are pointers and are left alone: for those the
+ * contract genuinely admits null. Nil slices nested *inside* another slice or
+ * map (`string[][]`, `Record<string, string[]>`) keep Go's nil, because
+ * replacing them would write through the shared backing array into the caller's
+ * own value.
+ */
+function writeStructMarshaller(
+  writer: GoWriter,
+  declaredName: string,
+  fields: readonly { name: string; empty: string }[],
+): void {
+  const plain = generated("plain");
+  const copy = generated("copy");
+
+  writer.line();
+  writer.line("// MarshalJSON normalizes the required slice and map fields whose Go zero");
+  writer.line("// value is nil, so a value that leaves them unset never reaches a client");
+  writer.line("// typed for an array or an object as JSON null.");
+  writer.block(`func (v ${declaredName}) MarshalJSON() ([]byte, error)`, () => {
+    writer.line(`type ${plain} ${declaredName}`);
+    writer.line(`${copy} := ${plain}(v)`);
+    for (const field of fields) {
+      writer.block(`if ${copy}.${field.name} == nil`, () => {
+        writer.line(`${copy}.${field.name} = ${field.empty}`);
+      });
+    }
+    writer.line(`return json.Marshal(${copy})`);
+  });
+}
+
 function writeTypesFile(schema: RpcSchema, packageName: string): string {
   const writer = new GoWriter();
+  const declarations: DeclarationScope = declarationsByName(schema);
+
   writer.line(GENERATED_HEADER.trimEnd());
   writer.line();
   writer.line(`package ${packageName}`);
@@ -87,6 +153,7 @@ function writeTypesFile(schema: RpcSchema, packageName: string): string {
   writer.line('\t"encoding/json"');
   writer.line('\t"errors"');
   writer.line('\t"fmt"');
+  writer.line('\t"reflect"');
   writer.line(")");
   writer.line();
   writer.line('const RPCErrorEvent = "__rpc:error__"');
@@ -112,8 +179,8 @@ function writeTypesFile(schema: RpcSchema, packageName: string): string {
   writer.line();
   writer.block("func (e *RpcError) Error() string", () => {
     writer.block("if e == nil", () => writer.line('return "<nil>"'));
-    writer.block("if e.Origin == \"\"", () => writer.line("return fmt.Sprintf(\"%s: %s\", e.Code, e.Message)"));
-    writer.line("return fmt.Sprintf(\"%s (%s): %s\", e.Code, e.Origin, e.Message)");
+    writer.block('if e.Origin == ""', () => writer.line('return fmt.Sprintf("%s: %s", e.Code, e.Message)'));
+    writer.line('return fmt.Sprintf("%s (%s): %s", e.Code, e.Origin, e.Message)');
   });
   writer.line();
   writer.block(
@@ -126,31 +193,61 @@ function writeTypesFile(schema: RpcSchema, packageName: string): string {
     writer.line("return errors.As(err, &rpcErr) && rpcErr != nil && rpcErr.RPCError");
   });
   writer.line();
-  writer.block("func rpcErrorFromError(err error, origin string) *RpcError", () => {
+  writer.block(`func ${generated("errorFromError")}(err error, origin string) *RpcError`, () => {
     writer.line("var rpcErr *RpcError");
     writer.block("if errors.As(err, &rpcErr) && rpcErr != nil", () => {
-      writer.line("copy := *rpcErr");
-      writer.line("copy.RPCError = true");
-      writer.block("if copy.Origin == \"\"", () => writer.line("copy.Origin = origin"));
-      writer.line("return &copy");
+      writer.line("clone := *rpcErr");
+      writer.line("clone.RPCError = true");
+      writer.block('if clone.Origin == ""', () => writer.line("clone.Origin = origin"));
+      writer.line("return &clone");
     });
     writer.line("return NewRpcError(CodeInternalError, err.Error(), origin, nil)");
   });
   writer.line();
-  writer.block("func rpcErrorFromPanic(value any, origin string) *RpcError", () => {
+  writer.block(`func ${generated("errorFromPanic")}(value any, origin string) *RpcError`, () => {
     writer.line("return NewRpcError(CodeInternalError, fmt.Sprint(value), origin, nil)");
   });
   writer.line();
-  writer.block("func decodeValue(value any, target any) error", () => {
+  writer.line("// A payload the JSON encoder refuses would be dropped by Socket.IO's write");
+  writer.line("// path without an error anywhere, leaving the peer to wait out its own");
+  writer.line("// timeout. Checking before the value is handed over turns that silence into");
+  writer.line("// an immediate answer that names the offending value — the common cause");
+  writer.line("// being a required string enum left at its zero value.");
+  writer.block(`func ${generated("ensureEncodable")}(value any, origin string) *RpcError`, () => {
+    writer.block("if _, err := json.Marshal(value); err != nil", () => {
+      writer.line(
+        `return NewRpcError(CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), origin, nil)`,
+      );
+    });
+    writer.line("return nil");
+  });
+  writer.line();
+  writer.block(`func ${generated("decodeValue")}(value any, target any) error`, () => {
     writer.line("encoded, err := json.Marshal(value)");
     writer.block("if err != nil", () => writer.line("return err"));
     writer.block("if err := json.Unmarshal(encoded, target); err != nil", () => writer.line("return err"));
     writer.line("return nil");
   });
   writer.line();
-  writer.block("func decodeRpcError(value any) (*RpcError, bool)", () => {
+  writer.line("// decodeInto leaves target at its zero value when the payload does not fit,");
+  writer.line("// so a failed call still yields the zero result a caller expects alongside");
+  writer.line("// the error rather than a half-populated one.");
+  writer.block(`func ${generated("decodeInto")}(value any, target any) error`, () => {
+    writer.block(`if err := ${generated("decodeValue")}(value, target); err != nil`, () => {
+      writer.line("pointer := reflect.ValueOf(target)");
+      writer.block("if pointer.Kind() == reflect.Pointer && !pointer.IsNil()", () => {
+        writer.line("pointer.Elem().Set(reflect.Zero(pointer.Elem().Type()))");
+      });
+      writer.line("return err");
+    });
+    writer.line("return nil");
+  });
+  writer.line();
+  writer.block(`func ${generated("decodeRpcError")}(value any) (*RpcError, bool)`, () => {
     writer.line("var rpcErr RpcError");
-    writer.block("if err := decodeValue(value, &rpcErr); err != nil", () => writer.line("return nil, false"));
+    writer.block(`if err := ${generated("decodeValue")}(value, &rpcErr); err != nil`, () =>
+      writer.line("return nil, false"),
+    );
     writer.block("if !rpcErr.RPCError", () => writer.line("return nil, false"));
     writer.line("return &rpcErr, true");
   });
@@ -214,6 +311,7 @@ function writeTypesFile(schema: RpcSchema, packageName: string): string {
       optional: unwrapOptionality(field.type).optional,
       name: fieldName(field),
       type: renderGoType(field.type),
+      empty: emptyCompositeLiteral(field.type, declarations),
     }));
     const nameWidth = Math.max(0, ...fields.map((field) => field.name.length));
     const typeWidth = Math.max(0, ...fields.map((field) => field.type.length));
@@ -229,6 +327,11 @@ function writeTypesFile(schema: RpcSchema, packageName: string): string {
         }
       });
     }
+
+    const nilable = fields.filter(
+      (field): field is typeof field & { empty: string } => field.empty !== undefined,
+    );
+    if (nilable.length > 0) writeStructMarshaller(writer, declaredName, nilable);
   }
 
   return writer.toString();
@@ -249,36 +352,46 @@ function writeHandlerInterface(writer: GoWriter, methods: readonly RpcMethod[]):
 }
 
 function writeSocketEmitState(writer: GoWriter): void {
-  writer.block("type socketEmitState struct", () => {
+  const state = generated("socketEmitState");
+  const states = generated("socketEmitStates");
+
+  writer.line("// Socket.IO carries the ack timeout as a flag mutated on the socket and");
+  writer.line("// consumed by the next Emit, so two concurrent calls on one connection can");
+  writer.line("// steal each other's timeout. Every emit the generated code performs is");
+  writer.line("// serialized through the per-socket lock below to keep that pairing intact.");
+  writer.block(`type ${state} struct`, () => {
     writer.line("mu   sync.Mutex");
     writer.line("refs int");
   });
   writer.line();
-  writer.line("var socketEmitStates = struct {");
+  writer.line(`var ${states} = struct {`);
   writer.line("\tsync.Mutex");
-  writer.line("\tstates map[*socket.Socket]*socketEmitState");
-  writer.line("}{states: make(map[*socket.Socket]*socketEmitState)}");
+  writer.line(`\tstates map[*socket.Socket]*${state}`);
+  writer.line(`}{states: make(map[*socket.Socket]*${state})}`);
   writer.line();
-  writer.block("func acquireSocketEmitState(rawSocket *socket.Socket) *socketEmitState", () => {
-    writer.line("socketEmitStates.Lock()");
-    writer.line("defer socketEmitStates.Unlock()");
-    writer.line("state := socketEmitStates.states[rawSocket]");
-    writer.block("if state == nil", () => {
-      writer.line("state = &socketEmitState{}");
-      writer.line("socketEmitStates.states[rawSocket] = state");
+  writer.block(`func ${generated("acquireSocketEmitState")}(rawSocket *socket.Socket) *${state}`, () => {
+    writer.line(`${states}.Lock()`);
+    writer.line(`defer ${states}.Unlock()`);
+    writer.line(`shared := ${states}.states[rawSocket]`);
+    writer.block("if shared == nil", () => {
+      writer.line(`shared = &${state}{}`);
+      writer.line(`${states}.states[rawSocket] = shared`);
     });
-    writer.line("state.refs++");
-    writer.line("return state");
+    writer.line("shared.refs++");
+    writer.line("return shared");
   });
   writer.line();
-  writer.block("func releaseSocketEmitState(rawSocket *socket.Socket, state *socketEmitState)", () => {
-    writer.block("if rawSocket == nil || state == nil", () => writer.line("return"));
-    writer.line("socketEmitStates.Lock()");
-    writer.line("defer socketEmitStates.Unlock()");
-    writer.block("if socketEmitStates.states[rawSocket] != state", () => writer.line("return"));
-    writer.line("state.refs--");
-    writer.block("if state.refs == 0", () => writer.line("delete(socketEmitStates.states, rawSocket)"));
-  });
+  writer.block(
+    `func ${generated("releaseSocketEmitState")}(rawSocket *socket.Socket, shared *${state})`,
+    () => {
+      writer.block("if rawSocket == nil || shared == nil", () => writer.line("return"));
+      writer.line(`${states}.Lock()`);
+      writer.line(`defer ${states}.Unlock()`);
+      writer.block(`if ${states}.states[rawSocket] != shared`, () => writer.line("return"));
+      writer.line("shared.refs--");
+      writer.block("if shared.refs == 0", () => writer.line(`delete(${states}.states, rawSocket)`));
+    },
+  );
 }
 
 /**
@@ -291,7 +404,9 @@ function writeSocketEmitState(writer: GoWriter): void {
  * connection: a blocked handler stalls only its own method's queue.
  */
 function writeEventQueue(writer: GoWriter): void {
-  writer.block("type eventQueue struct", () => {
+  const queue = generated("eventQueue");
+
+  writer.block(`type ${queue} struct`, () => {
     writer.line("run func([]any)");
     writer.line();
     writer.line("mu      sync.Mutex");
@@ -299,13 +414,13 @@ function writeEventQueue(writer: GoWriter): void {
     writer.line("running bool");
   });
   writer.line();
-  writer.block("func newEventQueue(run func([]any)) *eventQueue", () =>
-    writer.line("return &eventQueue{run: run}"),
+  writer.block(`func ${generated("newEventQueue")}(run func([]any)) *${queue}`, () =>
+    writer.line(`return &${queue}{run: run}`),
   );
   writer.line();
   writer.line("// push never blocks: the Socket.IO listener must stay free to deliver the");
   writer.line("// next packet even while this method's handler is still running.");
-  writer.block("func (q *eventQueue) push(args []any)", () => {
+  writer.block(`func (q *${queue}) push(args []any)`, () => {
     writer.line("q.mu.Lock()");
     writer.line("q.pending = append(q.pending, args)");
     writer.block("if q.running", () => {
@@ -317,7 +432,7 @@ function writeEventQueue(writer: GoWriter): void {
     writer.line("go q.drain()");
   });
   writer.line();
-  writer.block("func (q *eventQueue) drain()", () => {
+  writer.block(`func (q *${queue}) drain()`, () => {
     writer.block("for", () => {
       writer.line("q.mu.Lock()");
       writer.block("if len(q.pending) == 0", () => {
@@ -333,19 +448,133 @@ function writeEventQueue(writer: GoWriter): void {
   });
 }
 
+/**
+ * Emits the state one inbound event travels through.
+ *
+ * Everything a per-method handler would otherwise inline — the acknowledgement,
+ * the once-guard, the panic recovery, every message string and every reference
+ * to an imported package — lives here instead, which is what lets the generated
+ * handler bodies stay free of identifiers that could collide with a contract's
+ * parameter names.
+ */
+function writeInboundCall(writer: GoWriter): void {
+  const call = generated("inboundCall");
+
+  writer.block(`type ${call} struct`, () => {
+    writer.line("binding *ServerBinding");
+    writer.line("origin  string");
+    writer.line("ack     socket.Ack");
+    writer.line("args    []any");
+    writer.line("once    sync.Once");
+  });
+  writer.line();
+  writer.line("// beginInbound splits the acknowledgement callback off the raw argument list");
+  writer.line("// and checks arity. It returns nil when the event cannot be carried any");
+  writer.line("// further, having already reported why.");
+  writer.block(
+    `func ${generated("beginInbound")}(b *ServerBinding, origin string, want int, wantAck bool, rawArgs []any) *${call}`,
+    () => {
+      writer.line(`pending := &${call}{binding: b, origin: origin}`);
+      writer.line("args := rawArgs");
+      writer.block("if wantAck", () => {
+        writer.block("if len(args) == 0", () => {
+          writer.line(
+            'b.emitError(NewRpcError(CodeInvalidArgument, "missing acknowledgement callback", origin, nil))',
+          );
+          writer.line("return nil");
+        });
+        writer.line("callback, isAck := args[len(args)-1].(socket.Ack)");
+        writer.block("if !isAck", () => {
+          writer.line(
+            'b.emitError(NewRpcError(CodeInvalidArgument, "missing acknowledgement callback", origin, nil))',
+          );
+          writer.line("return nil");
+        });
+        writer.line("pending.ack = callback");
+        writer.line("args = args[:len(args)-1]");
+      });
+      writer.block("if len(args) != want", () => {
+        writer.line('pending.fail(CodeInvalidArgument, fmt.Sprintf("expected %d arguments, got %d", want, len(args)))');
+        writer.line("return nil");
+      });
+      writer.line("pending.args = args");
+      writer.line("return pending");
+    },
+  );
+  writer.line();
+  writer.line("// reply answers exactly once. A fire-and-forget call has no acknowledgement");
+  writer.line("// slot, so its failures travel on the out-of-band error event instead.");
+  writer.block(`func (c *${call}) reply(value any)`, () => {
+    writer.block("if c.ack == nil", () => {
+      writer.block("if failure, ok := value.(*RpcError); ok", () => {
+        writer.line("c.binding.emitError(failure)");
+      });
+      writer.line("return");
+    });
+    writer.block("c.once.Do(func()", () => writer.line("c.ack([]any{value}, nil)"), "})");
+  });
+  writer.line();
+  writer.block(`func (c *${call}) fail(code RpcErrorCode, message string)`, () => {
+    writer.line("c.reply(NewRpcError(code, message, c.origin, nil))");
+  });
+  writer.line();
+  writer.line("// recoverPanic is deferred directly by the handler, which is what lets the");
+  writer.line("// builtin recover see a panic unwinding through it.");
+  writer.block(`func (c *${call}) recoverPanic()`, () => {
+    writer.block("if value := recover(); value != nil", () => {
+      writer.line(`c.reply(${generated("errorFromPanic")}(value, c.origin))`);
+    });
+  });
+  writer.line();
+  writer.block(`func (c *${call}) ready() bool`, () => {
+    writer.block("if c.binding.Disposed()", () => {
+      writer.line('c.fail(CodeDisposed, "server binding is disposed")');
+      writer.line("return false");
+    });
+    writer.line("return true");
+  });
+  writer.line();
+  writer.block(`func (c *${call}) decode(index int, target any, name string) bool`, () => {
+    writer.block(`if err := ${generated("decodeValue")}(c.args[index], target); err != nil`, () => {
+      writer.line('c.fail(CodeInvalidArgument, fmt.Sprintf("invalid argument %s: %v", name, err))');
+      writer.line("return false");
+    });
+    writer.line("return true");
+  });
+  writer.line();
+  writer.block(`func (c *${call}) finish(value any, err error)`, () => {
+    writer.block("if err != nil", () => {
+      writer.line(`c.reply(${generated("errorFromError")}(err, c.origin))`);
+      writer.line("return");
+    });
+    writer.block(`if failure := ${generated("ensureEncodable")}(value, c.origin); failure != nil`, () => {
+      writer.line("c.reply(failure)");
+      writer.line("return");
+    });
+    writer.line("c.reply(value)");
+  });
+  writer.line();
+  writer.block(`func (c *${call}) finishVoid(err error)`, () => {
+    writer.block("if err != nil", () => writer.line(`c.reply(${generated("errorFromError")}(err, c.origin))`));
+  });
+}
+
 function writeServerBinding(writer: GoWriter, methods: readonly RpcMethod[]): void {
+  const emitState = generated("socketEmitState");
+
   writer.block("type ServerBinding struct", () => {
     writer.line("socket    *socket.Socket");
-    writer.line("emitState *socketEmitState");
+    writer.line(`emitState *${emitState}`);
     writer.line("handler   ServerHandler");
     writer.line("ctx       context.Context");
     writer.line("cancel    context.CancelFunc");
     writer.line();
-    writer.line("mu          sync.RWMutex");
-    writer.line("disposed    bool");
-    writer.line("disposeOnce sync.Once");
+    writer.line("mu              sync.RWMutex");
+    writer.line("disposed        bool");
+    writer.line("rpcErrorHandler func(*RpcError)");
+    writer.line("disposeOnce     sync.Once");
     writer.line();
-    const listenerNames = [...methods.map(listenerField), "listenDisconnect"];
+    const listenerNames = [...methods.map(listenerField), "listenRpcError", "listenDisconnect"];
     const listenerWidth = Math.max(...listenerNames.map((name) => name.length));
     for (const name of listenerNames) writer.line(`${padGoColumn(name, listenerWidth)}func(...any)`);
   });
@@ -353,12 +582,20 @@ function writeServerBinding(writer: GoWriter, methods: readonly RpcMethod[]): vo
   writer.block(
     "func BindServer(rawSocket *socket.Socket, handler ServerHandler) (*ServerBinding, error)",
     () => {
-      writer.block("if rawSocket == nil", () => writer.line('return nil, NewRpcError(CodeInvalidArgument, "socket must not be nil", "BindServer", nil)'));
-      writer.block("if handler == nil", () => writer.line('return nil, NewRpcError(CodeInvalidArgument, "handler must not be nil", "BindServer", nil)'));
+      writer.block("if rawSocket == nil", () =>
+        writer.line(
+          'return nil, NewRpcError(CodeInvalidArgument, "socket must not be nil", "BindServer", nil)',
+        ),
+      );
+      writer.block("if handler == nil", () =>
+        writer.line(
+          'return nil, NewRpcError(CodeInvalidArgument, "handler must not be nil", "BindServer", nil)',
+        ),
+      );
       writer.line("ctx, cancel := context.WithCancel(context.Background())");
       writer.line("binding := &ServerBinding{");
       writer.line("\tsocket:    rawSocket,");
-      writer.line("\temitState: acquireSocketEmitState(rawSocket),");
+      writer.line(`\temitState: ${generated("acquireSocketEmitState")}(rawSocket),`);
       writer.line("\thandler:   handler,");
       writer.line("\tctx:       ctx,");
       writer.line("\tcancel:    cancel,");
@@ -367,16 +604,26 @@ function writeServerBinding(writer: GoWriter, methods: readonly RpcMethod[]): vo
       for (const method of methods) {
         const field = listenerField(method);
         const queue = `queue${methodName(method)}`;
-        writer.line(`${queue} := newEventQueue(binding.handle${methodName(method)})`);
+        writer.line(`${queue} := ${generated("newEventQueue")}(binding.handle${methodName(method)})`);
         writer.block(`binding.${field} = func(rawArgs ...any)`, () => {
-          writer.line("args := append([]any(nil), rawArgs...)");
-          writer.line(`${queue}.push(args)`);
+          writer.line(`${queue}.push(append([]any(nil), rawArgs...))`);
         });
         writer.block(`if err := rawSocket.On(${goString(method.name)}, binding.${field}); err != nil`, () => {
           writer.line("binding.Dispose()");
           writer.line(`return nil, fmt.Errorf("register ${method.name}: %w", err)`);
         });
       }
+      writer.line();
+      writer.line("// The peer reports a failed fire-and-forget handler out of band, because");
+      writer.line("// such a call has no acknowledgement to answer through.");
+      writer.line(`queueRpcError := ${generated("newEventQueue")}(binding.handleRpcError)`);
+      writer.block("binding.listenRpcError = func(rawArgs ...any)", () => {
+        writer.line("queueRpcError.push(append([]any(nil), rawArgs...))");
+      });
+      writer.block("if err := rawSocket.On(RPCErrorEvent, binding.listenRpcError); err != nil", () => {
+        writer.line("binding.Dispose()");
+        writer.line('return nil, fmt.Errorf("register %s: %w", RPCErrorEvent, err)');
+      });
       writer.block("binding.listenDisconnect = func(...any)", () => writer.line("binding.Dispose()"));
       writer.block('if err := rawSocket.On("disconnect", binding.listenDisconnect); err != nil', () => {
         writer.line("binding.Dispose()");
@@ -392,6 +639,34 @@ function writeServerBinding(writer: GoWriter, methods: readonly RpcMethod[]): vo
     writer.line("b.mu.RLock()");
     writer.line("defer b.mu.RUnlock()");
     writer.line("return b.disposed");
+  });
+  writer.line();
+  writer.line("// OnRpcError observes the failures the peer reports out of band: a client");
+  writer.line("// whose handler for a fire-and-forget server-to-client call fails has no");
+  writer.line("// acknowledgement to answer through, so it emits the error instead. Without");
+  writer.line("// an observer here that report is dropped and this side never learns of it.");
+  writer.block("func (b *ServerBinding) OnRpcError(handler func(*RpcError))", () => {
+    writer.block("if b == nil", () => writer.line("return"));
+    writer.line("b.mu.Lock()");
+    writer.line("defer b.mu.Unlock()");
+    writer.line("b.rpcErrorHandler = handler");
+  });
+  writer.line();
+  writer.block("func (b *ServerBinding) handleRpcError(rawArgs []any)", () => {
+    writer.line("b.mu.RLock()");
+    writer.line("observer := b.rpcErrorHandler");
+    writer.line("disposed := b.disposed");
+    writer.line("b.mu.RUnlock()");
+    writer.block("if observer == nil || disposed || len(rawArgs) == 0", () => writer.line("return"));
+    writer.line(`failure, ok := ${generated("decodeRpcError")}(rawArgs[0])`);
+    writer.block("if !ok", () => {
+      writer.line(
+        "failure = NewRpcError(CodeInternalError, fmt.Sprint(rawArgs[0]), RPCErrorEvent, nil)",
+      );
+    });
+    writer.line("// An observer that panics must not take the queue goroutine down with it.");
+    writer.block("defer func()", () => writer.line("_ = recover()"), "}()");
+    writer.line("observer(failure)");
   });
   writer.line();
   writer.block("func (b *ServerBinding) Dispose()", () => {
@@ -411,136 +686,91 @@ function writeServerBinding(writer: GoWriter, methods: readonly RpcMethod[]): vo
           writer.line(`b.socket.RemoveListener(${goString(method.name)}, b.${field})`);
         });
       }
+      writer.block("if b.socket != nil && b.listenRpcError != nil", () => {
+        writer.line("b.socket.RemoveListener(RPCErrorEvent, b.listenRpcError)");
+      });
       writer.block("if b.socket != nil && b.listenDisconnect != nil", () => {
         writer.line('b.socket.RemoveListener("disconnect", b.listenDisconnect)');
       });
-      writer.line("releaseSocketEmitState(b.socket, b.emitState)");
+      writer.line(`${generated("releaseSocketEmitState")}(b.socket, b.emitState)`);
     }, "})");
   });
   writer.line();
   writer.block("func (b *ServerBinding) emitError(err *RpcError)", () => {
-    writer.block("if err == nil || b.socket == nil || b.emitState == nil || b.Disposed()", () => writer.line("return"));
+    writer.block("if err == nil || b.socket == nil || b.emitState == nil || b.Disposed()", () =>
+      writer.line("return"),
+    );
+    writer.line("// Data is caller-supplied and may not encode; the report must survive it.");
+    writer.block(`if ${generated("ensureEncodable")}(err, err.Origin) != nil`, () => {
+      writer.line("err = NewRpcError(err.Code, err.Message, err.Origin, nil)");
+    });
     writer.line("b.emitState.mu.Lock()");
     writer.line("defer b.emitState.mu.Unlock()");
     writer.block("if !b.socket.Connected() || b.Disposed()", () => writer.line("return"));
     writer.line("_ = b.socket.Emit(RPCErrorEvent, err)");
   });
-  writer.line();
-  writer.block(
-    "func inboundAck(rawArgs []any, want int, origin string) (socket.Ack, []any, *RpcError)",
-    () => {
-      writer.block("if len(rawArgs) == 0", () => {
-        writer.line('return nil, nil, NewRpcError(CodeInvalidArgument, "missing acknowledgement callback", origin, nil)');
-      });
-      writer.line("ack, ok := rawArgs[len(rawArgs)-1].(socket.Ack)");
-      writer.block("if !ok", () => {
-        writer.line('return nil, nil, NewRpcError(CodeInvalidArgument, "missing acknowledgement callback", origin, nil)');
-      });
-      writer.line("payload := rawArgs[:len(rawArgs)-1]");
-      writer.block("if len(payload) != want", () => {
-        writer.line('message := fmt.Sprintf("expected %d arguments, got %d", want, len(payload))');
-        writer.line("return ack, nil, NewRpcError(CodeInvalidArgument, message, origin, nil)");
-      });
-      writer.line("return ack, payload, nil");
-    },
-  );
 }
 
-function writeDecodeParams(
-  writer: GoWriter,
-  method: RpcMethod,
-  onError: (messageExpression: string) => void,
-): void {
-  method.params.forEach((param, index) => {
-    const name = paramName(param);
-    writer.line(`var ${name} ${renderGoType(param.type)}`);
-    writer.block(`if err := decodeValue(rawArgs[${index}], &${name}); err != nil`, () => {
-      const message = `fmt.Sprintf("invalid argument ${param.name}: %v", err)`;
-      onError(message);
-    });
-  });
-}
-
-function writeInboundHandlers(writer: GoWriter, methods: readonly RpcMethod[]): void {
+function writeInboundHandlers(writer: GoWriter, methods: readonly RpcMethod[], declarations: DeclarationScope): void {
   for (const method of methods) {
     const origin = goString(method.name);
+    const resultType = resultGoType(method);
+    const wantAck = resultType ? "true" : "false";
+
     writer.line();
     writer.block(`func (b *ServerBinding) handle${methodName(method)}(rawArgs []any)`, () => {
-      if (resultGoType(method)) {
-        writer.line(`ack, rawArgs, protocolErr := inboundAck(rawArgs, ${method.params.length}, ${origin})`);
-        writer.block("if ack == nil", () => {
-          writer.line("b.emitError(protocolErr)");
-          writer.line("return");
-        });
-        writer.line("var ackOnce sync.Once");
-        writer.block("reply := func(value any)", () => {
-          writer.block("ackOnce.Do(func()", () => writer.line("ack([]any{value}, nil)"), "})");
-        });
-        writer.block("defer func()", () => {
-          writer.block("if value := recover(); value != nil", () => {
-            writer.line(`reply(rpcErrorFromPanic(value, ${origin}))`);
-          });
-        }, "}()");
-        writer.block("if protocolErr != nil", () => {
-          writer.line("reply(protocolErr)");
-          writer.line("return");
-        });
-        writer.block("if b.Disposed()", () => {
-          writer.line(`reply(NewRpcError(CodeDisposed, "server binding is disposed", ${origin}, nil))`);
-          writer.line("return");
-        });
-        writeDecodeParams(writer, method, (message) => {
-          writer.line(`reply(NewRpcError(CodeInvalidArgument, ${message}, ${origin}, nil))`);
-          writer.line("return");
-        });
-        writer.line(`result, err := b.handler.${methodName(method)}(${callArguments(method)})`);
-        writer.block("if err != nil", () => {
-          writer.line(`reply(rpcErrorFromError(err, ${origin}))`);
-          writer.line("return");
-        });
-        const empty = emptyResultLiteral(method.returnType);
-        if (empty) {
-          // The contract promises a value here, so a nil slice or map must not
-          // reach the client as JSON null.
-          writer.block("if result == nil", () => writer.line(`result = ${empty}`));
-        }
-        writer.line("reply(result)");
+      writer.line(
+        `call := ${generated("beginInbound")}(b, ${origin}, ${method.params.length}, ${wantAck}, rawArgs)`,
+      );
+      writer.block("if call == nil", () => writer.line("return"));
+      writer.line("defer call.recoverPanic()");
+      writer.block("if !call.ready()", () => writer.line("return"));
+
+      method.params.forEach((param, index) => {
+        const local = argumentLocal(index);
+        writer.line(`var ${local} ${renderGoType(param.type)}`);
+        writer.block(`if !call.decode(${index}, &${local}, ${goString(param.name)})`, () =>
+          writer.line("return"),
+        );
+      });
+
+      if (!resultType) {
+        writer.line(`call.finishVoid(b.handler.${methodName(method)}(${handlerCallArguments(method)}))`);
         return;
       }
 
-      writer.block("defer func()", () => {
-        writer.block("if value := recover(); value != nil", () => {
-          writer.line(`b.emitError(rpcErrorFromPanic(value, ${origin}))`);
-        });
-      }, "}()");
-      writer.block(`if len(rawArgs) != ${method.params.length}`, () => {
-        writer.line(`message := fmt.Sprintf("expected %d arguments, got %d", ${method.params.length}, len(rawArgs))`);
-        writer.line(`b.emitError(NewRpcError(CodeInvalidArgument, message, ${origin}, nil))`);
-        writer.line("return");
-      });
-      writer.block("if b.Disposed()", () => writer.line("return"));
-      writeDecodeParams(writer, method, (message) => {
-        writer.line(`b.emitError(NewRpcError(CodeInvalidArgument, ${message}, ${origin}, nil))`);
-        writer.line("return");
-      });
-      writer.block(`if err := b.handler.${methodName(method)}(${callArguments(method)}); err != nil`, () => {
-        writer.line(`b.emitError(rpcErrorFromError(err, ${origin}))`);
-      });
+      const empty = emptyCompositeLiteral(method.returnType, declarations);
+      if (!empty) {
+        writer.line(`call.finish(b.handler.${methodName(method)}(${handlerCallArguments(method)}))`);
+        return;
+      }
+
+      // The contract promises a slice or a map here, so the handler's nil must
+      // not reach a client typed for an array or an object as JSON null.
+      writer.line(`result, err := b.handler.${methodName(method)}(${handlerCallArguments(method)})`);
+      writer.block("if err == nil && result == nil", () => writer.line(`result = ${empty}`));
+      writer.line("call.finish(result, err)");
     });
   }
 }
 
 function writeClient(writer: GoWriter, methods: readonly RpcMethod[], defaultTimeoutMs: number): void {
+  const emitState = generated("socketEmitState");
+  const ackResult = generated("ackResult");
+  const receiver = generated("c");
+  const result = generated("result");
+  const failure = generated("err");
+
   writer.block("type ClientOptions struct", () => writer.line("Timeout time.Duration"));
   writer.line();
-  writer.block("type clientAckResult struct", () => {
+  writer.block(`type ${ackResult} struct`, () => {
     writer.line("args []any");
     writer.line("err  error");
   });
   writer.line();
   writer.block("type Client struct", () => {
     writer.line("socket    *socket.Socket");
-    writer.line("emitState *socketEmitState");
+    writer.line(`emitState *${emitState}`);
     writer.line("timeout   time.Duration");
     writer.line();
     writer.line("mu sync.RWMutex");
@@ -555,15 +785,19 @@ function writeClient(writer: GoWriter, methods: readonly RpcMethod[], defaultTim
   });
   writer.line();
   writer.block("func NewClient(rawSocket *socket.Socket, options *ClientOptions) (*Client, error)", () => {
-    writer.block("if rawSocket == nil", () => writer.line('return nil, NewRpcError(CodeInvalidArgument, "socket must not be nil", "NewClient", nil)'));
+    writer.block("if rawSocket == nil", () =>
+      writer.line('return nil, NewRpcError(CodeInvalidArgument, "socket must not be nil", "NewClient", nil)'),
+    );
     writer.block("if options != nil && options.Timeout < 0", () => {
-      writer.line('return nil, NewRpcError(CodeInvalidArgument, "timeout must not be negative", "NewClient", nil)');
+      writer.line(
+        'return nil, NewRpcError(CodeInvalidArgument, "timeout must not be negative", "NewClient", nil)',
+      );
     });
     writer.line(`timeout := ${defaultTimeoutMs} * time.Millisecond`);
     writer.block("if options != nil && options.Timeout > 0", () => writer.line("timeout = options.Timeout"));
     writer.line("client := &Client{");
     writer.line("\tsocket:    rawSocket,");
-    writer.line("\temitState: acquireSocketEmitState(rawSocket),");
+    writer.line(`\temitState: ${generated("acquireSocketEmitState")}(rawSocket),`);
     writer.line("\ttimeout:   timeout,");
     writer.line("\tdone:      make(chan struct{}),");
     writer.line("}");
@@ -573,7 +807,7 @@ function writeClient(writer: GoWriter, methods: readonly RpcMethod[], defaultTim
       writer.line('return nil, fmt.Errorf("register disconnect: %w", err)');
     });
     writer.block("if !rawSocket.Connected()", () => {
-      writer.line("client.markDisconnected()")
+      writer.line("client.markDisconnected()");
       writer.line('rawSocket.RemoveListener("disconnect", client.listenDisconnect)');
       writer.line('return nil, NewRpcError(CodeDisconnected, "socket is disconnected", "NewClient", nil)');
     });
@@ -606,15 +840,19 @@ function writeClient(writer: GoWriter, methods: readonly RpcMethod[], defaultTim
   writer.line();
   writer.block("func (c *Client) releaseEmitState()", () => {
     writer.block("c.releaseOnce.Do(func()", () => {
-      writer.line("releaseSocketEmitState(c.socket, c.emitState)");
+      writer.line(`${generated("releaseSocketEmitState")}(c.socket, c.emitState)`);
     }, "})");
   });
   writer.line();
   writer.block("func (c *Client) stateError(origin string) *RpcError", () => {
     writer.line("c.mu.RLock()");
     writer.line("defer c.mu.RUnlock()");
-    writer.block("if c.disposed", () => writer.line('return NewRpcError(CodeDisposed, "client is disposed", origin, nil)'));
-    writer.block("if c.disconnected || c.socket == nil || !c.socket.Connected()", () => writer.line('return NewRpcError(CodeDisconnected, "socket is disconnected", origin, nil)'));
+    writer.block("if c.disposed", () =>
+      writer.line('return NewRpcError(CodeDisposed, "client is disposed", origin, nil)'),
+    );
+    writer.block("if c.disconnected || c.socket == nil || !c.socket.Connected()", () =>
+      writer.line('return NewRpcError(CodeDisconnected, "socket is disconnected", origin, nil)'),
+    );
     writer.line("return nil");
   });
   writer.line();
@@ -636,91 +874,135 @@ function writeClient(writer: GoWriter, methods: readonly RpcMethod[], defaultTim
     writer.line("c.releaseEmitState()");
   });
   writer.line();
-  writer.block("func rpcErrorFromContext(ctx context.Context, origin string) *RpcError", () => {
-    writer.block("if ctx == nil", () => writer.line('return NewRpcError(CodeInvalidArgument, "context must not be nil", origin, nil)'));
+  writer.block(`func ${generated("errorFromContext")}(ctx context.Context, origin string) *RpcError`, () => {
+    writer.block("if ctx == nil", () =>
+      writer.line('return NewRpcError(CodeInvalidArgument, "context must not be nil", origin, nil)'),
+    );
     writer.block("if err := ctx.Err(); err != nil", () => {
-      writer.block("if errors.Is(err, context.DeadlineExceeded)", () => writer.line('return NewRpcError(CodeTimeout, err.Error(), origin, nil)'));
+      writer.block("if errors.Is(err, context.DeadlineExceeded)", () =>
+        writer.line("return NewRpcError(CodeTimeout, err.Error(), origin, nil)"),
+      );
       writer.line("return NewRpcError(CodeAborted, err.Error(), origin, nil)");
     });
     writer.line("return nil");
   });
   writer.line();
-  writer.block("func rpcErrorFromTransport(err error, origin string) *RpcError", () => {
+  writer.block(`func ${generated("errorFromTransport")}(err error, origin string) *RpcError`, () => {
     writer.block("if err == nil", () => writer.line("return nil"));
-    writer.block('if err.Error() == "operation has timed out"', () => writer.line("return NewRpcError(CodeTimeout, err.Error(), origin, nil)"));
-    writer.block('if err.Error() == "socket has been disconnected"', () => writer.line("return NewRpcError(CodeDisconnected, err.Error(), origin, nil)"));
+    writer.block('if err.Error() == "operation has timed out"', () =>
+      writer.line("return NewRpcError(CodeTimeout, err.Error(), origin, nil)"),
+    );
+    writer.block('if err.Error() == "socket has been disconnected"', () =>
+      writer.line("return NewRpcError(CodeDisconnected, err.Error(), origin, nil)"),
+    );
     writer.line("return NewRpcError(CodeInternalError, err.Error(), origin, nil)");
   });
-
-  for (const method of methods) writeClientMethod(writer, method);
-}
-
-function writeClientMethod(writer: GoWriter, method: RpcMethod): void {
-  const name = methodName(method);
-  const origin = goString(method.name);
-  const params = methodParameters(method);
-  const signatureParams = params ? `ctx context.Context, ${params}` : "ctx context.Context";
-  const resultType = resultGoType(method);
   writer.line();
-
-  if (!resultType) {
-    writer.block(`func (c *Client) ${name}(${signatureParams}) error`, () => {
-      writer.block(`if err := rpcErrorFromContext(ctx, ${origin}); err != nil`, () => writer.line("return err"));
+  writer.line("// emit performs one fire-and-forget call.");
+  writer.block(
+    `func ${generated("emit")}(c *Client, ctx context.Context, origin string, args ...any) error`,
+    () => {
+      writer.block(`if err := ${generated("errorFromContext")}(ctx, origin); err != nil`, () =>
+        writer.line("return err"),
+      );
+      writer.block(`if err := ${generated("ensureEncodable")}(args, origin); err != nil`, () =>
+        writer.line("return err"),
+      );
       writer.line("c.emitState.mu.Lock()");
       writer.line("defer c.emitState.mu.Unlock()");
-      writer.block(`if err := c.stateError(${origin}); err != nil`, () => writer.line("return err"));
-      writer.block(`if err := c.socket.Emit(${origin}${emitArguments(method)}); err != nil`, () => {
-        writer.line(`return rpcErrorFromTransport(err, ${origin})`);
+      writer.block("if err := c.stateError(origin); err != nil", () => writer.line("return err"));
+      writer.block("if err := c.socket.Emit(origin, args...); err != nil", () => {
+        writer.line(`return ${generated("errorFromTransport")}(err, origin)`);
       });
       writer.line("return nil");
-    });
-    return;
-  }
-
-  writer.block(`func (c *Client) ${name}(${signatureParams}) (${resultType}, error)`, () => {
-    writer.line(`var zero ${resultType}`);
-    writer.block(`if err := rpcErrorFromContext(ctx, ${origin}); err != nil`, () => writer.line("return zero, err"));
-    writer.line("response := make(chan clientAckResult, 1)");
-    writer.line("c.emitState.mu.Lock()");
-    writer.block(`if err := c.stateError(${origin}); err != nil`, () => {
+    },
+  );
+  writer.line();
+  writer.line("// request performs one acknowledged call and decodes the answer into target.");
+  writer.block(
+    `func ${generated("request")}(c *Client, ctx context.Context, origin string, target any, args ...any) error`,
+    () => {
+      writer.block(`if err := ${generated("errorFromContext")}(ctx, origin); err != nil`, () =>
+        writer.line("return err"),
+      );
+      writer.block(`if err := ${generated("ensureEncodable")}(args, origin); err != nil`, () =>
+        writer.line("return err"),
+      );
+      writer.line(`response := make(chan ${ackResult}, 1)`);
+      writer.line("c.emitState.mu.Lock()");
+      writer.block("if err := c.stateError(origin); err != nil", () => {
+        writer.line("c.emitState.mu.Unlock()");
+        writer.line("return err");
+      });
+      writer.line("c.socket.Timeout(c.timeout).EmitWithAck(origin, args...)(func(values []any, err error) {");
+      writer.line("\tselect {");
+      writer.line(`\tcase response <- ${ackResult}{args: values, err: err}:`);
+      writer.line("\tdefault:");
+      writer.line("\t}");
+      writer.line("})");
       writer.line("c.emitState.mu.Unlock()");
-      writer.line("return zero, err");
-    });
-    writer.line(`c.socket.Timeout(c.timeout).EmitWithAck(${origin}${emitArguments(method)})(func(args []any, err error) {`);
-    writer.line("\tselect {");
-    writer.line("\tcase response <- clientAckResult{args: args, err: err}:");
-    writer.line("\tdefault:");
-    writer.line("\t}");
-    writer.line("})");
-    writer.line("c.emitState.mu.Unlock()");
+      writer.line();
+      writer.line(`var acknowledged ${ackResult}`);
+      writer.line("select {");
+      writer.line("case <-ctx.Done():");
+      writer.line(`\treturn ${generated("errorFromContext")}(ctx, origin)`);
+      writer.line("case <-c.done:");
+      writer.line("\treturn c.stateError(origin)");
+      writer.line("case acknowledged = <-response:");
+      writer.line("}");
+      writer.block("if acknowledged.err != nil", () => {
+        writer.line(`return ${generated("errorFromTransport")}(acknowledged.err, origin)`);
+      });
+      writer.block("if len(acknowledged.args) != 1", () => {
+        writer.line(
+          'message := fmt.Sprintf("expected one acknowledgement value, got %d", len(acknowledged.args))',
+        );
+        writer.line("return NewRpcError(CodeInvalidArgument, message, origin, nil)");
+      });
+      writer.block(`if failure, ok := ${generated("decodeRpcError")}(acknowledged.args[0]); ok`, () =>
+        writer.line("return failure"),
+      );
+      writer.block(`if err := ${generated("decodeInto")}(acknowledged.args[0], target); err != nil`, () => {
+        writer.line('message := fmt.Sprintf("invalid acknowledgement payload: %v", err)');
+        writer.line("return NewRpcError(CodeInvalidArgument, message, origin, nil)");
+      });
+      writer.line("return nil");
+    },
+  );
+
+  for (const method of methods) {
+    const name = methodName(method);
+    const origin = goString(method.name);
+    const params = methodParameters(method);
+    const signatureParams = params ? `ctx context.Context, ${params}` : "ctx context.Context";
+    const resultType = resultGoType(method);
     writer.line();
-    writer.line("var acknowledged clientAckResult");
-    writer.line("select {");
-    writer.line("case <-ctx.Done():");
-    writer.line(`\treturn zero, rpcErrorFromContext(ctx, ${origin})`);
-    writer.line("case <-c.done:");
-    writer.line(`\treturn zero, c.stateError(${origin})`);
-    writer.line("case acknowledged = <-response:");
-    writer.line("}");
-    writer.block("if acknowledged.err != nil", () => {
-      writer.line(`return zero, rpcErrorFromTransport(acknowledged.err, ${origin})`);
-    });
-    writer.block("if len(acknowledged.args) != 1", () => {
-      writer.line('message := fmt.Sprintf("expected one acknowledgement value, got %d", len(acknowledged.args))');
-      writer.line(`return zero, NewRpcError(CodeInvalidArgument, message, ${origin}, nil)`);
-    });
-    writer.block("if rpcErr, ok := decodeRpcError(acknowledged.args[0]); ok", () => writer.line("return zero, rpcErr"));
-    writer.line(`var result ${resultType}`);
-    writer.block("if err := decodeValue(acknowledged.args[0], &result); err != nil", () => {
-      writer.line('message := fmt.Sprintf("invalid acknowledgement payload: %v", err)');
-      writer.line(`return zero, NewRpcError(CodeInvalidArgument, message, ${origin}, nil)`);
-    });
-    writer.line("return result, nil");
-  });
+
+    if (!resultType) {
+      writer.block(`func (${receiver} *Client) ${name}(${signatureParams}) error`, () => {
+        writer.line(`return ${generated("emit")}(${receiver}, ctx, ${origin}${outboundArguments(method)})`);
+      });
+      continue;
+    }
+
+    // Named results, so the body never has to spell a type: a contract is free
+    // to call a parameter `bool` or `string` without shadowing one here.
+    writer.block(
+      `func (${receiver} *Client) ${name}(${signatureParams}) (${result} ${resultType}, ${failure} error)`,
+      () => {
+        writer.line(
+          `${failure} = ${generated("request")}(${receiver}, ctx, ${origin}, &${result}${outboundArguments(method)})`,
+        );
+        writer.line("return");
+      },
+    );
+  }
 }
 
 function writeServerFile(schema: RpcSchema, options: ResolvedGoBackendOptions): string {
   const writer = new GoWriter();
+  const declarations = declarationsByName(schema);
+
   writer.line(GENERATED_HEADER.trimEnd());
   writer.line();
   writer.line(`package ${options.packageName}`);
@@ -743,7 +1025,9 @@ function writeServerFile(schema: RpcSchema, options: ResolvedGoBackendOptions): 
   writeHandlerInterface(writer, inbound);
   writer.line();
   writeServerBinding(writer, inbound);
-  writeInboundHandlers(writer, inbound);
+  writer.line();
+  writeInboundCall(writer);
+  writeInboundHandlers(writer, inbound, declarations);
   writer.line();
   writeClient(writer, outboundMethods(schema), options.defaultTimeoutMs);
   return writer.toString();

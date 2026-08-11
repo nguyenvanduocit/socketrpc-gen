@@ -74,6 +74,25 @@ export function localIdentifier(value: string): string {
   return [first.toLowerCase(), ...rest.map(capitalizeWord)].join("");
 }
 
+/**
+ * Prefix for every identifier the emitter declares in a scope that also holds
+ * an identifier derived from the contract.
+ *
+ * `identifierWords` splits on every non-alphanumeric rune, so no name derived
+ * from a wire identifier can contain an underscore — `exportedIdentifier` and
+ * `localIdentifier` are incapable of producing one. Spelling the emitter's own
+ * identifiers with a leading underscore-bearing prefix therefore keeps the two
+ * namespaces disjoint *by construction*, rather than by a reserved-word list
+ * that has to be kept in step with the emitter by hand. `names.test.ts` pins
+ * the property the guarantee rests on.
+ */
+export const GENERATED_PREFIX = "rpc_";
+
+/** Spells an emitter-owned identifier in the reserved namespace. */
+export function generated(name: string): string {
+  return `${GENERATED_PREFIX}${name}`;
+}
+
 export function goString(value: string): string {
   return JSON.stringify(value);
 }

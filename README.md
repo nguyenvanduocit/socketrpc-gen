@@ -505,8 +505,33 @@ the TypeScript server, while a blocked handler stalls only its own method. Calls
 to *different* methods run concurrently, so contracts that need cross-method
 ordering should carry an explicit sequence number.
 
-Nil slices and maps returned by a handler are normalized to `[]` / `{}` before
-they are acknowledged, so a client typed `string[]` never receives `null`.
+Values a client's type says are arrays or objects arrive as `[]` / `{}` rather
+than `null`, wherever Go's zero value would otherwise be nil: a returned slice or
+map, a named alias for one (`type Tags = string[]`), and every required slice or
+map field of a returned struct — including structs nested inside another struct,
+a slice or a map. Fields the contract declares optional or nullable are pointers
+and keep their `null`, because there the contract asks for it. Normalization runs
+on a copy, so a handler never sees its own value change. A nil slice held
+*inside* another slice or map (`string[][]`, `Record<string, string[]>`) keeps
+Go's nil, since replacing it would write through the caller's backing array.
+
+A payload the JSON encoder refuses — most often a required string enum left at
+its zero value — comes back as an `INTERNAL_ERROR` naming the offending value.
+Socket.IO's write path discards encoding failures, so without that check the
+caller would wait out its own timeout with nothing to go on.
+
+`binding.OnRpcError(func(*rpc.RpcError))` observes the failures the peer reports
+out of band: a TypeScript client whose handler for a fire-and-forget
+server-to-client call throws has no acknowledgement to answer through, so it
+emits the error instead. This mirrors `rpc.handle.rpcError(...)` on the
+TypeScript server.
+
+Every identifier the generator writes into a Go body carries an `rpc_` prefix,
+and identifiers derived from your contract can never contain an underscore — the
+two namespaces are disjoint by construction. A parameter may therefore be called
+`result`, `err`, `fmt`, `string` or `len` without consequence. The one reserved
+name is `ctx`, which is the context parameter of the generated `ServerHandler`
+and `Client` signatures.
 
 ## How It Works
 

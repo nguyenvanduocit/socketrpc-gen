@@ -11,6 +11,7 @@
 -   **Ergonomic API:** Clean `client.handle.*` / `client.server.*` pattern with automatic cleanup.
 -   **Unopinionated:** Generates only the type-safe bindings, leaving you in full control of your `socket.io` setup.
 -   **Bidirectional Communication:** Supports both client-to-server and server-to-client RPC calls.
+-   **Multi-Language:** Generate a TypeScript client with either a TypeScript or a **Go** server, from one contract.
 -   **Simple to Use:** Get started with a single command.
 -   **Robust Error Handling:** Branded `RpcError` (no shape collisions), standard error codes (`TIMEOUT`, `DISCONNECTED`, `ABORTED`, …), and a per-call `return`-or-`throw` error mode.
 -   **Connection-Aware:** `connected` state plus `onConnect` / `onDisconnect` / `onReconnect` hooks for re-syncing after reconnects.
@@ -29,6 +30,7 @@ Check out the [`examples/`](./examples) directory for comprehensive examples:
 - **[01-basic](./examples/01-basic/)** - Simple interface definitions without extension
 - **[02-single-extension](./examples/02-single-extension/)** - Single-level interface inheritance
 - **[03-multi-level-extension](./examples/03-multi-level-extension/)** - Multi-layer architecture patterns
+- **[05-go-server](./examples/05-go-server/)** - TypeScript client with a Go server
 
 See the [examples README](./examples/README.md) for detailed comparisons and use cases.
 
@@ -250,6 +252,11 @@ socketrpc-gen <path> [options]
 -   `-t, --timeout <ms>`: Default timeout in milliseconds for RPC calls that expect a response. This can be overridden per-call. (Default: "5000")
 -   `-l, --error-logger <path>`: Custom error logger import path (e.g., '@/lib/logger'). The module must default-export `(message: string, ...args: unknown[]) => void`. By default uses `console.error`.
 -   `-e, --error-mode <mode>`: How call methods surface failures — `return` the `RpcError` (default, check with `isRpcError`) or `throw` it (use `try/catch`).
+-   `-c, --client <language>`: Language of the generated client. (Default: "typescript")
+-   `-s, --server <language>`: Language of the generated server — `typescript` or `go`. (Default: "typescript")
+-   `--go-package <name>`: Go package clause for the generated server. (Default: "rpc")
+-   `--go-out <dir>`: Directory for the generated Go files. (Default: the input file's directory)
+-   `--go-socket-import <path>`: Go Socket.IO server import path the bindings are written against. (Default: "github.com/zishang520/socket.io/servers/socket/v3")
 -   `-w, --watch`: Watch for changes in the definition file and regenerate automatically. (Default: false)
 -   `-h, --help`: Display help for command.
 
@@ -433,6 +440,194 @@ try {
   if (isRpcError(e)) console.error(e.code, e.message);
 }
 ```
+
+## Go Server
+
+A TypeScript client can talk to a Go server generated from the same `define.ts`:
+
+```bash
+bunx socketrpc-gen ./rpc/define.ts --client typescript --server go --go-out ./rpc/go
+```
+
+That emits `client.generated.ts` + `types.generated.ts` for the browser and
+`types.generated.go` + `server.generated.go` for the server. No
+`server.generated.ts` is produced. The Go bindings are written against
+[`zishang520/socket.io/servers/socket/v3`](https://github.com/zishang520/socket.io)
+and are gofmt-clean, `go vet`-clean and race-clean out of the box.
+
+A contract method `getUser` is implemented as `HandleGetUser` and called as
+`CallGetUser`: the generated APIs prefix the contract's own names, so a method
+may be called `scan`, `marshalJSON` or `dispose` without meeting a name Go has
+already claimed. Wire event names are the contract and are unaffected.
+
+```go
+type handler struct{ client *rpc.Client }
+
+func (h *handler) HandleGetUser(ctx context.Context, userID string) (rpc.User, error) {
+    if userID == "" {
+        // Any error becomes an RpcError on the wire; return an *RpcError for a typed one.
+        return rpc.User{}, rpc.NewRpcError(rpc.CodeInvalidArgument, "userID is required", "", nil)
+    }
+    return rpc.User{ID: userID, Name: "Ada"}, nil
+}
+
+func serve(raw *socket.Socket) {
+    client, _ := rpc.NewClient(raw, nil)          // calls INTO the TypeScript client
+    binding, _ := rpc.BindServer(raw, &handler{client: client})
+    go func() { <-binding.Context().Done(); client.Dispose() }()
+}
+```
+
+### What the Go backend accepts
+
+The TypeScript backend reads your signatures as written, so it accepts anything
+TypeScript accepts. The Go backend reads the portable `RpcSchema` IR, so it only
+accepts contracts with a sound Go spelling — and names the declaration to write
+when it refuses one:
+
+| Accepted | Becomes in Go |
+| --- | --- |
+| `string` / `number` / `boolean` | `string` / `float64` / `bool` |
+| named `type`/`interface` object | an exported struct with JSON tags |
+| named string-literal union | a string enum with `Valid`/`MarshalJSON`/`UnmarshalJSON` |
+| `T[]`, `Record<string, T>` | `[]T`, `map[string]T` |
+| `T \| null`, optional `field?` | `*T` (plus `,omitempty` for optional fields) |
+| `unknown` | `any` — an arbitrary JSON value; see below |
+| `void` return | a fire-and-forget method |
+
+Refused, with the fix named in the error: inline object literals, inline string
+unions, ambient host types (`Error`, `Date`, `Map`), tuples, intersections,
+generics, `any`, and optional *positional* parameters — an omitted trailing
+argument is indistinguishable from a Socket.IO ack callback.
+
+`any` is refused because it switches TypeScript's checking off at the call site,
+so a contract using it is unchecked at both ends. Declare `unknown` for data
+whose shape the contract does not fix; TypeScript then refuses every operation on
+the value until the receiver narrows it.
+
+Identifiers are derived idiomatically, so no per-field overrides are needed:
+`id` → `ID`, `roomId` → `RoomID`, `apiUrl` → `APIURL`.
+
+### JSON values
+
+Some contracts carry data whose shape belongs to the data rather than to the
+contract — a document's frontmatter, one key of a patch. `unknown` states exactly
+that, and Go spells it `any`:
+
+```typescript
+export type Frontmatter = Record<string, unknown>;   // map[string]any
+
+export type Mutation = {
+  key: string;
+  value: unknown;        // Value any    `json:"value"`
+  previous?: unknown;    // Previous any `json:"previous,omitempty"`
+};
+```
+
+```go
+func (h *handler) ApplyMutation(ctx context.Context, mutation rpc.Mutation) (rpc.Frontmatter, error) {
+    // Nothing here needs to know the shape of mutation.Value — that is the point.
+    h.frontmatter[mutation.Key] = mutation.Value
+    return h.frontmatter, nil
+}
+```
+
+Every JSON shape reaches the handler as the Go value that spells it:
+`map[string]any`, `[]any`, `string`, `float64`, `bool`, and `nil` for null.
+
+The JSON data model already contains null, so a JSON value is nullable as it
+stands: `unknown | null` is the same type, and `any` needs no pointer to hold
+nil. An optional key is tagged `,omitempty` and disappears when it is nil, which
+means Go cannot tell "key omitted" from "key set to null" in an `any` — declare
+a required `unknown` when an explicit null has to survive the trip.
+
+Containers keep their normalization: a required `Record<string, unknown>` result
+or field still arrives as `{}` rather than null, and `unknown[]` as `[]`. A value
+Go can hold in an `any` but JSON cannot encode — a channel, a func, a NaN —
+comes back as an `INTERNAL_ERROR` naming it, as below.
+
+One key is spoken for: `__rpcError` is the brand that tells a failure from a
+value in an acknowledgement, so a JSON value carrying it at its top level is read
+as an error by both sides. Nest such data one level down if it has to survive
+verbatim.
+
+### Behaviour parity
+
+The Go server gives each RPC method its own serialized dispatch queue: repeated
+calls to one method are handled in the order Socket.IO delivered them, matching
+the TypeScript server, while a blocked handler stalls only its own method. Calls
+to *different* methods run concurrently, so contracts that need cross-method
+ordering should carry an explicit sequence number.
+
+Values a client's type says are arrays or objects arrive as `[]` / `{}` rather
+than `null`, wherever Go's zero value would otherwise be nil: a returned slice or
+map, a named alias for one (`type Tags = string[]`), and every required slice or
+map field of a returned struct — including structs nested inside another struct,
+a slice or a map. Fields the contract declares optional or nullable are pointers
+and keep their `null`, because there the contract asks for it. Normalization runs
+on a copy, so a handler never sees its own value change. A nil slice held
+*inside* another slice or map (`string[][]`, `Record<string, string[]>`) keeps
+Go's nil, since replacing it would write through the caller's backing array.
+
+A payload the JSON encoder refuses comes back as an `INTERNAL_ERROR` naming the
+offending value — a required string enum left at its zero value, or a Go runtime
+value placed in an `any` that JSON has no spelling for. Socket.IO's write path
+discards encoding failures, so without that check the caller would wait out its
+own timeout with nothing to go on.
+
+`binding.OnRpcError(func(*rpc.RpcError))` observes the failures the peer reports
+out of band: a TypeScript client whose handler for a fire-and-forget
+server-to-client call throws has no acknowledgement to answer through, so it
+emits the error instead. This mirrors `rpc.handle.rpcError(...)` on the
+TypeScript server.
+
+Every identifier the generator declares in a scope your contract also reaches
+carries an `rpc_` prefix, and identifiers derived from your contract can never
+contain an underscore — the two namespaces are disjoint by construction. A
+parameter may therefore be called `result`, `err`, `fmt`, `string` or `len`, and
+a method the client calls may be named `Disconnect` or `_disconnect`, without
+consequence.
+
+Method names get their own namespace instead of a prefix on the generator's
+side: `Handle…` on `ServerHandler`, `Call…` on `Client`. Both shapes are a fixed
+word followed by an upper-case letter, which no method name the standard library
+has claimed is spelled as — so a contract may name a method `scan`, `seek`,
+`marshalJSON` or `unwrap` and the package still passes `go vet` with no analyzer
+excluded. The same prefix keeps `Client`'s own `Socket`, `Done`, `Connected` and
+`Dispose` out of reach, so those are legal method names too.
+
+Three kinds of name are refused, each with the reason and the fix in the message:
+
+- `ctx` as a parameter — it is the context parameter of the generated
+  `ServerHandler` and `Client` signatures.
+- Socket.IO's own event names (`connect`, `disconnect`, `disconnecting`,
+  `connect_error`, `newListener`, `removeListener`) as method names.
+- A declaration whose Go name is one the generated package already exports, such
+  as `ServerHandler` or `ClientOptions`.
+
+Object field names are never refused. A field named `marshalJSON` keeps its wire
+name: `encoding/json` fixes the spelling of the marshalling method, so the struct
+gives the method up and each of its required slice and map fields is spelled with
+a generated type that normalizes itself. Those types convert freely to and from
+the plain Go type, so handler code is unchanged.
+
+### Coming from v6
+
+Go server generation arrives with v7, so there is no generated Go to migrate:
+`--server go`, the `Handle…`/`Call…` method namespace, and `unknown` are all new
+surface. Point the generator at a contract you already have and it produces the
+Go package described above.
+
+An existing TypeScript project has nothing to do. Every byte of TypeScript output
+is what v6 emitted for the same contract — the Go backend reads the same
+`RpcSchema` IR but writes its own files, and `--client`/`--server` both default to
+`typescript`, so an invocation that worked on v6 still emits exactly what it did.
+
+The one thing worth knowing before writing a contract for Go: methods reach the
+generated API prefixed, so `getUser` is implemented as `HandleGetUser` and called
+as `CallGetUser`. That prefix is what buys a clean `go vet ./...` with no analyzer
+excluded, and it is why a method may be named `scan`, `marshalJSON`, `dispose` or
+`socket` without meeting a name Go has already claimed.
 
 ## How It Works
 

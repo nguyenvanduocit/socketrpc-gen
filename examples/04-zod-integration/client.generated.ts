@@ -9,7 +9,7 @@
  *   client.server.methodName(args);
  *   client.dispose();
  *
- * To regenerate: bunx socketrpc-gen /Volumes/Data/Projects/socket-rpc/examples/04-zod-integration/define.ts
+ * To regenerate: bunx socketrpc-gen ./define.ts
  */
 
 import type { Socket } from "socket.io-client";

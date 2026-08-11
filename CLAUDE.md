@@ -13,6 +13,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `bun run index.ts ./examples/00-full-app/pkg/rpc/define.ts` - Generate from full app example (complete working application)
 - `bun run index.ts ./examples/01-basic/define.ts` - Generate from basic example (simple interfaces)
 - `bun run index.ts ./examples/00-full-app/pkg/rpc/define.ts --package-name "my-rpc" --timeout 3000`
+- `bun run index.ts ./examples/05-go-server/define.ts --client typescript --server go --go-out ./examples/05-go-server/rpc` - TypeScript client + Go server
+
+### Verification Commands
+- `bun run check` - typecheck then run the full suite
+- `bun test` - full suite (includes Go compile, `go test -race`, and cross-language integration; requires the `go` toolchain)
+- `bun run generate:examples` - regenerate every example, then diff to spot drift
+
+### Package boundary
+
+`files` in package.json is the only thing that decides what publishes: `index.ts`, `src/`,
+README, CHANGELOG. The package ships TypeScript source, so every file under `src/` is
+runtime code and a new module belongs in nothing but that tree.
+
+There is no `.npmignore`. A denylist has to name every local artifact in advance, and npm
+reads neither a global gitignore nor an ignore file it has been superseded by — which is
+how agent state under `.omc/` came to sit in the tarball alongside tests, fixtures and
+examples. `tests/pack.test.ts` runs `npm pack --dry-run --json` and checks the result both
+ways: every entrypoint and source file present, and nothing outside the allowlist, proven
+against a sentinel it writes into `.test-tmp/` first.
 
 ## Architecture
 
@@ -25,6 +44,26 @@ This is a TypeScript code generator for Socket.IO RPC packages. The tool generat
 - Core generation logic using `ts-morph` AST manipulation
 - Extracts function signatures from `ClientFunctions` and `ServerFunctions` interfaces
 - Generates client.generated.ts, server.generated.ts, and types.generated.ts files
+
+**Canonical IR (`src/schema.ts`)**
+- `RpcSchema` is the single language-neutral representation of a contract: methods with a
+  direction, plus the named object/enum/alias declarations they reference.
+- `src/extract.ts` produces it alongside the string signatures the TypeScript emitters use.
+  TypeScript emission stays permissive (it reads only the strings, so it accepts anything
+  TypeScript accepts); a contract the IR cannot model is reported through `diagnostics`
+  rather than raised.
+- `requireRpcSchema()` is how a non-TypeScript backend obtains the IR — it refuses with
+  every diagnostic at once, so an unsupported-type sentinel can never reach an emitter.
+- There is exactly one schema type. Backends add options (`src/go/options.ts`), never a
+  parallel schema.
+
+**Go Backend (`src/go/`)**
+- `options.ts` - Go-only knobs: package clause, socket import, default ack timeout
+- `project.ts` - the single projection of `TypeRef` onto Go types, shared by both passes
+- `validate.ts` - refuses shapes with no sound Go spelling, naming the fix in the message
+- `emitter.ts` - writes gofmt-clean `types.generated.go` + `server.generated.go`
+- Identifiers are derived idiomatically (`id` → `ID`, `roomId` → `RoomID`), so the schema
+  carries no per-name override channel.
 
 **Key Generation Process**
 1. Parse input TypeScript file containing interface definitions
@@ -42,6 +81,72 @@ This is a TypeScript code generator for Socket.IO RPC packages. The tool generat
 - **Client/Server interfaces** - `RpcClient`, `RpcServer` with `.handle`, `.server`/`.client`, `.dispose()`
 - **Error handling** - Built-in `RpcError` type and `isRpcError()` guard
 - **Type safety** - Full TypeScript support with generated type imports
+
+### Multi-Language Generation
+
+`--client <lang>` and `--server <lang>` select the backends; both default to `typescript`,
+so existing invocations are unchanged. `--server go` emits `types.generated.go` and
+`server.generated.go` (into `--go-out`, default the input file's directory) and skips
+`server.generated.ts`. `--go-package` sets the Go package clause and `--go-socket-import`
+the transport, which defaults to `github.com/zishang520/socket.io/servers/socket/v3`.
+
+The Go backend only accepts the portable subset of the IR — named object types, named
+string-literal unions, scalars, arrays, string-keyed records, `T | null`, optional fields,
+`unknown`, and `void`. Inline object literals, inline unions, ambient types (`Error`,
+`Date`), tuples, intersections, generics, `any`, and optional *positional* parameters are
+refused with the declaration to write instead. See `examples/05-go-server/`.
+
+`unknown` is the IR's JSON-value node (`{ kind: "json" }`): an arbitrary JSON value,
+projected onto Go's `any`, and onto `map[string]any` inside `Record<string, unknown>`. It
+is a declared shape, not an escape hatch — `any` stays refused because it switches
+TypeScript's own checking off at the call site, whereas `unknown` forces every receiver to
+narrow. The JSON data model contains null, so `nullableType` collapses on a JSON value and
+the projection never writes `*any`; an optional key still carries `,omitempty`, which is
+the one place Go cannot separate an omitted key from an explicit null.
+
+Behaviour parity worth knowing:
+
+- Dispatch is serialized per RPC method: same-method calls keep Socket.IO's arrival order and
+  a blocked handler stalls only its own method.
+- Anything the client's type calls an array or an object arrives as `[]` / `{}`: a slice or map
+  result, a named alias for one, and every required slice/map field of a returned struct
+  (recursively, since each struct carries its own `MarshalJSON`). Optional and nullable values
+  are pointers and keep their `null`. Normalization works on a copy, so handler values are
+  never mutated.
+- A struct with a field named `marshalJSON` keeps the field: `encoding/json` fixes the method's
+  spelling, so the struct gives the method up and its required slice/map fields are spelled with
+  generated `rpc_<type>_<Field>` types that normalize themselves. Those types convert freely to
+  and from the plain Go type, so a handler still writes `Payload{Labels: []string{"a"}}`.
+- A payload the JSON encoder refuses — a required enum at its zero value, or a Go runtime
+  value put into an `any` that JSON has no spelling for — answers with `INTERNAL_ERROR`
+  instead of letting Socket.IO drop the reply and the caller time out.
+- `ServerBinding.OnRpcError` observes `__rpc:error__` reports from the client, matching
+  `rpc.handle.rpcError` on the TypeScript server.
+- Generated Go identifiers are `rpc_`-prefixed in every scope that also holds contract
+  identifiers — including `ServerBinding`'s own fields and methods, whose namespace it shares
+  with the contract-derived `listen<Method>` / `handle<Method>` members.
+  `exportedIdentifier`/`localIdentifier` split on non-alphanumeric runes and so can never
+  produce an underscore, which keeps the two namespaces disjoint by construction rather than by
+  a reserved-word list. An inbound method may therefore be called `Disconnect` or `_disconnect`.
+- A contract method reaches the two APIs a developer writes against under its own prefix:
+  `Handle<Method>` on `ServerHandler`, `Call<Method>` on `Client` (`HANDLER_METHOD_PREFIX` /
+  `CLIENT_METHOD_PREFIX` in `src/go/names.ts`). Validation admits a method only when its derived
+  name is an exported Go identifier, and that name can hold no underscore, so a generated method
+  is always a fixed word followed by an upper-case letter — a shape no method name the standard
+  library has claimed is spelled as. `go vet`'s `stdmethods` therefore has nothing to object to
+  even when a contract names a method `scan`, `seek` or `marshalJSON`, and nothing consults a
+  list of standard library names at generation time. The same prefix puts `Client`'s own
+  `Socket`/`Done`/`Connected`/`Dispose` out of reach, so those are legal method names too. Wire
+  event names are untouched, as is every TypeScript output.
+- Contract names are refused only where a name genuinely has no sound Go projection: `ctx` as a
+  parameter, Socket.IO's own event names, and a declaration whose Go name is one the package
+  already exports. Object field names are never refused.
+- `tests/go-collisions.test.ts` derives its adversarial contract from the emitter's own output
+  and feeds it back through every channel a contract owns — parameters, inbound and outbound
+  method names, object field names, declaration names — asserting each either compiles
+  (`go build`, `go vet` with no exclusions, `gofmt`) or is refused by name. It also pins the Go
+  1.26 `stdmethods` family as a corpus, driving every canonical name through both method
+  channels and asserting the generated shape is disjoint from it.
 
 ### Interface Requirements
 - Must define `ClientFunctions` and `ServerFunctions` interfaces

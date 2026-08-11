@@ -1,0 +1,36 @@
+{
+  "name": "@socket-rpc/rpc",
+  "version": "1.0.0",
+  "description": "Auto-generated RPC package for Socket.IO",
+  "type": "module",
+  "main": "./dist/types.generated.js",
+  "types": "./dist/types.generated.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types.generated.d.ts",
+      "default": "./dist/types.generated.js"
+    },
+    "./client.generated": {
+      "types": "./dist/client.generated.d.ts",
+      "default": "./dist/client.generated.js"
+    },
+    "./types.generated": {
+      "types": "./dist/types.generated.d.ts",
+      "default": "./dist/types.generated.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "socket.io-client": "^4.0.0"
+  }
+}

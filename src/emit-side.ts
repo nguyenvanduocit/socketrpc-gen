@@ -1,6 +1,6 @@
 import * as path from "path";
 import { CodeBlockWriter, Project, SourceFile, StructureKind } from "ts-morph";
-import type { FunctionSignature, ResolvedConfig } from "./types";
+import { regenerateCommand, type FunctionSignature, type ResolvedConfig } from "./types";
 
 /**
  * Adds type-only imports for every user-declared type referenced by the signatures.
@@ -680,7 +680,7 @@ export function generateSideFile(
  *   ${side}.${targetSide}.methodName(args);
  *   ${side}.dispose();
  *
- * To regenerate: bunx socketrpc-gen ${config.inputPath}
+ * To regenerate: ${regenerateCommand(config)}
  */
 
 `,

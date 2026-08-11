@@ -52,11 +52,15 @@ export function unwrapOptionality(ref: TypeRef): UnwrappedType {
 export function renderGoType(ref: TypeRef): string {
   const { core, nilable } = unwrapOptionality(ref);
   const rendered = renderCoreGoType(core);
-  return nilable ? `*${rendered}` : rendered;
+  // `any` is already the Go value that can be nil, so a pointer to one would add
+  // a second, meaningless way to spell the absence the JSON value itself carries.
+  return nilable && core.kind !== "json" ? `*${rendered}` : rendered;
 }
 
 function renderCoreGoType(ref: TypeRef): string {
   switch (ref.kind) {
+    case "json":
+      return "any";
     case "scalar":
       switch (ref.name) {
         case "string":

@@ -99,6 +99,10 @@ function validateTypeRef(ref: TypeRef, path: string, scope: ValidationScope): vo
   const { core } = unwrapOptionality(ref);
 
   switch (core.kind) {
+    // An arbitrary JSON value is `any`, which holds every shape the wire can
+    // carry — including the null the JSON data model already contains.
+    case "json":
+      return;
     case "scalar":
       if (!["string", "number", "boolean"].includes(core.name)) {
         fail(path, `unsupported scalar ${JSON.stringify(core.name)}`);

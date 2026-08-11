@@ -23,6 +23,20 @@ export interface NullTypeRef {
   kind: "null";
 }
 
+/**
+ * Any value the JSON data model can express: object, array, string, number,
+ * boolean, or null.
+ *
+ * This is a declared shape, not an escape hatch. It says the contract carries
+ * data whose structure the contract does not fix — a document's frontmatter, a
+ * patch value — and it says so in a form every backend can project onto its own
+ * "some JSON" type. Because the JSON data model contains null, a JSON value is
+ * already nullable; `nullableType` below collapses the redundant wrapper.
+ */
+export interface JsonTypeRef {
+  kind: "json";
+}
+
 export interface NamedTypeRef {
   kind: "named";
   name: string;
@@ -71,6 +85,7 @@ export type TypeRef =
   | ScalarTypeRef
   | VoidTypeRef
   | NullTypeRef
+  | JsonTypeRef
   | NamedTypeRef
   | ArrayTypeRef
   | MapTypeRef
@@ -164,7 +179,9 @@ export function optionalType(type: TypeRef): TypeRef {
 }
 
 export function nullableType(type: TypeRef): TypeRef {
-  return type.kind === "nullable" || type.kind === "null"
+  // A JSON value already admits null, so wrapping one says nothing new and
+  // would force every backend to spell the same nullability twice.
+  return type.kind === "nullable" || type.kind === "null" || type.kind === "json"
     ? type
     : { kind: "nullable", type };
 }

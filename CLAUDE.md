@@ -79,9 +79,17 @@ the transport, which defaults to `github.com/zishang520/socket.io/servers/socket
 
 The Go backend only accepts the portable subset of the IR — named object types, named
 string-literal unions, scalars, arrays, string-keyed records, `T | null`, optional fields,
-and `void`. Inline object literals, inline unions, ambient types (`Error`, `Date`), tuples,
-intersections, generics, `any`, and optional *positional* parameters are refused with the
-declaration to write instead. See `examples/05-go-server/`.
+`unknown`, and `void`. Inline object literals, inline unions, ambient types (`Error`,
+`Date`), tuples, intersections, generics, `any`, and optional *positional* parameters are
+refused with the declaration to write instead. See `examples/05-go-server/`.
+
+`unknown` is the IR's JSON-value node (`{ kind: "json" }`): an arbitrary JSON value,
+projected onto Go's `any`, and onto `map[string]any` inside `Record<string, unknown>`. It
+is a declared shape, not an escape hatch — `any` stays refused because it switches
+TypeScript's own checking off at the call site, whereas `unknown` forces every receiver to
+narrow. The JSON data model contains null, so `nullableType` collapses on a JSON value and
+the projection never writes `*any`; an optional key still carries `,omitempty`, which is
+the one place Go cannot separate an omitted key from an explicit null.
 
 Behaviour parity worth knowing:
 
@@ -96,8 +104,9 @@ Behaviour parity worth knowing:
   spelling, so the struct gives the method up and its required slice/map fields are spelled with
   generated `rpc_<type>_<Field>` types that normalize themselves. Those types convert freely to
   and from the plain Go type, so a handler still writes `Payload{Labels: []string{"a"}}`.
-- A payload the JSON encoder refuses — typically a required enum at its zero value — answers
-  with `INTERNAL_ERROR` instead of letting Socket.IO drop the reply and the caller time out.
+- A payload the JSON encoder refuses — a required enum at its zero value, or a Go runtime
+  value put into an `any` that JSON has no spelling for — answers with `INTERNAL_ERROR`
+  instead of letting Socket.IO drop the reply and the caller time out.
 - `ServerBinding.OnRpcError` observes `__rpc:error__` reports from the client, matching
   `rpc.handle.rpcError` on the TypeScript server.
 - Generated Go identifiers are `rpc_`-prefixed in every scope that also holds contract

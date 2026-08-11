@@ -290,22 +290,15 @@ function parseTypeRef(
     return unsupportedType(
       context,
       "UNSUPPORTED_ANY_TYPE",
-      "The any type has no language-neutral wire representation.",
+      "The any type opts out of type checking on the TypeScript side, so a contract using it is unchecked at both ends. Declare unknown for data whose shape the contract does not fix; every caller then has to narrow it before use.",
       type,
       location,
       diagnosticPath,
     );
   }
-  if (type.isUnknown()) {
-    return unsupportedType(
-      context,
-      "UNSUPPORTED_UNKNOWN_TYPE",
-      "The unknown type has no declared wire shape.",
-      type,
-      location,
-      diagnosticPath,
-    );
-  }
+  // `unknown` is the one type that says "arbitrary JSON" without giving up type
+  // safety: TypeScript refuses every operation on it until the receiver narrows.
+  if (type.isUnknown()) return { kind: "json" };
   if (type.isNever()) {
     return unsupportedType(
       context,

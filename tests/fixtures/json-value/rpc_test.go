@@ -193,8 +193,8 @@ func TestEncodePreflightRefusesNonJSONValues(t *testing.T) {
 		if failure.Code != CodeInternalError {
 			t.Fatalf("got code %q, want %q", failure.Code, CodeInternalError)
 		}
-		if failure.Origin != "unencodableValue" {
-			t.Fatalf("the failure must name the call, got %q", failure.Origin)
+		if failure.Method != "unencodableValue" {
+			t.Fatalf("the failure must name the call, got %q", failure.Method)
 		}
 		if !strings.Contains(failure.Message, "cannot encode payload") {
 			t.Fatalf("the failure must say what went wrong, got %q", failure.Message)

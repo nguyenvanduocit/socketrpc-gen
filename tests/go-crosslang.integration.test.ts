@@ -272,7 +272,7 @@ describe("generated TypeScript client against the generated Go server", () => {
         expect(result.message).toBe("go server refused: quota");
         // The handler left Origin empty; the generated binding fills in the
         // event name so the client can attribute the failure.
-        expect(result.origin).toBe("failTyped");
+        expect(result.method).toBe("failTyped");
         expect(result.data).toEqual({ reason: "quota" });
       }
     },
@@ -287,7 +287,7 @@ describe("generated TypeScript client against the generated Go server", () => {
       expect(isRpcError(result)).toBe(true);
       if (isRpcError(result)) {
         expect(result.code).toBe("INTERNAL_ERROR");
-        expect(result.origin).toBe("failPanic");
+        expect(result.method).toBe("failPanic");
         expect(result.message).toContain("boom");
       }
 
@@ -431,7 +431,7 @@ describe("generated TypeScript client against the generated Go server", () => {
       expect(isRpcError(result)).toBe(true);
       if (isRpcError(result)) {
         expect(result.code).toBe("TIMEOUT");
-        expect(result.origin).toBe("neverAck");
+        expect(result.method).toBe("neverAck");
       }
 
       // A hung handler holds only its own queue; see the isolation test above.
@@ -451,7 +451,7 @@ describe("generated TypeScript client against the generated Go server", () => {
       expect(isRpcError(result)).toBe(true);
       if (isRpcError(result)) {
         expect(result.code).toBe("DISCONNECTED");
-        expect(result.origin).toBe("dropWhileInFlight");
+        expect(result.method).toBe("dropWhileInFlight");
       }
     },
     T,

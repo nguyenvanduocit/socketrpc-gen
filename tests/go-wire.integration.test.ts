@@ -144,7 +144,7 @@ describe("generated TypeScript client against a handcrafted Go server", () => {
       if (isRpcError(result)) {
         expect(result.code).toBe("GO_REFUSED");
         expect(result.message).toBe("go server refused: quota");
-        expect(result.origin).toBe("failTyped");
+        expect(result.method).toBe("failTyped");
         expect(result.data).toEqual({ reason: "quota" });
       }
     },
@@ -204,7 +204,7 @@ describe("generated TypeScript client against a handcrafted Go server", () => {
       expect(isRpcError(result)).toBe(true);
       if (isRpcError(result)) {
         expect(result.code).toBe("TIMEOUT");
-        expect(result.origin).toBe("neverAck");
+        expect(result.method).toBe("neverAck");
       }
     },
     T,
@@ -220,7 +220,7 @@ describe("generated TypeScript client against a handcrafted Go server", () => {
       expect(isRpcError(result)).toBe(true);
       if (isRpcError(result)) {
         expect(result.code).toBe("DISCONNECTED");
-        expect(result.origin).toBe("dropWhileInFlight");
+        expect(result.method).toBe("dropWhileInFlight");
       }
     },
     T,

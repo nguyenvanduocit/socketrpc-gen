@@ -180,7 +180,7 @@ describe("SocketRPC schema extraction", () => {
       });
 
       // Existing TypeScript emitters receive the same string API as before.
-      expect(extracted.clientFunctions).toEqual([
+      expect(extracted.clientToServerFunctions).toEqual([
         {
           name: "getProfile",
           params: [{ name: "id", type: "string", isOptional: false }],
@@ -274,7 +274,7 @@ describe("SocketRPC schema extraction", () => {
       ]);
 
       // TypeScript emission keeps the exact historical type text for all of them.
-      expect(extracted.clientFunctions).toEqual([
+      expect(extracted.clientToServerFunctions).toEqual([
         {
           name: "search",
           params: [

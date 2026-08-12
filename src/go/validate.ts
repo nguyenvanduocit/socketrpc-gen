@@ -18,6 +18,7 @@ import {
 } from "./names";
 import type { GoBackendOptions } from "./options";
 import { declarationsByName, goTypeName, unwrapOptionality } from "./project";
+import { RPC_ERROR_EVENT } from "../types";
 
 const RESERVED_EVENTS = new Set([
   "connect",
@@ -26,7 +27,7 @@ const RESERVED_EVENTS = new Set([
   "disconnecting",
   "newListener",
   "removeListener",
-  "__rpc:error__",
+  RPC_ERROR_EVENT,
 ]);
 
 /**

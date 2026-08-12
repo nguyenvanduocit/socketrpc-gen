@@ -90,7 +90,7 @@ func (h *handler) HandleReadNotes(_ context.Context) ([]string, error) {
 func (h *handler) recordRpcError(failure *rpc.RpcError) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.rpcErrors = append(h.rpcErrors, string(failure.Code)+":"+failure.Origin+":"+failure.Message)
+	h.rpcErrors = append(h.rpcErrors, string(failure.Code)+":"+failure.Method+":"+failure.Message)
 }
 
 // HandleReadRPCErrors deliberately returns a nil slice while nothing has been

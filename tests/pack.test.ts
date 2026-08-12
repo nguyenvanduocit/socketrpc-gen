@@ -23,6 +23,7 @@ const ALLOWED = (packedPath: string) =>
   ALWAYS_PACKED.test(packedPath) ||
   packedPath === "index.ts" ||
   packedPath === "CHANGELOG.md" ||
+  packedPath === "MIGRATION.md" ||
   packedPath === "tsconfig.json" ||
   packedPath.startsWith("src/");
 

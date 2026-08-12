@@ -13,7 +13,8 @@
     "src",
     "tsconfig.json",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "MIGRATION.md"
   ],
   "scripts": {
     "test": "bun test",

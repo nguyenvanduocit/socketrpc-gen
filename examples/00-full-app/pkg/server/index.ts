@@ -8,7 +8,7 @@ import { join } from "path"; // Added for getAppVersion
 import type { ExtendedSocket } from "./type.d";
 import { authMiddleware } from "./auth";
 import { createRpcServer } from "@socket-rpc/rpc/server.generated";
-import type { RpcError } from "@socket-rpc/rpc/types.generated";
+import { rpcError } from "@socket-rpc/rpc/types.generated";
 
 // === UTILITY FUNCTIONS ===
 /**
@@ -198,15 +198,18 @@ io.on("connection", async (socket: ExtendedSocket) => {
     rpc.handle.generateText(async (prompt): Promise<string> => {
       try {
         if (prompt === "error") {
-          throw { message: "expected error", code: "EXPECTED_ERROR" } as RpcError;
+          // `rpcError` applies the `__rpcError` brand that survives the wire and keeps the
+          // code intact. An object literal cast to RpcError loses both: the receiver
+          // normalizes it to INTERNAL_ERROR with the message "[object Object]".
+          throw rpcError("EXPECTED_ERROR", "expected error");
         } else if (prompt === "throw") {
           throw new Error("unexpected error");
         }
         return "test success";
-      } catch (rpcError) {
-        logError(`RPC generateText (Socket: ${socket.id}, User: ${socket.data.userId})`, rpcError);
+      } catch (err) {
+        logError(`RPC generateText (Socket: ${socket.id}, User: ${socket.data.userId})`, err);
         rpc.client.showError(new Error("An unexpected error occurred processing your request."));
-        throw { message: "Internal server error during text generation.", code: "INTERNAL_ERROR" } as RpcError;
+        throw rpcError("INTERNAL_ERROR", "Internal server error during text generation.");
       }
     });
   } catch (connectionError) {

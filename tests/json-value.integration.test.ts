@@ -380,7 +380,7 @@ describe("JSON values across the generated TypeScript client and Go server", () 
       if (isRpcError(result)) {
         expect(result.code).toBe("INTERNAL_ERROR");
         expect(result.code).not.toBe("TIMEOUT");
-        expect(result.origin).toBe("unencodableValue");
+        expect(result.method).toBe("unencodableValue");
         expect(result.message).toContain("cannot encode payload");
       }
 

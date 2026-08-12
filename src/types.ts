@@ -2,6 +2,16 @@ import * as path from "path";
 import { DEFAULT_GO_PACKAGE_NAME, DEFAULT_GO_SOCKET_IMPORT } from "./go/options";
 
 /**
+ * Wire event carrying an RpcError raised by a fire-and-forget handler back to the
+ * peer, subscribed to via the generated `onRpcError` / `OnRpcError`. Namespaced so
+ * it can never collide with a user-declared RPC method name.
+ *
+ * Every backend spells the same string, so it is declared once here rather than as
+ * a literal per emitter.
+ */
+export const RPC_ERROR_EVENT = "__rpc:error__";
+
+/**
  * Configuration options for the RPC generator
  */
 /**

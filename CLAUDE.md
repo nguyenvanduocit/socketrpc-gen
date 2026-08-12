@@ -133,7 +133,8 @@ Behaviour parity worth knowing:
   value put into an `any` that JSON has no spelling for — answers with `INTERNAL_ERROR`
   instead of letting Socket.IO drop the reply and the caller time out.
 - `ServerBinding.OnRpcError` observes `__rpc:error__` reports from the client, matching
-  `rpc.handle.rpcError` on the TypeScript server.
+  `rpc.onRpcError` on the TypeScript server: observers are additive, run in registration
+  order, and each registration returns an unsubscribe. `Dispose` drops them all.
 - Generated Go identifiers are `rpc_`-prefixed in every scope that also holds contract
   identifiers — including `ServerBinding`'s own fields and methods, whose namespace it shares
   with the contract-derived `listen<Method>` / `handle<Method>` members.
@@ -262,14 +263,25 @@ function MyComponent() {
 
 ### API Structure
 
+Two registration conventions, and only two — the same split in both languages:
+
+- `rpc.handle.<method>(handler)` / Go's one `ServerHandler` method per RPC method —
+  **one handler per method**; re-registering replaces, so HMR / StrictMode / remounts never
+  double-answer an ack.
+- `rpc.on<Event>(handler)` / Go's `OnRpcError` — **additive**, run in registration order,
+  each returning an unsubscribe.
+
+Nothing under `handle` / `server` / `client` is a built-in, so an RPC method may take any name
+socket.io accepts. Only socket.io's own reserved events are refused.
+
 ```typescript
 // RpcClient interface
 interface RpcClient {
   handle: {
-    // Register handlers for server-to-client calls. Returns an unsubscribe function.
+    // Register the handler for a server-to-client call. Returns an unsubscribe function.
     // Re-registering the same name replaces the previous handler.
-    showError: (handler: (error: Error) => Promise<void>) => UnsubscribeFunction;
-    askQuestion: (handler: (question: string) => Promise<string>) => UnsubscribeFunction;
+    showError: (handler: (error: Error) => Promise<void>) => Unsubscribe;
+    askQuestion: (handler: (question: string) => Promise<string>) => Unsubscribe;
     // ...
   };
   server: {
@@ -279,9 +291,10 @@ interface RpcClient {
   };
   socket: Socket;        // Underlying socket
   connected: boolean;    // Whether the socket is currently connected
-  onConnect(handler: () => void): UnsubscribeFunction;            // re-sync on (re)connect
-  onDisconnect(handler: (reason: string) => void): UnsubscribeFunction;
-  onReconnect(handler: (attempt: number) => void): UnsubscribeFunction;
+  onConnect(handler: () => void): Unsubscribe;            // re-sync on (re)connect
+  onDisconnect(handler: (reason: string) => void): Unsubscribe;
+  onReconnect(handler: (attempt: number) => void): Unsubscribe;
+  onRpcError(handler: (error: RpcError) => void): Unsubscribe;  // peer's fire-and-forget failures
   disposed: boolean;     // Whether disposed
   dispose(): void;       // Cleanup all handlers
 }
@@ -289,8 +302,8 @@ interface RpcClient {
 // RpcServer interface
 interface RpcServer {
   handle: {
-    // Register handlers for client-to-server calls. Returns an unsubscribe function.
-    generateText: (handler: (prompt: string) => Promise<string>) => UnsubscribeFunction;
+    // Register the handler for a client-to-server call. Returns an unsubscribe function.
+    generateText: (handler: (prompt: string) => Promise<string>) => Unsubscribe;
     // ...
   };
   client: {
@@ -301,11 +314,15 @@ interface RpcServer {
   };
   socket: Socket;        // Underlying socket
   connected: boolean;    // Whether the socket is currently connected
-  onDisconnect(handler: (reason: string) => void): UnsubscribeFunction;
+  onDisconnect(handler: (reason: string) => void): Unsubscribe;
+  onRpcError(handler: (error: RpcError) => void): Unsubscribe;
   disposed: boolean;     // Whether disposed
   dispose(): void;       // Cleanup all handlers
 }
 ```
+
+The `ClientToServerEvents` / `ServerToClientEvents` typing aids live in `types.generated.ts` —
+one copy, importable alongside either side.
 
 ### Error model
 

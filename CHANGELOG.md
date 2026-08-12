@@ -1,5 +1,16 @@
 # Changelog
 
+## [8.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v7.0.1...v8.0.0) (2026-08-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* UnsubscribeFunction->Unsubscribe, RpcClientServer/RpcServerClient ->RpcClientRemote/RpcServerRemote, RpcError.origin->method (also the Go field and the JSON tag, so it is a wire change), handle.rpcError->onRpcError and now additive, Go OnRpcError additive and returning an unsubscribe, event maps moved to types.generated.ts. See MIGRATION.md.
+
+### Features
+
+* one naming convention across the TypeScript and Go backends ([#41](https://github.com/nguyenvanduocit/socketrpc-gen/issues/41)) ([f93df64](https://github.com/nguyenvanduocit/socketrpc-gen/commit/f93df64a2cb7dd43d7503abc16e7603608287d17))
+
 ## [7.0.1](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v7.0.0...v7.0.1) (2026-08-11)
 
 

@@ -5,54 +5,33 @@
  *
  * Usage:
  *   const server = createRpcServer(socket);
- *   server.handle.eventName(async (data) => { ... });
- *   server.client.methodName(args);
+ *   server.handle.generate(async (request) => { ... });
+ *   server.client.onProgress(update);
  *   server.dispose();
  *
  * To regenerate: bunx socketrpc-gen ./define.ts
  */
 
 import type { Socket } from "socket.io";
-import { type RpcError, type RpcCallOptions, type UnsubscribeFunction, toRpcError } from "./types.generated";
+import { type RpcError, type RpcCallOptions, type Unsubscribe, toRpcError } from "./types.generated";
 
-// === SOCKET EVENT MAPS (optional typing aid) ===
-/** Events the client emits and the server listens for. Apply to a typed Socket/Server. */
-export interface ClientToServerEvents {
-    generate: (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }, ack: (result: { text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; } | RpcError) => void) => void;
-    createTask: (request: { title: string; description?: string | undefined; }, ack: (result: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError) => void) => void;
-    getTask: (taskId: string, ack: (result: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError) => void) => void;
-    listTasks: (ack: (result: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[] | RpcError) => void) => void;
-    cancelTask: (taskId: string) => void;
-    "__rpc:error__": (error: RpcError) => void;
-}
-
-/** Events the server emits and the client listens for. Apply to a typed Socket/Server. */
-export interface ServerToClientEvents {
-    onProgress: (update: { taskId: string; progress: number; message?: string | undefined; }) => void;
-    onTaskComplete: (task: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }) => void;
-    onError: (message: string, code: string) => void;
-    "__rpc:error__": (error: RpcError) => void;
-}
-
-// === RPCSERVER INTERFACE ===
+// === RpcServer INTERFACE ===
 /** Handler registration methods - implement these to handle calls from client */
 export interface RpcServerHandle {
-    /** Register handler for 'generate' - called by client. Returns an unsubscribe function. */
-    generate: (handler: (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }) => Promise<{ text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; }>) => UnsubscribeFunction;
-    /** Register handler for 'createTask' - called by client. Returns an unsubscribe function. */
-    createTask: (handler: (request: { title: string; description?: string | undefined; }) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }>) => UnsubscribeFunction;
-    /** Register handler for 'getTask' - called by client. Returns an unsubscribe function. */
-    getTask: (handler: (taskId: string) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }>) => UnsubscribeFunction;
-    /** Register handler for 'listTasks' - called by client. Returns an unsubscribe function. */
-    listTasks: (handler: () => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[]>) => UnsubscribeFunction;
-    /** Register handler for 'cancelTask' - called by client. Returns an unsubscribe function. */
-    cancelTask: (handler: (taskId: string) => Promise<void>) => UnsubscribeFunction;
-    /** Register handler for RPC errors. Returns an unsubscribe function. */
-    rpcError: (handler: (error: RpcError) => void) => UnsubscribeFunction;
+    /** Register the handler for 'generate', called by the client. Re-registering replaces the previous handler. Returns an unsubscribe function. */
+    generate: (handler: (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }) => Promise<{ text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; }>) => Unsubscribe;
+    /** Register the handler for 'createTask', called by the client. Re-registering replaces the previous handler. Returns an unsubscribe function. */
+    createTask: (handler: (request: { title: string; description?: string | undefined; }) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }>) => Unsubscribe;
+    /** Register the handler for 'getTask', called by the client. Re-registering replaces the previous handler. Returns an unsubscribe function. */
+    getTask: (handler: (taskId: string) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }>) => Unsubscribe;
+    /** Register the handler for 'listTasks', called by the client. Re-registering replaces the previous handler. Returns an unsubscribe function. */
+    listTasks: (handler: () => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[]>) => Unsubscribe;
+    /** Register the handler for 'cancelTask', called by the client. Re-registering replaces the previous handler. Returns an unsubscribe function. */
+    cancelTask: (handler: (taskId: string) => Promise<void>) => Unsubscribe;
 }
 
 /** Methods to call client */
-export interface RpcServerClient {
+export interface RpcServerRemote {
     /** Call client's 'onProgress' method */
     onProgress: (update: { taskId: string; progress: number; message?: string | undefined; }, opts?: RpcCallOptions) => void;
     /** Call client's 'onTaskComplete' method */
@@ -61,19 +40,24 @@ export interface RpcServerClient {
     onError: (message: string, code: string, opts?: RpcCallOptions) => void;
 }
 
-/** Server RPC interface with ergonomic API. */
-/** Use `.handle` to register handlers, `.client` to call client methods, and `.dispose()` to cleanup. */
+/**
+ * Server RPC interface with ergonomic API.
+ *
+ * Use `.handle` to register handlers, `.client` to call client methods, and `.dispose()` to cleanup.
+ */
 export interface RpcServer {
     /** Register handlers for calls from client */
     readonly handle: RpcServerHandle;
     /** Call client methods */
-    readonly client: RpcServerClient;
+    readonly client: RpcServerRemote;
     /** The underlying socket instance */
     readonly socket: Socket;
     /** Whether the underlying socket is currently connected. */
     readonly connected: boolean;
     /** Run a handler whenever the socket disconnects. Returns an unsubscribe function. */
-    onDisconnect: (handler: (reason: string) => void) => UnsubscribeFunction;
+    onDisconnect: (handler: (reason: string) => void) => Unsubscribe;
+    /** Run a handler for errors the peer reports from a fire-and-forget handler. Returns an unsubscribe function. */
+    onRpcError: (handler: (error: RpcError) => void) => Unsubscribe;
     /** Whether this instance has been disposed */
     readonly disposed: boolean;
     /** Cleanup all registered handlers. Call this when done (e.g., in onBeforeUnmount or useEffect cleanup). */
@@ -111,7 +95,7 @@ export function createRpcServer(socket: Socket): RpcServer {
         if (_disposed) throw new Error('RpcServer has been disposed');
     };
 
-    const register = (event: string, listener: (...args: any[]) => void): UnsubscribeFunction => {
+    const register = (event: string, listener: (...args: any[]) => void): Unsubscribe => {
         const prev = handlerRegistry.get(event);
         if (prev) socket.off(event, prev);
         handlerRegistry.set(event, listener);
@@ -127,7 +111,7 @@ export function createRpcServer(socket: Socket): RpcServer {
     };
 
     const handle: RpcServerHandle = {
-        generate(handler: (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }) => Promise<{ text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; }>): UnsubscribeFunction {
+        generate(handler: (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }) => Promise<{ text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; }>): Unsubscribe {
             checkDisposed();
             const listener = async (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }, callback: (result: { text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; } | RpcError) => void) => {
                 try {
@@ -135,12 +119,12 @@ export function createRpcServer(socket: Socket): RpcServer {
                     callback(handlerResult);
                 } catch (error) {
                     console.error('[generate] Handler error:', error);
-                    callback(toRpcError(error, { origin: 'generate' }));
+                    callback(toRpcError(error, { method: 'generate' }));
                 }
             };
             return register('generate', listener);
         },
-        createTask(handler: (request: { title: string; description?: string | undefined; }) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }>): UnsubscribeFunction {
+        createTask(handler: (request: { title: string; description?: string | undefined; }) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }>): Unsubscribe {
             checkDisposed();
             const listener = async (request: { title: string; description?: string | undefined; }, callback: (result: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError) => void) => {
                 try {
@@ -148,12 +132,12 @@ export function createRpcServer(socket: Socket): RpcServer {
                     callback(handlerResult);
                 } catch (error) {
                     console.error('[createTask] Handler error:', error);
-                    callback(toRpcError(error, { origin: 'createTask' }));
+                    callback(toRpcError(error, { method: 'createTask' }));
                 }
             };
             return register('createTask', listener);
         },
-        getTask(handler: (taskId: string) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }>): UnsubscribeFunction {
+        getTask(handler: (taskId: string) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }>): Unsubscribe {
             checkDisposed();
             const listener = async (taskId: string, callback: (result: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError) => void) => {
                 try {
@@ -161,12 +145,12 @@ export function createRpcServer(socket: Socket): RpcServer {
                     callback(handlerResult);
                 } catch (error) {
                     console.error('[getTask] Handler error:', error);
-                    callback(toRpcError(error, { origin: 'getTask' }));
+                    callback(toRpcError(error, { method: 'getTask' }));
                 }
             };
             return register('getTask', listener);
         },
-        listTasks(handler: () => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[]>): UnsubscribeFunction {
+        listTasks(handler: () => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[]>): Unsubscribe {
             checkDisposed();
             const listener = async (callback: (result: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[] | RpcError) => void) => {
                 try {
@@ -174,31 +158,26 @@ export function createRpcServer(socket: Socket): RpcServer {
                     callback(handlerResult);
                 } catch (error) {
                     console.error('[listTasks] Handler error:', error);
-                    callback(toRpcError(error, { origin: 'listTasks' }));
+                    callback(toRpcError(error, { method: 'listTasks' }));
                 }
             };
             return register('listTasks', listener);
         },
-        cancelTask(handler: (taskId: string) => Promise<void>): UnsubscribeFunction {
+        cancelTask(handler: (taskId: string) => Promise<void>): Unsubscribe {
             checkDisposed();
             const listener = async (taskId: string) => {
                 try {
                     await handler(taskId);
                 } catch (error) {
                     console.error('[cancelTask] Handler error:', error);
-                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'cancelTask' }));
+                    socket.emit('__rpc:error__', toRpcError(error, { method: 'cancelTask' }));
                 }
             };
             return register('cancelTask', listener);
-        },
-        rpcError(handler: (error: RpcError) => void): UnsubscribeFunction {
-            checkDisposed();
-            const listener = (error: RpcError) => handler(error);
-            return register('__rpc:error__', listener);
         }
     };
 
-    const client: RpcServerClient = {
+    const client: RpcServerRemote = {
         onProgress(update: { taskId: string; progress: number; message?: string | undefined; }, opts?: RpcCallOptions) {
             if (_disposed) return;
             (opts?.volatile ? socket.volatile : socket).emit('onProgress', update);
@@ -218,10 +197,17 @@ export function createRpcServer(socket: Socket): RpcServer {
         client,
         get socket() { return socket; },
         get connected() { return socket.connected; },
-        onDisconnect(handler: (reason: string) => void): UnsubscribeFunction {
+        onDisconnect(handler: (reason: string) => void): Unsubscribe {
             checkDisposed();
             socket.on('disconnect', handler);
             const unsubscribe = () => socket.off('disconnect', handler);
+            unsubscribers.push(unsubscribe);
+            return unsubscribe;
+        },
+        onRpcError(handler: (error: RpcError) => void): Unsubscribe {
+            checkDisposed();
+            socket.on('__rpc:error__', handler);
+            const unsubscribe = () => socket.off('__rpc:error__', handler);
             unsubscribers.push(unsubscribe);
             return unsubscribe;
         },

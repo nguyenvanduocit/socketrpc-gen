@@ -40,7 +40,7 @@ interface ClientFunctions {
   /**
    * Updates the list of discovered URLs in the client
    */
-  updateDiscoveriedUrls: (url: string) => void;
+  updateDiscoveredUrls: (url: string) => void;
 
   /**
    * Get browser version

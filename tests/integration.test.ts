@@ -73,6 +73,9 @@ beforeAll(async () => {
     });
     rpc.handle.createUser(async (name, email) => ({ id: "new-id", name, email }));
     rpc.handle.deleteUser(async (userId) => {
+      // Fire-and-forget has no ack to carry a failure, so a throw here is reported
+      // back over the __rpc:error__ channel that `onRpcError` subscribes to.
+      if (userId === "boom") throw new Error("delete failed");
       deleted.push(userId);
     });
 
@@ -120,7 +123,7 @@ describe("generated RPC over a real socket pair", () => {
       expect(isRpcError(result)).toBe(true);
       if (isRpcError(result)) {
         expect(result.code).toBe("INTERNAL_ERROR");
-        expect(result.origin).toBe("getUser");
+        expect(result.method).toBe("getUser");
         expect(result.message).toBe("boom");
       }
     },
@@ -211,6 +214,71 @@ describe("generated RPC over a real socket pair", () => {
       const result = await clientRpc.server.getUser("server-calls-client");
       expect(isRpcError(result)).toBe(false);
       if (!isRpcError(result)) expect(result.id).toBe("true");
+    },
+    T,
+  );
+
+  test(
+    "onRpcError receives the error a fire-and-forget handler threw on the peer",
+    async () => {
+      const { clientRpc } = await makePair();
+      const seen = new Promise<unknown>((resolve) => {
+        clientRpc.onRpcError(resolve);
+        setTimeout(() => resolve(null), 1000);
+      });
+      clientRpc.server.deleteUser("boom");
+      const error = await seen;
+      expect(isRpcError(error)).toBe(true);
+      if (isRpcError(error)) {
+        expect(error.code).toBe("INTERNAL_ERROR");
+        expect(error.method).toBe("deleteUser");
+        expect(error.message).toBe("delete failed");
+      }
+    },
+    T,
+  );
+
+  test(
+    "onRpcError is additive — a second subscriber does not replace the first",
+    async () => {
+      // The distinction from `.handle.*`, where re-registering deliberately replaces.
+      // Go's OnRpcError matches this, so the two backends behave the same way.
+      const { clientRpc } = await makePair();
+      const hits: string[] = [];
+      const done = new Promise<void>((resolve) => {
+        clientRpc.onRpcError(() => {
+          hits.push("first");
+        });
+        clientRpc.onRpcError(() => {
+          hits.push("second");
+          resolve();
+        });
+        setTimeout(resolve, 1000);
+      });
+      clientRpc.server.deleteUser("boom");
+      await done;
+      expect(hits).toEqual(["first", "second"]);
+    },
+    T,
+  );
+
+  test(
+    "unsubscribing one onRpcError handler leaves the other subscribed",
+    async () => {
+      const { clientRpc } = await makePair();
+      const hits: string[] = [];
+      const off = clientRpc.onRpcError(() => hits.push("removed"));
+      const done = new Promise<void>((resolve) => {
+        clientRpc.onRpcError(() => {
+          hits.push("kept");
+          resolve();
+        });
+        setTimeout(resolve, 1000);
+      });
+      off();
+      clientRpc.server.deleteUser("boom");
+      await done;
+      expect(hits).toEqual(["kept"]);
     },
     T,
   );

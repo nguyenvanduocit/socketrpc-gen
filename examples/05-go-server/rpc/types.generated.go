@@ -26,7 +26,7 @@ type RpcError struct {
 	RPCError bool         `json:"__rpcError"`
 	Code     RpcErrorCode `json:"code"`
 	Message  string       `json:"message"`
-	Origin   string       `json:"origin,omitempty"`
+	Method   string       `json:"method,omitempty"`
 	Data     any          `json:"data,omitempty"`
 }
 
@@ -34,14 +34,14 @@ func (e *RpcError) Error() string {
 	if e == nil {
 		return "<nil>"
 	}
-	if e.Origin == "" {
+	if e.Method == "" {
 		return fmt.Sprintf("%s: %s", e.Code, e.Message)
 	}
-	return fmt.Sprintf("%s (%s): %s", e.Code, e.Origin, e.Message)
+	return fmt.Sprintf("%s (%s): %s", e.Code, e.Method, e.Message)
 }
 
-func NewRpcError(code RpcErrorCode, message string, origin string, data any) *RpcError {
-	return &RpcError{RPCError: true, Code: code, Message: message, Origin: origin, Data: data}
+func NewRpcError(code RpcErrorCode, message string, method string, data any) *RpcError {
+	return &RpcError{RPCError: true, Code: code, Message: message, Method: method, Data: data}
 }
 
 func IsRpcError(err error) bool {
@@ -49,21 +49,21 @@ func IsRpcError(err error) bool {
 	return errors.As(err, &rpcErr) && rpcErr != nil && rpcErr.RPCError
 }
 
-func rpc_errorFromError(err error, origin string) *RpcError {
+func rpc_errorFromError(err error, method string) *RpcError {
 	var rpcErr *RpcError
 	if errors.As(err, &rpcErr) && rpcErr != nil {
 		clone := *rpcErr
 		clone.RPCError = true
-		if clone.Origin == "" {
-			clone.Origin = origin
+		if clone.Method == "" {
+			clone.Method = method
 		}
 		return &clone
 	}
-	return NewRpcError(CodeInternalError, err.Error(), origin, nil)
+	return NewRpcError(CodeInternalError, err.Error(), method, nil)
 }
 
-func rpc_errorFromPanic(value any, origin string) *RpcError {
-	return NewRpcError(CodeInternalError, fmt.Sprint(value), origin, nil)
+func rpc_errorFromPanic(value any, method string) *RpcError {
+	return NewRpcError(CodeInternalError, fmt.Sprint(value), method, nil)
 }
 
 // A payload the JSON encoder refuses would be dropped by Socket.IO's write
@@ -71,9 +71,9 @@ func rpc_errorFromPanic(value any, origin string) *RpcError {
 // timeout. Checking before the value is handed over turns that silence into
 // an immediate answer that names the offending value — the common cause
 // being a required string enum left at its zero value.
-func rpc_ensureEncodable(value any, origin string) *RpcError {
+func rpc_ensureEncodable(value any, method string) *RpcError {
 	if _, err := json.Marshal(value); err != nil {
-		return NewRpcError(CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), origin, nil)
+		return NewRpcError(CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), method, nil)
 	}
 	return nil
 }

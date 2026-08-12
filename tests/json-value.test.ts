@@ -141,7 +141,7 @@ describe("extracting JSON values from TypeScript", () => {
       // The TypeScript backend reads the string signatures, not the IR, so
       // teaching the IR about `unknown` must leave its output byte-identical to
       // what a pre-JSON-value generator wrote for the same file.
-      expect(extracted.clientFunctions).toEqual([
+      expect(extracted.clientToServerFunctions).toEqual([
         {
           name: "readKey",
           params: [{ name: "key", type: "string", isOptional: false }],
@@ -182,7 +182,7 @@ describe("extracting JSON values from TypeScript", () => {
 
       const server = readFileSync(path.join(outputDir, "server.generated.ts"), "utf8");
       expect(server).toContain(
-        "readKey: (handler: (key: string) => Promise<unknown>) => UnsubscribeFunction",
+        "readKey: (handler: (key: string) => Promise<unknown>) => Unsubscribe",
       );
     },
     TEST_TIMEOUT_MS,

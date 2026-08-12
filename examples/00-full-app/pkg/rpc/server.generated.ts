@@ -5,67 +5,54 @@
  *
  * Usage:
  *   const server = createRpcServer(socket);
- *   server.handle.eventName(async (data) => { ... });
- *   server.client.methodName(args);
+ *   server.handle.generateText(async (prompt) => { ... });
+ *   server.client.showError(error);
  *   server.dispose();
  *
  * To regenerate: bunx socketrpc-gen ./define.ts
  */
 
 import type { Socket } from "socket.io";
-import { type RpcError, type RpcCallOptions, type UnsubscribeFunction, toRpcError, rpcWhenAborted } from "./types.generated";
+import { type RpcError, type RpcCallOptions, type Unsubscribe, toRpcError, rpcWhenAborted } from "./types.generated";
 import type { GetPlanRequest, Plan } from "./define";
 
-// === SOCKET EVENT MAPS (optional typing aid) ===
-/** Events the client emits and the server listens for. Apply to a typed Socket/Server. */
-export interface ClientToServerEvents {
-    generateText: (prompt: string, ack: (result: string | RpcError) => void) => void;
-    getPlan: (request: GetPlanRequest, ack: (result: Plan | RpcError) => void) => void;
-    "__rpc:error__": (error: RpcError) => void;
-}
-
-/** Events the server emits and the client listens for. Apply to a typed Socket/Server. */
-export interface ServerToClientEvents {
-    showError: (error: Error) => void;
-    updateDiscoveriedUrls: (url: string) => void;
-    getBrowserVersion: (ack: (result: string | RpcError) => void) => void;
-    "__rpc:error__": (error: RpcError) => void;
-}
-
-// === RPCSERVER INTERFACE ===
+// === RpcServer INTERFACE ===
 /** Handler registration methods - implement these to handle calls from client */
 export interface RpcServerHandle {
-    /** Register handler for 'generateText' - called by client. Returns an unsubscribe function. */
-    generateText: (handler: (prompt: string) => Promise<string>) => UnsubscribeFunction;
-    /** Register handler for 'getPlan' - called by client. Returns an unsubscribe function. */
-    getPlan: (handler: (request: GetPlanRequest) => Promise<Plan>) => UnsubscribeFunction;
-    /** Register handler for RPC errors. Returns an unsubscribe function. */
-    rpcError: (handler: (error: RpcError) => void) => UnsubscribeFunction;
+    /** Register the handler for 'generateText', called by the client. Re-registering replaces the previous handler. Returns an unsubscribe function. */
+    generateText: (handler: (prompt: string) => Promise<string>) => Unsubscribe;
+    /** Register the handler for 'getPlan', called by the client. Re-registering replaces the previous handler. Returns an unsubscribe function. */
+    getPlan: (handler: (request: GetPlanRequest) => Promise<Plan>) => Unsubscribe;
 }
 
 /** Methods to call client */
-export interface RpcServerClient {
+export interface RpcServerRemote {
     /** Call client's 'showError' method */
     showError: (error: Error, opts?: RpcCallOptions) => void;
-    /** Call client's 'updateDiscoveriedUrls' method */
-    updateDiscoveriedUrls: (url: string, opts?: RpcCallOptions) => void;
+    /** Call client's 'updateDiscoveredUrls' method */
+    updateDiscoveredUrls: (url: string, opts?: RpcCallOptions) => void;
     /** Call client's 'getBrowserVersion' method */
     getBrowserVersion: (opts?: RpcCallOptions) => Promise<string | RpcError>;
 }
 
-/** Server RPC interface with ergonomic API. */
-/** Use `.handle` to register handlers, `.client` to call client methods, and `.dispose()` to cleanup. */
+/**
+ * Server RPC interface with ergonomic API.
+ *
+ * Use `.handle` to register handlers, `.client` to call client methods, and `.dispose()` to cleanup.
+ */
 export interface RpcServer {
     /** Register handlers for calls from client */
     readonly handle: RpcServerHandle;
     /** Call client methods */
-    readonly client: RpcServerClient;
+    readonly client: RpcServerRemote;
     /** The underlying socket instance */
     readonly socket: Socket;
     /** Whether the underlying socket is currently connected. */
     readonly connected: boolean;
     /** Run a handler whenever the socket disconnects. Returns an unsubscribe function. */
-    onDisconnect: (handler: (reason: string) => void) => UnsubscribeFunction;
+    onDisconnect: (handler: (reason: string) => void) => Unsubscribe;
+    /** Run a handler for errors the peer reports from a fire-and-forget handler. Returns an unsubscribe function. */
+    onRpcError: (handler: (error: RpcError) => void) => Unsubscribe;
     /** Whether this instance has been disposed */
     readonly disposed: boolean;
     /** Cleanup all registered handlers. Call this when done (e.g., in onBeforeUnmount or useEffect cleanup). */
@@ -103,7 +90,7 @@ export function createRpcServer(socket: Socket): RpcServer {
         if (_disposed) throw new Error('RpcServer has been disposed');
     };
 
-    const register = (event: string, listener: (...args: any[]) => void): UnsubscribeFunction => {
+    const register = (event: string, listener: (...args: any[]) => void): Unsubscribe => {
         const prev = handlerRegistry.get(event);
         if (prev) socket.off(event, prev);
         handlerRegistry.set(event, listener);
@@ -119,7 +106,7 @@ export function createRpcServer(socket: Socket): RpcServer {
     };
 
     const handle: RpcServerHandle = {
-        generateText(handler: (prompt: string) => Promise<string>): UnsubscribeFunction {
+        generateText(handler: (prompt: string) => Promise<string>): Unsubscribe {
             checkDisposed();
             const listener = async (prompt: string, callback: (result: string | RpcError) => void) => {
                 try {
@@ -127,12 +114,12 @@ export function createRpcServer(socket: Socket): RpcServer {
                     callback(handlerResult);
                 } catch (error) {
                     console.error('[generateText] Handler error:', error);
-                    callback(toRpcError(error, { origin: 'generateText' }));
+                    callback(toRpcError(error, { method: 'generateText' }));
                 }
             };
             return register('generateText', listener);
         },
-        getPlan(handler: (request: GetPlanRequest) => Promise<Plan>): UnsubscribeFunction {
+        getPlan(handler: (request: GetPlanRequest) => Promise<Plan>): Unsubscribe {
             checkDisposed();
             const listener = async (request: GetPlanRequest, callback: (result: Plan | RpcError) => void) => {
                 try {
@@ -140,37 +127,32 @@ export function createRpcServer(socket: Socket): RpcServer {
                     callback(handlerResult);
                 } catch (error) {
                     console.error('[getPlan] Handler error:', error);
-                    callback(toRpcError(error, { origin: 'getPlan' }));
+                    callback(toRpcError(error, { method: 'getPlan' }));
                 }
             };
             return register('getPlan', listener);
-        },
-        rpcError(handler: (error: RpcError) => void): UnsubscribeFunction {
-            checkDisposed();
-            const listener = (error: RpcError) => handler(error);
-            return register('__rpc:error__', listener);
         }
     };
 
-    const client: RpcServerClient = {
+    const client: RpcServerRemote = {
         showError(error: Error, opts?: RpcCallOptions) {
             if (_disposed) return;
             (opts?.volatile ? socket.volatile : socket).emit('showError', error);
         },
-        updateDiscoveriedUrls(url: string, opts?: RpcCallOptions) {
+        updateDiscoveredUrls(url: string, opts?: RpcCallOptions) {
             if (_disposed) return;
-            (opts?.volatile ? socket.volatile : socket).emit('updateDiscoveriedUrls', url);
+            (opts?.volatile ? socket.volatile : socket).emit('updateDiscoveredUrls', url);
         },
         async getBrowserVersion(opts?: RpcCallOptions): Promise<string | RpcError> {
-            if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'getBrowserVersion' };
-            if (opts?.signal?.aborted) return { __rpcError: true, message: 'Request aborted', code: 'ABORTED', origin: 'getBrowserVersion' };
+            if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', method: 'getBrowserVersion' };
+            if (opts?.signal?.aborted) return { __rpcError: true, message: 'Request aborted', code: 'ABORTED', method: 'getBrowserVersion' };
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
                 const ack = emitter.timeout(timeout).emitWithAck('getBrowserVersion');
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'getBrowserVersion')]) : ack);
             } catch (err) {
-                return toRpcError(err, { origin: 'getBrowserVersion' });
+                return toRpcError(err, { method: 'getBrowserVersion' });
             }
         }
     };
@@ -180,10 +162,17 @@ export function createRpcServer(socket: Socket): RpcServer {
         client,
         get socket() { return socket; },
         get connected() { return socket.connected; },
-        onDisconnect(handler: (reason: string) => void): UnsubscribeFunction {
+        onDisconnect(handler: (reason: string) => void): Unsubscribe {
             checkDisposed();
             socket.on('disconnect', handler);
             const unsubscribe = () => socket.off('disconnect', handler);
+            unsubscribers.push(unsubscribe);
+            return unsubscribe;
+        },
+        onRpcError(handler: (error: RpcError) => void): Unsubscribe {
+            checkDisposed();
+            socket.on('__rpc:error__', handler);
+            const unsubscribe = () => socket.off('__rpc:error__', handler);
             unsubscribers.push(unsubscribe);
             return unsubscribe;
         },

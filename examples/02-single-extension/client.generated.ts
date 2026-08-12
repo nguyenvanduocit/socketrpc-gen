@@ -5,57 +5,34 @@
  *
  * Usage:
  *   const client = createRpcClient(socket);
- *   client.handle.eventName(async (data) => { ... });
- *   client.server.methodName(args);
+ *   client.handle.showError(async (error) => { ... });
+ *   client.server.ping();
  *   client.dispose();
  *
  * To regenerate: bunx socketrpc-gen ./define.ts
  */
 
 import type { Socket } from "socket.io-client";
-import { type RpcError, type RpcCallOptions, type UnsubscribeFunction, toRpcError, rpcWhenAborted } from "./types.generated";
+import { type RpcError, type RpcCallOptions, type Unsubscribe, toRpcError, rpcWhenAborted } from "./types.generated";
 import type { Product, CreateProductRequest } from "./define";
 
-// === SOCKET EVENT MAPS (optional typing aid) ===
-/** Events the client emits and the server listens for. Apply to a typed Socket/Server. */
-export interface ClientToServerEvents {
-    ping: (ack: (result: string | RpcError) => void) => void;
-    getServerTime: (ack: (result: number | RpcError) => void) => void;
-    getProduct: (productId: string, ack: (result: Product | RpcError) => void) => void;
-    createProduct: (request: CreateProductRequest, ack: (result: Product | RpcError) => void) => void;
-    listProducts: (ack: (result: Product[] | RpcError) => void) => void;
-    "__rpc:error__": (error: RpcError) => void;
-}
-
-/** Events the server emits and the client listens for. Apply to a typed Socket/Server. */
-export interface ServerToClientEvents {
-    showError: (error: Error) => void;
-    showSuccess: (message: string) => void;
-    getClientInfo: (ack: (result: { userAgent: string; language: string; } | RpcError) => void) => void;
-    onProductUpdated: (product: Product) => void;
-    refreshProducts: () => void;
-    "__rpc:error__": (error: RpcError) => void;
-}
-
-// === RPCCLIENT INTERFACE ===
+// === RpcClient INTERFACE ===
 /** Handler registration methods - implement these to handle calls from server */
 export interface RpcClientHandle {
-    /** Register handler for 'showError' - called by server. Returns an unsubscribe function. */
-    showError: (handler: (error: Error) => Promise<void>) => UnsubscribeFunction;
-    /** Register handler for 'showSuccess' - called by server. Returns an unsubscribe function. */
-    showSuccess: (handler: (message: string) => Promise<void>) => UnsubscribeFunction;
-    /** Register handler for 'getClientInfo' - called by server. Returns an unsubscribe function. */
-    getClientInfo: (handler: () => Promise<{ userAgent: string; language: string; }>) => UnsubscribeFunction;
-    /** Register handler for 'onProductUpdated' - called by server. Returns an unsubscribe function. */
-    onProductUpdated: (handler: (product: Product) => Promise<void>) => UnsubscribeFunction;
-    /** Register handler for 'refreshProducts' - called by server. Returns an unsubscribe function. */
-    refreshProducts: (handler: () => Promise<void>) => UnsubscribeFunction;
-    /** Register handler for RPC errors. Returns an unsubscribe function. */
-    rpcError: (handler: (error: RpcError) => void) => UnsubscribeFunction;
+    /** Register the handler for 'showError', called by the server. Re-registering replaces the previous handler. Returns an unsubscribe function. */
+    showError: (handler: (error: Error) => Promise<void>) => Unsubscribe;
+    /** Register the handler for 'showSuccess', called by the server. Re-registering replaces the previous handler. Returns an unsubscribe function. */
+    showSuccess: (handler: (message: string) => Promise<void>) => Unsubscribe;
+    /** Register the handler for 'getClientInfo', called by the server. Re-registering replaces the previous handler. Returns an unsubscribe function. */
+    getClientInfo: (handler: () => Promise<{ userAgent: string; language: string; }>) => Unsubscribe;
+    /** Register the handler for 'onProductUpdated', called by the server. Re-registering replaces the previous handler. Returns an unsubscribe function. */
+    onProductUpdated: (handler: (product: Product) => Promise<void>) => Unsubscribe;
+    /** Register the handler for 'refreshProducts', called by the server. Re-registering replaces the previous handler. Returns an unsubscribe function. */
+    refreshProducts: (handler: () => Promise<void>) => Unsubscribe;
 }
 
 /** Methods to call server */
-export interface RpcClientServer {
+export interface RpcClientRemote {
     /** Call server's 'ping' method */
     ping: (opts?: RpcCallOptions) => Promise<string | RpcError>;
     /** Call server's 'getServerTime' method */
@@ -68,23 +45,28 @@ export interface RpcClientServer {
     listProducts: (opts?: RpcCallOptions) => Promise<Product[] | RpcError>;
 }
 
-/** Client RPC interface with ergonomic API. */
-/** Use `.handle` to register handlers, `.server` to call server methods, and `.dispose()` to cleanup. */
+/**
+ * Client RPC interface with ergonomic API.
+ *
+ * Use `.handle` to register handlers, `.server` to call server methods, and `.dispose()` to cleanup.
+ */
 export interface RpcClient {
     /** Register handlers for calls from server */
     readonly handle: RpcClientHandle;
     /** Call server methods */
-    readonly server: RpcClientServer;
+    readonly server: RpcClientRemote;
     /** The underlying socket instance */
     readonly socket: Socket;
     /** Whether the underlying socket is currently connected. */
     readonly connected: boolean;
     /** Run a handler whenever the socket disconnects. Returns an unsubscribe function. */
-    onDisconnect: (handler: (reason: string) => void) => UnsubscribeFunction;
+    onDisconnect: (handler: (reason: string) => void) => Unsubscribe;
     /** Run a handler on every (re)connect — use it to re-sync or re-authenticate. Returns an unsubscribe function. */
-    onConnect: (handler: () => void) => UnsubscribeFunction;
+    onConnect: (handler: () => void) => Unsubscribe;
     /** Run a handler after a successful reconnect. Returns an unsubscribe function. */
-    onReconnect: (handler: (attempt: number) => void) => UnsubscribeFunction;
+    onReconnect: (handler: (attempt: number) => void) => Unsubscribe;
+    /** Run a handler for errors the peer reports from a fire-and-forget handler. Returns an unsubscribe function. */
+    onRpcError: (handler: (error: RpcError) => void) => Unsubscribe;
     /** Whether this instance has been disposed */
     readonly disposed: boolean;
     /** Cleanup all registered handlers. Call this when done (e.g., in onBeforeUnmount or useEffect cleanup). */
@@ -122,7 +104,7 @@ export function createRpcClient(socket: Socket): RpcClient {
         if (_disposed) throw new Error('RpcClient has been disposed');
     };
 
-    const register = (event: string, listener: (...args: any[]) => void): UnsubscribeFunction => {
+    const register = (event: string, listener: (...args: any[]) => void): Unsubscribe => {
         const prev = handlerRegistry.get(event);
         if (prev) socket.off(event, prev);
         handlerRegistry.set(event, listener);
@@ -138,31 +120,31 @@ export function createRpcClient(socket: Socket): RpcClient {
     };
 
     const handle: RpcClientHandle = {
-        showError(handler: (error: Error) => Promise<void>): UnsubscribeFunction {
+        showError(handler: (error: Error) => Promise<void>): Unsubscribe {
             checkDisposed();
             const listener = async (error: Error) => {
                 try {
                     await handler(error);
                 } catch (error) {
                     console.error('[showError] Handler error:', error);
-                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'showError' }));
+                    socket.emit('__rpc:error__', toRpcError(error, { method: 'showError' }));
                 }
             };
             return register('showError', listener);
         },
-        showSuccess(handler: (message: string) => Promise<void>): UnsubscribeFunction {
+        showSuccess(handler: (message: string) => Promise<void>): Unsubscribe {
             checkDisposed();
             const listener = async (message: string) => {
                 try {
                     await handler(message);
                 } catch (error) {
                     console.error('[showSuccess] Handler error:', error);
-                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'showSuccess' }));
+                    socket.emit('__rpc:error__', toRpcError(error, { method: 'showSuccess' }));
                 }
             };
             return register('showSuccess', listener);
         },
-        getClientInfo(handler: () => Promise<{ userAgent: string; language: string; }>): UnsubscribeFunction {
+        getClientInfo(handler: () => Promise<{ userAgent: string; language: string; }>): Unsubscribe {
             checkDisposed();
             const listener = async (callback: (result: { userAgent: string; language: string; } | RpcError) => void) => {
                 try {
@@ -170,101 +152,96 @@ export function createRpcClient(socket: Socket): RpcClient {
                     callback(handlerResult);
                 } catch (error) {
                     console.error('[getClientInfo] Handler error:', error);
-                    callback(toRpcError(error, { origin: 'getClientInfo' }));
+                    callback(toRpcError(error, { method: 'getClientInfo' }));
                 }
             };
             return register('getClientInfo', listener);
         },
-        onProductUpdated(handler: (product: Product) => Promise<void>): UnsubscribeFunction {
+        onProductUpdated(handler: (product: Product) => Promise<void>): Unsubscribe {
             checkDisposed();
             const listener = async (product: Product) => {
                 try {
                     await handler(product);
                 } catch (error) {
                     console.error('[onProductUpdated] Handler error:', error);
-                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'onProductUpdated' }));
+                    socket.emit('__rpc:error__', toRpcError(error, { method: 'onProductUpdated' }));
                 }
             };
             return register('onProductUpdated', listener);
         },
-        refreshProducts(handler: () => Promise<void>): UnsubscribeFunction {
+        refreshProducts(handler: () => Promise<void>): Unsubscribe {
             checkDisposed();
             const listener = async () => {
                 try {
                     await handler();
                 } catch (error) {
                     console.error('[refreshProducts] Handler error:', error);
-                    socket.emit('__rpc:error__', toRpcError(error, { origin: 'refreshProducts' }));
+                    socket.emit('__rpc:error__', toRpcError(error, { method: 'refreshProducts' }));
                 }
             };
             return register('refreshProducts', listener);
-        },
-        rpcError(handler: (error: RpcError) => void): UnsubscribeFunction {
-            checkDisposed();
-            const listener = (error: RpcError) => handler(error);
-            return register('__rpc:error__', listener);
         }
     };
 
-    const server: RpcClientServer = {
+    const server: RpcClientRemote = {
         async ping(opts?: RpcCallOptions): Promise<string | RpcError> {
-            if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'ping' };
-            if (opts?.signal?.aborted) return { __rpcError: true, message: 'Request aborted', code: 'ABORTED', origin: 'ping' };
+            if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', method: 'ping' };
+            if (opts?.signal?.aborted) return { __rpcError: true, message: 'Request aborted', code: 'ABORTED', method: 'ping' };
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
                 const ack = emitter.timeout(timeout).emitWithAck('ping');
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'ping')]) : ack);
             } catch (err) {
-                return toRpcError(err, { origin: 'ping' });
+                return toRpcError(err, { method: 'ping' });
             }
         },
         async getServerTime(opts?: RpcCallOptions): Promise<number | RpcError> {
-            if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'getServerTime' };
-            if (opts?.signal?.aborted) return { __rpcError: true, message: 'Request aborted', code: 'ABORTED', origin: 'getServerTime' };
+            if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', method: 'getServerTime' };
+            if (opts?.signal?.aborted) return { __rpcError: true, message: 'Request aborted', code: 'ABORTED', method: 'getServerTime' };
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
                 const ack = emitter.timeout(timeout).emitWithAck('getServerTime');
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'getServerTime')]) : ack);
             } catch (err) {
-                return toRpcError(err, { origin: 'getServerTime' });
+                return toRpcError(err, { method: 'getServerTime' });
             }
         },
         async getProduct(productId: string, opts?: RpcCallOptions): Promise<Product | RpcError> {
-            if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'getProduct' };
-            if (opts?.signal?.aborted) return { __rpcError: true, message: 'Request aborted', code: 'ABORTED', origin: 'getProduct' };
+            if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', method: 'getProduct' };
+            if (opts?.signal?.aborted) return { __rpcError: true, message: 'Request aborted', code: 'ABORTED', method: 'getProduct' };
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
                 const ack = emitter.timeout(timeout).emitWithAck('getProduct', productId);
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'getProduct')]) : ack);
             } catch (err) {
-                return toRpcError(err, { origin: 'getProduct' });
+                return toRpcError(err, { method: 'getProduct' });
             }
         },
         async createProduct(request: CreateProductRequest, opts?: RpcCallOptions): Promise<Product | RpcError> {
-            if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'createProduct' };
-            if (opts?.signal?.aborted) return { __rpcError: true, message: 'Request aborted', code: 'ABORTED', origin: 'createProduct' };
+            if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', method: 'createProduct' };
+            if (opts?.signal?.aborted) return { __rpcError: true, message: 'Request aborted', code: 'ABORTED', method: 'createProduct' };
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
                 const ack = emitter.timeout(timeout).emitWithAck('createProduct', request);
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'createProduct')]) : ack);
             } catch (err) {
-                return toRpcError(err, { origin: 'createProduct' });
+                return toRpcError(err, { method: 'createProduct' });
             }
         },
         async listProducts(opts?: RpcCallOptions): Promise<Product[] | RpcError> {
-            if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', origin: 'listProducts' };
-            if (opts?.signal?.aborted) return { __rpcError: true, message: 'Request aborted', code: 'ABORTED', origin: 'listProducts' };
+            if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', method: 'listProducts' };
+            if (opts?.signal?.aborted) return { __rpcError: true, message: 'Request aborted', code: 'ABORTED', method: 'listProducts' };
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
                 const ack = emitter.timeout(timeout).emitWithAck('listProducts');
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'listProducts')]) : ack);
             } catch (err) {
-                return toRpcError(err, { origin: 'listProducts' });
+                return toRpcError(err, { method: 'listProducts' });
             }
         }
     };
@@ -274,24 +251,31 @@ export function createRpcClient(socket: Socket): RpcClient {
         server,
         get socket() { return socket; },
         get connected() { return socket.connected; },
-        onDisconnect(handler: (reason: string) => void): UnsubscribeFunction {
+        onDisconnect(handler: (reason: string) => void): Unsubscribe {
             checkDisposed();
             socket.on('disconnect', handler);
             const unsubscribe = () => socket.off('disconnect', handler);
             unsubscribers.push(unsubscribe);
             return unsubscribe;
         },
-        onConnect(handler: () => void): UnsubscribeFunction {
+        onConnect(handler: () => void): Unsubscribe {
             checkDisposed();
             socket.on('connect', handler);
             const unsubscribe = () => socket.off('connect', handler);
             unsubscribers.push(unsubscribe);
             return unsubscribe;
         },
-        onReconnect(handler: (attempt: number) => void): UnsubscribeFunction {
+        onReconnect(handler: (attempt: number) => void): Unsubscribe {
             checkDisposed();
             socket.io.on('reconnect', handler);
             const unsubscribe = () => socket.io.off('reconnect', handler);
+            unsubscribers.push(unsubscribe);
+            return unsubscribe;
+        },
+        onRpcError(handler: (error: RpcError) => void): Unsubscribe {
+            checkDisposed();
+            socket.on('__rpc:error__', handler);
+            const unsubscribe = () => socket.off('__rpc:error__', handler);
             unsubscribers.push(unsubscribe);
             return unsubscribe;
         },

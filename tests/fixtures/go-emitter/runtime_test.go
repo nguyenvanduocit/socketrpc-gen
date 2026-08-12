@@ -257,7 +257,7 @@ func TestOnRpcErrorReceivesPeerReports(t *testing.T) {
 		"__rpcError": true,
 		"code":       "INTERNAL_ERROR",
 		"message":    "client handler exploded",
-		"origin":     "notify",
+		"method":     "notify",
 	})
 
 	select {
@@ -265,10 +265,79 @@ func TestOnRpcErrorReceivesPeerReports(t *testing.T) {
 		if failure.Code != CodeInternalError || failure.Message != "client handler exploded" {
 			t.Fatalf("unexpected report: %#v", failure)
 		}
-		if failure.Origin != "notify" {
-			t.Fatalf("origin = %q", failure.Origin)
+		if failure.Method != "notify" {
+			t.Fatalf("method = %q", failure.Method)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("out-of-band error report never reached the observer")
+	}
+}
+
+// Observers are additive and ordered, matching the TypeScript client's onRpcError.
+// A second registration used to displace the first; it must not.
+func TestOnRpcErrorObserversAreAdditiveAndOrdered(t *testing.T) {
+	raw := socket.NewSocket()
+	binding, err := BindServer(raw, &testHandler{deleted: make(chan string, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer binding.Dispose()
+
+	order := make(chan string, 3)
+	binding.OnRpcError(func(*RpcError) { order <- "first" })
+	// A panicking observer must not stop the ones registered after it.
+	binding.OnRpcError(func(*RpcError) { panic("observer exploded") })
+	binding.OnRpcError(func(*RpcError) { order <- "third" })
+
+	raw.Trigger(RPCErrorEvent, map[string]any{
+		"__rpcError": true,
+		"code":       "INTERNAL_ERROR",
+		"message":    "boom",
+		"method":     "notify",
+	})
+
+	for _, want := range []string{"first", "third"} {
+		select {
+		case got := <-order:
+			if got != want {
+				t.Fatalf("observer order = %q, want %q", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("observer %q never ran", want)
+		}
+	}
+}
+
+// The unsubscribe an OnRpcError registration returns detaches only that observer.
+func TestOnRpcErrorUnsubscribeDetachesOneObserver(t *testing.T) {
+	raw := socket.NewSocket()
+	binding, err := BindServer(raw, &testHandler{deleted: make(chan string, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer binding.Dispose()
+
+	removed := make(chan struct{}, 1)
+	kept := make(chan struct{}, 1)
+	unsubscribe := binding.OnRpcError(func(*RpcError) { removed <- struct{}{} })
+	binding.OnRpcError(func(*RpcError) { kept <- struct{}{} })
+	unsubscribe()
+
+	raw.Trigger(RPCErrorEvent, map[string]any{
+		"__rpcError": true,
+		"code":       "INTERNAL_ERROR",
+		"message":    "boom",
+		"method":     "notify",
+	})
+
+	select {
+	case <-kept:
+	case <-time.After(time.Second):
+		t.Fatal("the surviving observer never ran")
+	}
+	select {
+	case <-removed:
+		t.Fatal("the unsubscribed observer still ran")
+	default:
 	}
 }

@@ -6,8 +6,9 @@
  * To regenerate this file, run:
  * bunx socketrpc-gen ./define.ts
  */
+
 /** Function to unsubscribe from an event listener. Call this to clean up the listener. */
-export type UnsubscribeFunction = () => void;
+export type Unsubscribe = () => void;
 
 /** Per-call options for RPC methods. Extensible — new fields can be added without breaking callers. */
 export interface RpcCallOptions {
@@ -40,8 +41,8 @@ export interface RpcError {
     message: string;
     /** The error code. Standard codes are in RpcErrorCodes. */
     code: string;
-    /** Name of the RPC function where the error originated. */
-    origin?: string;
+    /** Name of the RPC method where the error originated. */
+    method?: string;
     /** Optional error-specific payload. */
     data?: any;
 }
@@ -57,7 +58,7 @@ export function rpcError(code: string, message: string, data?: any): RpcError {
 }
 
 /** Normalize any thrown value into a branded RpcError. Passes existing RpcError values through unchanged, and maps socket.io's timeout and disconnect errors to the TIMEOUT and DISCONNECTED codes. */
-export function toRpcError(err: unknown, opts?: { code?: string; origin?: string }): RpcError {
+export function toRpcError(err: unknown, opts?: { code?: string; method?: string }): RpcError {
     if (isRpcError(err)) return err;
     const message = err instanceof Error ? err.message : String(err);
     const isTimeout = err instanceof Error && err.message === "operation has timed out";
@@ -67,14 +68,33 @@ export function toRpcError(err: unknown, opts?: { code?: string; origin?: string
         : isDisconnected
             ? RpcErrorCodes.DISCONNECTED
             : RpcErrorCodes.INTERNAL_ERROR);
-    return { __rpcError: true, message, code, origin: opts?.origin };
+    return { __rpcError: true, message, code, method: opts?.method };
 }
 
 /** Resolve with an ABORTED RpcError when the signal fires. Internal helper raced against in-flight calls so an aborted call stops awaiting its acknowledgement. */
-export function rpcWhenAborted(signal: AbortSignal, origin: string): Promise<RpcError> {
+export function rpcWhenAborted(signal: AbortSignal, method: string): Promise<RpcError> {
     return new Promise((resolve) => {
-        const fire = () => resolve({ __rpcError: true, code: RpcErrorCodes.ABORTED, message: "Request aborted", origin });
+        const fire = () => resolve({ __rpcError: true, code: RpcErrorCodes.ABORTED, message: "Request aborted", method });
         if (signal.aborted) return fire();
         signal.addEventListener("abort", fire, { once: true });
     });
+}
+
+// === SOCKET EVENT MAPS (optional typing aid) ===
+/** Events the client emits and the server listens for. Apply to a typed Socket/Server. */
+export interface ClientToServerEvents {
+    generate: (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }, ack: (result: { text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; } | RpcError) => void) => void;
+    createTask: (request: { title: string; description?: string | undefined; }, ack: (result: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError) => void) => void;
+    getTask: (taskId: string, ack: (result: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError) => void) => void;
+    listTasks: (ack: (result: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[] | RpcError) => void) => void;
+    cancelTask: (taskId: string) => void;
+    "__rpc:error__": (error: RpcError) => void;
+}
+
+/** Events the server emits and the client listens for. Apply to a typed Socket/Server. */
+export interface ServerToClientEvents {
+    onProgress: (update: { taskId: string; progress: number; message?: string | undefined; }) => void;
+    onTaskComplete: (task: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }) => void;
+    onError: (message: string, code: string) => void;
+    "__rpc:error__": (error: RpcError) => void;
 }

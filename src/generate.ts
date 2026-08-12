@@ -12,8 +12,8 @@ import { resolveConfig, type FunctionSignature, type ResolvedConfig, type Genera
  * Logs a human-readable summary of the generated API surface to stdout.
  */
 function logGenerationSummary(
-  clientFunctions: FunctionSignature[],
-  serverFunctions: FunctionSignature[],
+  clientToServerFunctions: FunctionSignature[],
+  serverToClientFunctions: FunctionSignature[],
   emittedFiles: string[],
   config: ResolvedConfig,
 ): void {
@@ -25,34 +25,33 @@ function logGenerationSummary(
     console.log(`   Transport: ${config.goSocketImport}`);
   }
 
+  const handled = (fns: FunctionSignature[]) =>
+    fns.forEach((f) => console.log(`     - ${f.name}(${f.params.map((p) => p.name).join(", ")})`));
+  const called = (fns: FunctionSignature[]) =>
+    fns.forEach((f) =>
+      console.log(`     - ${f.name}(${f.params.map((p) => p.name).join(", ")}) -> ${f.returnType}`),
+    );
+
   console.log("\n📋 Client API (createRpcClient):");
-  if (serverFunctions.length > 0) {
+  if (serverToClientFunctions.length > 0) {
     console.log("   .handle (from server):");
-    serverFunctions.forEach((f) => {
-      console.log(`     - ${f.name}(${f.params.map((p) => p.name).join(", ")})`);
-    });
+    handled(serverToClientFunctions);
   }
-  if (clientFunctions.length > 0) {
+  if (clientToServerFunctions.length > 0) {
     console.log("   .server (to server):");
-    clientFunctions.forEach((f) => {
-      console.log(`     - ${f.name}(${f.params.map((p) => p.name).join(", ")}) -> ${f.returnType}`);
-    });
+    called(clientToServerFunctions);
   }
 
   const serverHeading =
     config.serverLanguage === "go" ? "Server API (Go ServerHandler / Client)" : "Server API (createRpcServer)";
   console.log(`\n📋 ${serverHeading}:`);
-  if (clientFunctions.length > 0) {
+  if (clientToServerFunctions.length > 0) {
     console.log("   .handle (from client):");
-    clientFunctions.forEach((f) => {
-      console.log(`     - ${f.name}(${f.params.map((p) => p.name).join(", ")})`);
-    });
+    handled(clientToServerFunctions);
   }
-  if (serverFunctions.length > 0) {
+  if (serverToClientFunctions.length > 0) {
     console.log("   .client (to client):");
-    serverFunctions.forEach((f) => {
-      console.log(`     - ${f.name}(${f.params.map((p) => p.name).join(", ")}) -> ${f.returnType}`);
-    });
+    called(serverToClientFunctions);
   }
 }
 
@@ -72,7 +71,7 @@ export async function generateRpcPackage(userConfig: GeneratorConfig): Promise<v
   validateInputFile(config.inputPath);
 
   const extracted = await extractInterfacesFromFile(config.inputPath);
-  const { clientFunctions, serverFunctions, usedTypes, inputFile } = extracted;
+  const { clientToServerFunctions, serverToClientFunctions, usedTypes, inputFile } = extracted;
 
   // Resolve *and* validate the portable schema before writing anything, so a
   // contract Go cannot model fails without leaving a half-generated package
@@ -96,13 +95,21 @@ export async function generateRpcPackage(userConfig: GeneratorConfig): Promise<v
     },
   });
 
-  generateTypesFile(outputProject, config.outputDir, config);
+  generateTypesFile(
+    outputProject,
+    config.outputDir,
+    config,
+    clientToServerFunctions,
+    serverToClientFunctions,
+    usedTypes,
+    inputFile,
+  );
   generateSideFile(
     "client",
     outputProject,
     config.outputDir,
-    clientFunctions,
-    serverFunctions,
+    clientToServerFunctions,
+    serverToClientFunctions,
     config,
     usedTypes,
     inputFile,
@@ -114,8 +121,8 @@ export async function generateRpcPackage(userConfig: GeneratorConfig): Promise<v
       "server",
       outputProject,
       config.outputDir,
-      clientFunctions,
-      serverFunctions,
+      clientToServerFunctions,
+      serverToClientFunctions,
       config,
       usedTypes,
       inputFile,
@@ -132,5 +139,5 @@ export async function generateRpcPackage(userConfig: GeneratorConfig): Promise<v
 
   if (goSchema) emittedFiles.push(...generateGoServerFiles(goSchema, config));
 
-  logGenerationSummary(clientFunctions, serverFunctions, emittedFiles, config);
+  logGenerationSummary(clientToServerFunctions, serverToClientFunctions, emittedFiles, config);
 }

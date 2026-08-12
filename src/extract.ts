@@ -28,20 +28,23 @@ function isValidJavaScriptIdentifier(name: string): boolean {
   return /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name);
 }
 
-// Names that would collide with the generated RpcClient/RpcServer surface.
-// If a user defines one of these on ClientFunctions/ServerFunctions, refuse.
-const RESERVED_NAMES = new Set([
-  "rpcError",
-  "dispose",
-  "disposed",
-  "handle",
-  "server",
-  "client",
-  "socket",
-  "connected",
-  "onConnect",
-  "onDisconnect",
-  "onReconnect",
+// socket.io throws `"<name>" is a reserved event name` from emit(), on both the server
+// (socket.io/dist/socket.js) and the client (socket.io-client/build/cjs/socket.js). A
+// method with one of these names generates code that only fails once the app is running,
+// so the generator refuses it up front.
+//
+// Nothing else needs reserving. Every user method lands inside the `handle` / `server` /
+// `client` namespaces, which hold no built-in members; the RpcClient/RpcServer surface
+// (dispose, socket, connected, onRpcError, …) lives one level up and cannot be shadowed.
+// The Go backend reaches the same conclusion structurally — see GENERATED_PREFIX in
+// src/go/names.ts, which keeps the emitter's identifiers disjoint by construction.
+const RESERVED_EVENT_NAMES = new Set([
+  "connect",
+  "connect_error",
+  "disconnect",
+  "disconnecting",
+  "newListener",
+  "removeListener",
 ]);
 
 /**
@@ -523,9 +526,9 @@ function extractMethodFromProperty(
     return null;
   }
 
-  if (RESERVED_NAMES.has(name)) {
+  if (RESERVED_EVENT_NAMES.has(name)) {
     throw new Error(
-      `Function name '${name}' is reserved by socket-rpc and collides with the generated RpcClient/RpcServer surface. Please rename it in your ClientFunctions/ServerFunctions interface.`,
+      `Function name '${name}' is a socket.io reserved event name — emitting it throws at runtime. Please rename it in your ClientFunctions/ServerFunctions interface.`,
     );
   }
 
@@ -800,8 +803,10 @@ const PROJECT_TSCONFIG_PATH = path.resolve(
 );
 
 export interface ExtractedInterfaces {
-  clientFunctions: FunctionSignature[];
-  serverFunctions: FunctionSignature[];
+  /** Declared on `ServerFunctions`: the client calls these, the server handles them. */
+  clientToServerFunctions: FunctionSignature[];
+  /** Declared on `ClientFunctions`: the server calls these, the client handles them. */
+  serverToClientFunctions: FunctionSignature[];
   usedTypes: Map<string, SourceFile>;
   inputFile: SourceFile;
   /**
@@ -885,10 +890,13 @@ export async function extractInterfacesFromFile(
 
   // Compatibility projection for the current TypeScript emitters. These keep
   // ts-morph's exact historical type text, so generated output does not drift.
-  const clientFunctions = clientToServer.map(
+  // Named by direction, like the IR they come from. "clientFunctions" would have to
+  // mean either "declared on ClientFunctions" or "called by the client" — opposite
+  // sets — and every reader would have to work out which.
+  const clientToServerFunctions = clientToServer.map(
     ({ compatibilitySignature }) => compatibilitySignature,
   );
-  const serverFunctions = serverToClient.map(
+  const serverToClientFunctions = serverToClient.map(
     ({ compatibilitySignature }) => compatibilitySignature,
   );
 
@@ -901,8 +909,8 @@ export async function extractInterfacesFromFile(
   collectUsedTypes(clientFunctionsInterface, usedTypes);
 
   return {
-    clientFunctions,
-    serverFunctions,
+    clientToServerFunctions,
+    serverToClientFunctions,
     usedTypes,
     inputFile: sourceFile,
     schema,

@@ -154,13 +154,16 @@ fire-and-forget and has no acknowledgement, so the client reports a failing
 handler on `__rpc:error__` instead. Observe those with:
 
 ```go
-binding.OnRpcError(func(failure *rpc.RpcError) {
-    log.Printf("client handler failed: %s", failure)
+unsubscribe := binding.OnRpcError(func(failure *rpc.RpcError) {
+    log.Printf("%s failed: %s", failure.Method, failure.Message)
 })
+defer unsubscribe()
 ```
 
-This is the Go counterpart to `rpc.handle.rpcError(...)` on the TypeScript
-server.
+This is the Go counterpart to `rpc.onRpcError(...)` on the TypeScript server, and
+behaves the same way: observers are additive and run in registration order, so a
+second one does not displace the first. Ignore the return value if you never need
+to detach — `Dispose` drops every observer anyway.
 
 ## Naming
 

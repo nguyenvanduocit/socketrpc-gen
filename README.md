@@ -354,12 +354,13 @@ Creates an ergonomic client RPC interface.
 | Property | Type | Description |
 |----------|------|-------------|
 | `handle` | `RpcClientHandle` | Register handlers for server-to-client calls. Each registration returns an unsubscribe function |
-| `server` | `RpcClientServer` | Call server methods |
+| `server` | `RpcClientRemote` | Call server methods |
 | `socket` | `Socket` | The underlying socket instance |
 | `connected` | `boolean` | Whether the underlying socket is currently connected |
-| `onConnect(handler)` | `(() => void) => UnsubscribeFunction` | Run a handler on every (re)connect — re-sync / re-auth here |
-| `onDisconnect(handler)` | `((reason: string) => void) => UnsubscribeFunction` | Run a handler whenever the socket disconnects |
-| `onReconnect(handler)` | `((attempt: number) => void) => UnsubscribeFunction` | Run a handler after a successful reconnect |
+| `onConnect(handler)` | `(() => void) => Unsubscribe` | Run a handler on every (re)connect — re-sync / re-auth here |
+| `onDisconnect(handler)` | `((reason: string) => void) => Unsubscribe` | Run a handler whenever the socket disconnects |
+| `onReconnect(handler)` | `((attempt: number) => void) => Unsubscribe` | Run a handler after a successful reconnect |
+| `onRpcError(handler)` | `((error: RpcError) => void) => Unsubscribe` | Run a handler for errors the server reports from a fire-and-forget handler |
 | `disposed` | `boolean` | Whether this instance has been disposed |
 | `dispose()` | `() => void` | Cleanup all registered handlers |
 
@@ -372,12 +373,88 @@ Creates an ergonomic server RPC interface.
 | Property | Type | Description |
 |----------|------|-------------|
 | `handle` | `RpcServerHandle` | Register handlers for client-to-server calls. Each registration returns an unsubscribe function |
-| `client` | `RpcServerClient` | Call client methods |
+| `client` | `RpcServerRemote` | Call client methods |
 | `socket` | `Socket` | The underlying socket instance |
 | `connected` | `boolean` | Whether the underlying socket is currently connected |
-| `onDisconnect(handler)` | `((reason: string) => void) => UnsubscribeFunction` | Run a handler when this socket disconnects |
+| `onDisconnect(handler)` | `((reason: string) => void) => Unsubscribe` | Run a handler when this socket disconnects |
+| `onRpcError(handler)` | `((error: RpcError) => void) => Unsubscribe` | Run a handler for errors the client reports from a fire-and-forget handler |
 | `disposed` | `boolean` | Whether this instance has been disposed |
 | `dispose()` | `() => void` | Cleanup all registered handlers |
+
+### Two registration conventions
+
+The API has exactly two, and they differ on purpose:
+
+| | Where | Semantics |
+|---|---|---|
+| **RPC methods** | `rpc.handle.<method>(handler)` | One handler per method. Re-registering **replaces** the previous one, so HMR, React StrictMode, and remounts never double-answer an ack. |
+| **Events** | `rpc.on<Event>(handler)` | **Additive.** A second subscriber runs alongside the first, in registration order. Covers `onConnect`, `onDisconnect`, `onReconnect`, `onRpcError`. |
+
+Both return an unsubscribe function, and `dispose()` clears everything registered either way.
+The Go backend follows the same split: one `ServerHandler` method per RPC method, and
+`OnRpcError` additive with an unsubscribe return.
+
+### Naming your methods
+
+**What the generator enforces.** Nothing under `handle`, `server`, or `client` is a built-in, so an
+RPC method may use any name socket.io accepts — including `dispose`, `handle`, `socket`, `connected`
+and friends, which live one level up on `RpcClient`/`RpcServer` and cannot be shadowed. The names
+the generator rejects are socket.io's own reserved events, because emitting them throws at runtime:
+
+```
+connect · connect_error · disconnect · disconnecting · newListener · removeListener
+```
+
+The Go backend rejects the same set, plus `__rpc:error__`, and keeps its own identifiers out of
+reach structurally rather than by a denylist — see `GENERATED_PREFIX` in `src/go/names.ts`.
+
+**What the generator leaves to you.** The rest is convention, and the wrappers give you a head start:
+the interface a method is declared on fixes its direction, `handle.` marks registration, `.server.` /
+`.client.` mark invocation, and a non-`void` return type is what makes a call awaitable. A name that
+re-states any of those is paying rent twice.
+
+| Style | Reads as | Good for |
+|-------|----------|----------|
+| **Verb-first** — `getUser`, `showError`, `deleteJob` | `rpc.server.getUser(id)` — plainly a call<br>`rpc.handle.getUser(fn)` — plainly a registration | The default. Correct at both sites, no matter the direction. |
+| **`on`-prefixed** — `onMessage`, `onProgress` | `rpc.client.onMessage(text)` — looks like subscribing, is actually invoking | Push notifications the receiver may ignore, where the `on` reads as part of the domain vocabulary. |
+
+Prefer verb-first, and reach for `on*` when a method is genuinely a notification. Either way, skip
+prefixes that duplicate what the wrapper already says — `send*`, `call*`, `request*`, `handle*`,
+`rpc*`. The examples in this repo use both styles, so you can compare them side by side.
+
+```typescript
+export interface ServerFunctions {
+  getUser: (userId: string) => User;        // awaitable — non-void return
+  deleteUser: (userId: string) => void;     // fire-and-forget — void return
+}
+
+export interface ClientFunctions {
+  showError: (error: Error) => void;        // a command: "show this"
+  onProgress: (done: number) => void;       // a notification: "this happened"
+}
+```
+
+Go spells the same contract idiomatically: `getUser` becomes `HandleGetUser` on `ServerHandler`,
+`showError` becomes `CallShowError` on `Client`, and `roomId` becomes `RoomID`.
+
+### Typing raw socket usage
+
+`types.generated.ts` also exports `ClientToServerEvents` and `ServerToClientEvents`, which describe
+every RPC method as a socket.io event. They are optional — apply them when you touch the socket
+directly alongside the RPC layer:
+
+```typescript
+import type { ClientToServerEvents, ServerToClientEvents } from './rpc/types.generated';
+
+// server
+const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer);
+
+// client
+const socket = io<ServerToClientEvents, ClientToServerEvents>(url);
+```
+
+They live in `types.generated.ts` rather than in each side file, so a module that imports both the
+client and the server gets one definition instead of a name clash.
 
 ## Connection, Reconnect & Cancellation
 

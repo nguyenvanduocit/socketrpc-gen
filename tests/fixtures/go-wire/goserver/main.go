@@ -50,12 +50,12 @@ type rpcError struct {
 	Brand   bool   `json:"__rpcError"`
 	Message string `json:"message"`
 	Code    string `json:"code"`
-	Origin  string `json:"origin,omitempty"`
+	Method  string `json:"method,omitempty"`
 	Data    any    `json:"data,omitempty"`
 }
 
-func newRpcError(code, message, origin string, data any) rpcError {
-	return rpcError{Brand: true, Code: code, Message: message, Origin: origin, Data: data}
+func newRpcError(code, message, method string, data any) rpcError {
+	return rpcError{Brand: true, Code: code, Message: message, Method: method, Data: data}
 }
 
 // echoResult is the success payload for `echo`.

@@ -116,7 +116,7 @@ describe("generated RPC over a real socket pair", () => {
   );
 
   test(
-    "handler throw propagates as a branded RpcError with code + origin",
+    "handler throw propagates as a branded RpcError with code + method",
     async () => {
       const { clientRpc } = await makePair();
       const result = await clientRpc.server.getUser("throw");

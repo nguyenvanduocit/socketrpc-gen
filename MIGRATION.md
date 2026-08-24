@@ -42,7 +42,7 @@ those before running any find-and-replace.
 | v7 | v8 | Mechanical? |
 |----|----|-------------|
 | `RpcError.Origin`, `json:"origin"` | `RpcError.Method`, `json:"method"` | yes |
-| `NewRpcError(code, message, origin, data)` | fourth-from-last arg is now named `method` | no change at the call site |
+| `NewRpcError(code, message, origin, data)` | `NewRpcError(code, message, method, data)` | no change at the call site |
 | `OnRpcError(fn)` returns nothing | returns `func()` to unsubscribe | source-compatible |
 | `OnRpcError` keeps one observer | keeps all of them | **no — semantics changed** |
 

@@ -8,8 +8,8 @@ This is a complete working application demonstrating how to use the generated So
 examples/00-full-app/pkg/
 ├── rpc/
 │   ├── define.ts              # Interface definitions (input)
-│   ├── client.generated.ts    # Generated client RPC functions
-│   ├── server.generated.ts    # Generated server RPC functions
+│   ├── client.generated.ts    # Generated client RPC (createRpcClient)
+│   ├── server.generated.ts    # Generated server RPC (createRpcServer)
 │   └── types.generated.ts     # Generated types
 ├── client/
 │   └── index.ts               # Client implementation
@@ -27,37 +27,29 @@ From the project root:
 bun run index.ts ./examples/00-full-app/pkg/rpc/define.ts
 ```
 
-## Important: Proper Handler Cleanup
+## Handler Lifecycle
 
-Handler functions return an unsubscribe function that **MUST** be called to clean up event listeners. Failing to do so will cause memory leaks and `MaxListenersExceededWarning` errors.
+`createRpcClient(socket)` / `createRpcServer(socket)` own every listener they register. `rpc.handle.<method>(handler)` registers **one handler per method** — re-registering replaces the previous one — and returns an `Unsubscribe`. The event observers are additive and each return their own `Unsubscribe`: `rpc.onDisconnect` / `rpc.onRpcError` on both sides, plus `rpc.onConnect` / `rpc.onReconnect` on the client. A single `rpc.dispose()` removes all of them, so a component mount, remount, or HMR reload never stacks listeners or double-answers an ack.
 
 ### Vue 3 Composition API
 
 ```typescript
-import { onMounted, onBeforeUnmount } from 'vue';
+import { onBeforeUnmount } from 'vue';
 import { socket } from './socket';
-import { handleShowError, handleOnResyncProgress } from './rpc/client.generated';
+import { createRpcClient } from './rpc/client.generated';
 
 export default {
   setup() {
-    const unsubscribers: Array<() => void> = [];
+    const rpc = createRpcClient(socket);
 
-    onMounted(() => {
-      // Register all handlers and store unsubscribe functions
-      unsubscribers.push(
-        handleShowError(socket, async (socket, error) => {
-          console.error('Error:', error);
-        }),
-        handleOnResyncProgress(socket, async (socket, msg, current, total) => {
-          console.log(`Progress: ${current}/${total}`);
-        })
-      );
+    rpc.handle.showError(async (error) => {
+      console.error('Error:', error);
+    });
+    rpc.handle.updateDiscoveredUrls(async (url) => {
+      console.log('Discovered:', url);
     });
 
-    onBeforeUnmount(() => {
-      // Clean up all handlers when component unmounts
-      unsubscribers.forEach(fn => fn());
-    });
+    onBeforeUnmount(() => rpc.dispose());
   }
 }
 ```
@@ -67,26 +59,20 @@ export default {
 ```typescript
 import { useEffect } from 'react';
 import { socket } from './socket';
-import { handleShowError, handleOnResyncProgress } from './rpc/client.generated';
+import { createRpcClient } from './rpc/client.generated';
 
 function MyComponent() {
   useEffect(() => {
-    const unsubscribers: Array<() => void> = [];
+    const rpc = createRpcClient(socket);
 
-    // Register handlers
-    unsubscribers.push(
-      handleShowError(socket, async (socket, error) => {
-        console.error('Error:', error);
-      }),
-      handleOnResyncProgress(socket, async (socket, msg, current, total) => {
-        console.log(`Progress: ${current}/${total}`);
-      })
-    );
+    rpc.handle.showError(async (error) => {
+      console.error('Error:', error);
+    });
+    rpc.handle.updateDiscoveredUrls(async (url) => {
+      console.log('Discovered:', url);
+    });
 
-    // Cleanup function
-    return () => {
-      unsubscribers.forEach(fn => fn());
-    };
+    return () => rpc.dispose();
   }, []);
 
   return <div>My Component</div>;
@@ -97,35 +83,30 @@ function MyComponent() {
 
 ```typescript
 import { socket } from './socket';
-import { handleShowError, handleOnResyncProgress } from './rpc/client.generated';
+import { createRpcClient } from './rpc/client.generated';
 
-// Register handlers
-const unsubscribers: Array<() => void> = [];
+const rpc = createRpcClient(socket);
 
-unsubscribers.push(
-  handleShowError(socket, async (socket, error) => {
-    console.error('Error:', error);
-  }),
-  handleOnResyncProgress(socket, async (socket, msg, current, total) => {
-    console.log(`Progress: ${current}/${total}`);
-  })
-);
+rpc.handle.showError(async (error) => {
+  console.error('Error:', error);
+});
+rpc.handle.updateDiscoveredUrls(async (url) => {
+  console.log('Discovered:', url);
+});
 
 // When you want to clean up (e.g., before page navigation)
 function cleanup() {
-  unsubscribers.forEach(fn => fn());
+  rpc.dispose();
 }
 ```
 
 ## Why Cleanup is Important
 
-Without proper cleanup:
-- ❌ Event listeners accumulate on every component mount/remount
-- ❌ HMR (Hot Module Replacement) causes listener stacking
-- ❌ You'll see `MaxListenersExceededWarning: Possible EventTarget memory leak detected`
+Without `rpc.dispose()`:
+- ❌ Socket listeners outlive the component that created them
 - ❌ Memory leaks in long-running applications
 
-With proper cleanup:
+With `rpc.dispose()`:
 - ✅ Handlers are removed when components unmount
 - ✅ No listener accumulation during HMR
 - ✅ No memory leaks
@@ -136,9 +117,12 @@ With proper cleanup:
 ### Client Calling Server
 
 ```typescript
-import { generateText } from './rpc/client.generated';
+import { createRpcClient } from './rpc/client.generated';
+import { isRpcError } from './rpc/types.generated';
 
-const result = await generateText(socket, 'Hello world');
+const rpc = createRpcClient(socket);
+
+const result = await rpc.server.generateText('Hello world');
 if (isRpcError(result)) {
   console.error('Error:', result.message);
 } else {
@@ -149,34 +133,40 @@ if (isRpcError(result)) {
 ### Server Calling Client
 
 ```typescript
-import { showError } from './rpc/server.generated';
+import { createRpcServer } from './rpc/server.generated';
 
-showError(socket, new Error('Something went wrong'));
+const rpc = createRpcServer(socket);
+
+rpc.client.showError(new Error('Something went wrong'));
 ```
 
 ### Setting Up Handlers (Client Side)
 
 ```typescript
-import { handleShowError } from './rpc/client.generated';
+import { createRpcClient } from './rpc/client.generated';
 
-const unsubscribe = handleShowError(socket, async (socket, error) => {
+const rpc = createRpcClient(socket);
+
+const unsubscribe = rpc.handle.showError(async (error) => {
   console.error('Server sent error:', error);
 });
 
-// Later, clean up
+// Remove just this handler, or call rpc.dispose() to remove everything
 unsubscribe();
 ```
 
 ### Setting Up Handlers (Server Side)
 
 ```typescript
-import { handleGenerateText } from './rpc/server.generated';
+import { createRpcServer } from './rpc/server.generated';
 
-const unsubscribe = handleGenerateText(socket, async (socket, prompt) => {
+const rpc = createRpcServer(socket);
+
+const unsubscribe = rpc.handle.generateText(async (prompt) => {
   const text = await generateTextWithAI(prompt);
   return text;
 });
 
-// Later, clean up
+// Remove just this handler, or call rpc.dispose() to remove everything
 unsubscribe();
 ```

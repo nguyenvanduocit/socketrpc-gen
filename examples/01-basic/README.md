@@ -32,35 +32,54 @@ This will generate:
 
 ```typescript
 import { io } from 'socket.io-client';
-import { getUser, createUser, handleOnMessage } from './client.generated';
+import { createRpcClient } from './client.generated';
+import { isRpcError } from './types.generated';
 
 const socket = io('http://localhost:3000');
+const rpc = createRpcClient(socket);
 
-// Call server functions
-const user = await getUser(socket, 'user123');
-const newUser = await createUser(socket, 'John Doe', 'john@example.com');
+// Call server functions — results are `User | RpcError`, narrow with isRpcError
+const user = await rpc.server.getUser('user123');
+if (isRpcError(user)) {
+  console.error('getUser failed:', user.code, user.message);
+} else {
+  console.log('User:', user.name);
+}
+
+const newUser = await rpc.server.createUser('John Doe', 'john@example.com');
+if (!isRpcError(newUser)) {
+  console.log('Created:', newUser.id);
+}
 
 // Handle server->client calls
-handleOnMessage(socket, async (socket, message) => {
+rpc.handle.onMessage(async (message) => {
   console.log('Received message:', message);
 });
+
+// Cleanup all handlers
+rpc.dispose();
 ```
 
 ### Server Side
 
 ```typescript
 import { Server } from 'socket.io';
-import { handleGetUser, handleCreateUser, onMessage } from './server.generated';
+import { createRpcServer } from './server.generated';
 
 const io = new Server(3000);
 
 io.on('connection', (socket) => {
+  const rpc = createRpcServer(socket);
+
   // Handle client->server calls
-  handleGetUser(socket, async (socket, userId) => {
+  rpc.handle.getUser(async (userId) => {
     return { id: userId, name: 'John', email: 'john@example.com' };
   });
 
   // Call client functions
-  onMessage(socket, 'Welcome to the server!');
+  rpc.client.onMessage('Welcome to the server!');
+
+  // Cleanup on disconnect
+  socket.on('disconnect', () => rpc.dispose());
 });
 ```

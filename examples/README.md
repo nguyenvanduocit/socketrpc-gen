@@ -65,7 +65,7 @@ bun run ../../index.ts ./define.ts
 - Separating common functionality from app-specific features
 - Creating reusable interface libraries
 
-**Functions generated:** 11 total (6 server, 5 client)
+**Functions generated:** 10 total (5 server, 5 client)
 
 **Structure:**
 ```
@@ -98,24 +98,6 @@ base.define.ts → define.ts
 framework.define.ts → platform.define.ts → define.ts
 (core)                (auth/users)         (business logic)
 ```
-
----
-
-### [05-go-server](./05-go-server/) - TypeScript Client, Go Server
-
-**What it demonstrates:**
-- Generating a Go server and a TypeScript client from one `define.ts`
-- The portable subset of TypeScript the Go backend accepts, and what it refuses
-- Idiomatic Go output: exported structs, string enums with validation, `RpcError`
-- The `--client` / `--server` / `--go-out` / `--go-package` flags
-
-**Complexity:** ⭐⭐ Intermediate
-
-**Use when:**
-- Your server is Go and your frontend is TypeScript
-- You want one contract to drive both languages
-
-**Functions generated:** 6 total (4 server, 2 client)
 
 ---
 
@@ -156,18 +138,37 @@ interface ServerFunctions {
 
 ---
 
+### [05-go-server](./05-go-server/) - TypeScript Client, Go Server
+
+**What it demonstrates:**
+- Generating a Go server and a TypeScript client from one `define.ts`
+- The portable subset of TypeScript the Go backend accepts, and what it refuses
+- Idiomatic Go output: exported structs, string enums with validation, `RpcError`
+- The `--client` / `--server` / `--go-out` / `--go-package` flags
+
+**Complexity:** ⭐⭐ Intermediate
+
+**Use when:**
+- Your server is Go and your frontend is TypeScript
+- You want one contract to drive both languages
+
+**Functions generated:** 6 total (4 server, 2 client)
+
+---
+
 ## Feature Comparison
 
-| Feature | Example 00 | Example 01 | Example 02 | Example 03 | Example 04 |
-|---------|-----------|-----------|-----------|-----------|-----------|
-| Full Implementation | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Interface Extension | ✅ Multi-level | ❌ | ✅ Single-level | ✅ Multi-level | ❌ |
-| Zod Schemas | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Multiple Files | ✅ 3 files | ❌ | ✅ 2 files | ✅ 3 files | ❌ |
-| Layered Architecture | ✅ 3 layers | ❌ | ✅ 2 layers | ✅ 3 layers | ❌ |
-| Client/Server Code | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Complexity | Medium | Low | Medium | High | Medium |
-| Real-world Use | Production app | Simple apps | Frameworks | Enterprise | AI Integration |
+| Feature | Example 00 | Example 01 | Example 02 | Example 03 | Example 04 | Example 05 |
+|---------|-----------|-----------|-----------|-----------|-----------|-----------|
+| Full Implementation | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Interface Extension | ✅ Multi-level | ❌ | ✅ Single-level | ✅ Multi-level | ❌ | ❌ |
+| Zod Schemas | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Go server (`--server go`) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Multiple Files | ✅ 3 files | ❌ | ✅ 2 files | ✅ 3 files | ❌ | ❌ |
+| Layered Architecture | ✅ 3 layers | ❌ | ✅ 2 layers | ✅ 3 layers | ❌ | ❌ |
+| Client/Server Code | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Complexity | Medium | Low | Medium | High | Medium | Medium |
+| Real-world Use | Production app | Simple apps | Frameworks | Enterprise | AI Integration | Go backends |
 
 ## Common Patterns
 

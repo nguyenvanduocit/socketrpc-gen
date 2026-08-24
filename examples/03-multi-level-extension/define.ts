@@ -31,7 +31,7 @@ export type OrderStatusUpdate = {
  * Inheritance chain:
  * - FrameworkServerFunctions: healthCheck()
  * - PlatformServerFunctions: login(), getCurrentUser(), logout()
- * - ServerFunctions: getOrder(), createOrder(), cancelOrder()
+ * - ServerFunctions: getOrder(), createOrder(), cancelOrder(), listOrders()
  */
 export interface ServerFunctions extends PlatformServerFunctions {
   /**

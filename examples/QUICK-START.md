@@ -45,6 +45,35 @@ bun run ../../index.ts ./define.ts
 
 ---
 
+## 🤖 Using Zod Schemas? → [Example 04](./04-zod-integration/)
+
+```bash
+cd examples/04-zod-integration
+bun run ../../index.ts ./define.ts
+```
+
+**Perfect for:**
+- Schema-first contracts: `z.infer<>` types feed the RPC interfaces
+- Reusing schemas shared with AI frameworks that already speak Zod
+- Runtime validation inside handlers with `Schema.safeParse()`
+
+---
+
+## 🐹 Go Server? → [Example 05](./05-go-server/)
+
+```bash
+cd examples/05-go-server
+bun run ../../index.ts ./define.ts \
+  --client typescript --server go --go-out ./rpc --go-package rpc
+```
+
+**Perfect for:**
+- TypeScript client + Go server from one contract
+- Go bindings with `HandleX` / `CallX` methods and `OnRpcError`
+- Contracts that stay inside the portable subset (named types, scalars, arrays, records, `T | null`, `void`)
+
+---
+
 ## What Gets Generated?
 
 For each example, you'll get:
@@ -69,9 +98,18 @@ bun run ../../index.ts ./define.ts \
   --timeout 3000 \
   --error-logger "@/lib/logger"
 
+# Calls reject with the RpcError instead of returning `T | RpcError`
+bun run ../../index.ts ./define.ts --error-mode throw
+
+# TypeScript client + Go server (types.generated.go + server.generated.go in --go-out)
+bun run ../../index.ts ./define.ts \
+  --client typescript --server go --go-out ./rpc --go-package rpc
+
 # Watch mode (auto-regenerate on changes)
 bun run ../../index.ts ./define.ts --watch
 ```
+
+Run `bun run ../../index.ts --help` for the full list, including `--go-socket-import`.
 
 ## Next Steps
 

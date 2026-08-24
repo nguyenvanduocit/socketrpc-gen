@@ -49,7 +49,7 @@ The generator will automatically:
 
 After generation, you'll have access to:
 
-**Client->Server calls** (6 functions):
+**Client->Server calls** (5 functions):
 - `ping()` (from base)
 - `getServerTime()` (from base)
 - `getProduct()`
@@ -67,26 +67,31 @@ After generation, you'll have access to:
 
 ```typescript
 import { io } from 'socket.io-client';
-import {
-  ping,              // from base
-  getServerTime,     // from base
-  getProduct,        // from app
-  handleShowError    // from base
-} from './client.generated';
+import { createRpcClient } from './client.generated';
+import { isRpcError } from './types.generated';
 
 const socket = io('http://localhost:3000');
+const rpc = createRpcClient(socket);
 
-// Call base functions
-const pong = await ping(socket);
-const time = await getServerTime(socket);
-
-// Call app functions
-const product = await getProduct(socket, 'prod-123');
-
-// Handle base functions
-handleShowError(socket, async (socket, error) => {
+// Handle base functions (one handler per method; re-registering replaces)
+rpc.handle.showError(async (error) => {
   console.error('Server error:', error.message);
 });
+
+// Call base functions
+const pong = await rpc.server.ping();
+const time = await rpc.server.getServerTime();
+
+// Call app functions
+const product = await rpc.server.getProduct('prod-123');
+if (isRpcError(product)) {
+  console.error(`getProduct failed: ${product.code} ${product.message}`);
+} else {
+  console.log(product.name);
+}
+
+// Cleanup removes every handler registered above
+rpc.dispose();
 ```
 
 ## Benefits of Extension

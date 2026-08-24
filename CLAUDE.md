@@ -51,11 +51,17 @@ This is a TypeScript code generator for Socket.IO RPC packages. The tool generat
 
 ### Core Components
 
-**Main Generator (`index.ts`)**
-- CLI entry point using `commander`
-- Core generation logic using `ts-morph` AST manipulation
-- Extracts function signatures from `ClientFunctions` and `ServerFunctions` interfaces
-- Generates client.generated.ts, server.generated.ts, and types.generated.ts files
+**Entry point (`index.ts`) and the `src/` pipeline**
+- `index.ts` - re-exports `generateRpcPackage` and the public config types, and calls
+  `runCli(process.argv)` when invoked directly; it holds no generation logic
+- `src/cli.ts` - the `commander` CLI: flag parsing, `--watch`, and the call into `generateRpcPackage`
+- `src/generate.ts` - `generateRpcPackage`: orchestrates extraction, validation, and emission
+- `src/extract.ts` - `ts-morph` AST extraction of `ClientFunctions` / `ServerFunctions`
+  signatures, and the `RpcSchema` IR alongside them
+- `src/emit-side.ts`, `src/emit-types.ts` - write client.generated.ts / server.generated.ts and
+  types.generated.ts; `src/emit-imports.ts` resolves custom type imports
+- `src/emit-pkg.ts` - scaffolds package.json and tsconfig.json in the output directory
+- `src/emit-go.ts` - bridge into the Go backend under `src/go/`
 
 **Canonical IR (`src/schema.ts`)**
 - `RpcSchema` is the single language-neutral representation of a contract: methods with a
@@ -340,7 +346,6 @@ pkg/rpc/
 ├── client.generated.ts    # Generated client RPC (includes createRpcClient)
 ├── server.generated.ts    # Generated server RPC (includes createRpcServer)
 ├── types.generated.ts     # Generated types and error handling
-├── index.ts              # Package entry point
 ├── package.json          # Generated package config
 └── tsconfig.json         # Generated TypeScript config
 ```

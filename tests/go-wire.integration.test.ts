@@ -136,7 +136,7 @@ describe("generated TypeScript client against a handcrafted Go server", () => {
   );
 
   test(
-    "a Go failure arrives as a branded RpcError with its code, origin and data",
+    "a Go failure arrives as a branded RpcError with its code, method and data",
     async () => {
       const { rpc } = await connect();
       const result = await rpc.server.failTyped("quota");

@@ -16,7 +16,7 @@
 -   **Robust Error Handling:** Branded `RpcError` (no shape collisions), standard error codes (`TIMEOUT`, `DISCONNECTED`, `ABORTED`, …), and a per-call `return`-or-`throw` error mode.
 -   **Connection-Aware:** `connected` state plus `onConnect` / `onDisconnect` / `onReconnect` hooks for re-syncing after reconnects.
 -   **Cancellable Calls:** Per-call `AbortSignal` and `timeout`, plus `volatile` to drop (instead of buffer) calls made while offline.
--   **Granular Cleanup:** Every handler registration returns an unsubscribe function; re-registering a handler replaces the previous one.
+-   **Granular Cleanup:** Every `rpc.handle.*` registration returns an unsubscribe function and re-registering replaces the previous handler; `onConnect` / `onDisconnect` / `onReconnect` / `onRpcError` observers are additive and each returns its own unsubscribe.
 
 ## Getting Started
 
@@ -30,6 +30,7 @@ Check out the [`examples/`](./examples) directory for comprehensive examples:
 - **[01-basic](./examples/01-basic/)** - Simple interface definitions without extension
 - **[02-single-extension](./examples/02-single-extension/)** - Single-level interface inheritance
 - **[03-multi-level-extension](./examples/03-multi-level-extension/)** - Multi-layer architecture patterns
+- **[04-zod-integration](./examples/04-zod-integration/)** - Runtime validation with Zod schemas
 - **[05-go-server](./examples/05-go-server/)** - TypeScript client with a Go server
 
 See the [examples README](./examples/README.md) for detailed comparisons and use cases.
@@ -102,7 +103,7 @@ sequenceDiagram
 
     ClientApp->>GenClient: 1. Calls `rpc.server.generateText("hello")`
     activate GenClient
-    GenClient->>GenServer: 2. Emits "rpc:generateText" event over network
+    GenClient->>GenServer: 2. Emits "generateText" event over network
     deactivate GenClient
 
     activate GenServer
@@ -112,7 +113,7 @@ sequenceDiagram
     Note over ServerApp: Server logic decides to<br/>call a function on the client
 
     ServerApp->>GenServer: 4. Calls `rpc.client.askQuestion("Favorite color?")`
-    GenServer->>GenClient: 5. Emits "rpc:askQuestion" event over network
+    GenServer->>GenClient: 5. Emits "askQuestion" event over network
     deactivate GenServer
 
     activate GenClient
@@ -602,7 +603,7 @@ export type Mutation = {
 ```
 
 ```go
-func (h *handler) ApplyMutation(ctx context.Context, mutation rpc.Mutation) (rpc.Frontmatter, error) {
+func (h *handler) HandleApplyMutation(ctx context.Context, mutation rpc.Mutation) (rpc.Frontmatter, error) {
     // Nothing here needs to know the shape of mutation.Value — that is the point.
     h.frontmatter[mutation.Key] = mutation.Value
     return h.frontmatter, nil
@@ -652,11 +653,12 @@ value placed in an `any` that JSON has no spelling for. Socket.IO's write path
 discards encoding failures, so without that check the caller would wait out its
 own timeout with nothing to go on.
 
-`binding.OnRpcError(func(*rpc.RpcError))` observes the failures the peer reports
-out of band: a TypeScript client whose handler for a fire-and-forget
+`binding.OnRpcError(func(*rpc.RpcError)) func()` observes the failures the peer
+reports out of band: a TypeScript client whose handler for a fire-and-forget
 server-to-client call throws has no acknowledgement to answer through, so it
-emits the error instead. This mirrors `rpc.handle.rpcError(...)` on the
-TypeScript server.
+emits the error instead. Observers are additive and run in registration order;
+the returned function unsubscribes that observer. This mirrors
+`rpc.onRpcError(...)` on the TypeScript server.
 
 Every identifier the generator declares in a scope your contract also reaches
 carries an `rpc_` prefix, and identifiers derived from your contract can never
@@ -688,17 +690,18 @@ gives the method up and each of its required slice and map fields is spelled wit
 a generated type that normalizes itself. Those types convert freely to and from
 the plain Go type, so handler code is unchanged.
 
-### Coming from v6
+### Upgrading
 
-Go server generation arrives with v7, so there is no generated Go to migrate:
-`--server go`, the `Handle…`/`Call…` method namespace, and `unknown` are all new
-surface. Point the generator at a contract you already have and it produces the
-Go package described above.
+Coming from v7, read [MIGRATION.md](./MIGRATION.md): v8 is a naming pass over the
+generated API in both backends (`Unsubscribe`, `RpcClientRemote` /
+`RpcServerRemote`, additive `rpc.onRpcError`, the `ClientToServerEvents` /
+`ServerToClientEvents` aids in `types.generated.ts`). The `method` field of
+`RpcError` is serialized on the wire, so both peers upgrade together.
 
-An existing TypeScript project has nothing to do. Every byte of TypeScript output
-is what v6 emitted for the same contract — the Go backend reads the same
-`RpcSchema` IR but writes its own files, and `--client`/`--server` both default to
-`typescript`, so an invocation that worked on v6 still emits exactly what it did.
+Coming from v6, there is no generated Go to migrate: Go server generation, the
+`Handle…`/`Call…` method namespace, and `unknown` arrived with v7. Point the
+generator at a contract you already have and it produces the Go package
+described above.
 
 The one thing worth knowing before writing a contract for Go: methods reach the
 generated API prefixed, so `getUser` is implemented as `HandleGetUser` and called
@@ -774,8 +777,8 @@ rpc.handle.updateRotation(async (settings) => {
 
 > **Note on error signaling:** handlers return the success value or **throw**. Errors must be
 > thrown (use `throw rpcError(code, message, data?)` for a typed one, or `throw new Error(...)`),
-> not returned. Every RpcError carries a non-enumerable `__rpcError` brand so `isRpcError()` can
-> never confuse a successful result that happens to share the `{ message, code }` shape with a
+> not returned. Every RpcError carries a `__rpcError: true` brand (it travels on the wire) so
+> `isRpcError()` can never confuse a successful result that happens to share the `{ message, code }` shape with a
 > real error.
 
 **Client Usage:**

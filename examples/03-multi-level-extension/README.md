@@ -100,40 +100,36 @@ After generation, you'll have:
 
 ```typescript
 import { io } from 'socket.io-client';
-import {
-  // Framework layer
-  healthCheck,
-  // Platform layer
-  login,
-  getCurrentUser,
-  // Application layer
-  createOrder,
-  getOrder,
-  // Handlers
-  handleLog,
-  handleShowNotification,
-  handleOnOrderStatusChanged
-} from './client.generated';
+import { createRpcClient } from './client.generated';
+import { isRpcError } from './types.generated';
 
 const socket = io('http://localhost:3000');
+const rpc = createRpcClient(socket);
 
-// Use functions from any layer
-const health = await healthCheck(socket);          // Framework
-const { user, token } = await login(socket, 'john', 'pass123');  // Platform
-const order = await createOrder(socket, { items: ['item1'] });   // Application
+// Call functions from any layer
+const health = await rpc.server.healthCheck();                    // Framework
+const auth = await rpc.server.login('john', 'pass123');           // Platform
+if (isRpcError(auth)) {
+  throw new Error(`login failed: ${auth.code} ${auth.message}`);
+}
+const { user, token } = auth;
+const order = await rpc.server.createOrder({ items: ['item1'] }); // Application
 
-// Set up handlers from any layer
-handleLog(socket, async (socket, level, message) => {
+// Register handlers from any layer
+rpc.handle.log(async (level, message) => {
   console[level](message);  // Framework
 });
 
-handleShowNotification(socket, async (socket, title, message) => {
+rpc.handle.showNotification(async (title, message) => {
   alert(`${title}: ${message}`);  // Platform
 });
 
-handleOnOrderStatusChanged(socket, async (socket, update) => {
+rpc.handle.onOrderStatusChanged(async (update) => {
   console.log('Order updated:', update);  // Application
 });
+
+// Remove every handler in one call
+rpc.dispose();
 ```
 
 ## Use Cases

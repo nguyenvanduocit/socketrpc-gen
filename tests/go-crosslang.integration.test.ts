@@ -262,7 +262,7 @@ describe("generated TypeScript client against the generated Go server", () => {
   );
 
   test(
-    "a Go handler error arrives as a branded RpcError with its code, origin and data",
+    "a Go handler error arrives as a branded RpcError with its code, method and data",
     async () => {
       const { rpc } = await connect();
       const result = await rpc.server.failTyped("quota");
@@ -270,7 +270,7 @@ describe("generated TypeScript client against the generated Go server", () => {
       if (isRpcError(result)) {
         expect(result.code).toBe("GO_REFUSED");
         expect(result.message).toBe("go server refused: quota");
-        // The handler left Origin empty; the generated binding fills in the
+        // The handler left Method empty; the generated binding fills in the
         // event name so the client can attribute the failure.
         expect(result.method).toBe("failTyped");
         expect(result.data).toEqual({ reason: "quota" });
@@ -417,7 +417,7 @@ describe("generated TypeScript client against the generated Go server", () => {
       const reported = (await rpcErrorsWhenVisible(rpc, 1)) as string[];
       expect(reported).toHaveLength(1);
       expect(reported[0]).toContain("client notify exploded");
-      // Origin survives the hop, so the observer learns which call failed.
+      // Method survives the hop, so the observer learns which call failed.
       expect(reported[0]).toContain("notify");
     },
     T,

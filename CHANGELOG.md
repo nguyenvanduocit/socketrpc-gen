@@ -1,5 +1,12 @@
 # Changelog
 
+## [8.0.1](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v8.0.0...v8.0.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* accept optional and nullable boolean and named string unions ([#44](https://github.com/nguyenvanduocit/socketrpc-gen/issues/44)) ([56bdf5c](https://github.com/nguyenvanduocit/socketrpc-gen/commit/56bdf5ce7e49e2d7a1e25ea72a7785dd84cf5976))
+
 ## [8.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v7.0.1...v8.0.0) (2026-08-12)
 
 

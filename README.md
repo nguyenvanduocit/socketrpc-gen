@@ -74,6 +74,8 @@ interface ClientFunctions {
 
 **Important Note:** Do not use `Promise` in the return types when defining functions in your interfaces (`ServerFunctions`, `ClientFunctions`). The library automatically wraps the return types in `Promise`. The implementation of these functions can be `async` and return a `Promise`, but the definition should specify the final resolved type. For example, use `(prompt: string) => string` instead of `(prompt: string) => Promise<string>`.
 
+Declare each function as a property, `generateText: (prompt: string) => string`, or as a method signature, `generateText(prompt: string): string`. The two mean the same. Every member of these interfaces is one of the two. Anything else (an optional `name?:`, a property that is not a function type, a call or index signature) is named in a warning on stderr and left out of the generated code. A function declared more than once (overloads) is refused, because no single signature stands for the call. When an interface extends another and redeclares a function, the signature closest to `ServerFunctions` / `ClientFunctions` is the one generated, and the function keeps the position of its first declaration. Several declarations of the same interface merge, as they do in TypeScript.
+
 ### 2. Run the Generator
 
 Use the `socketrpc-gen` CLI to generate the RPC code. The generator automatically infers the output directory from the input file path.
@@ -573,10 +575,21 @@ when it refuses one:
 | `unknown` | `any` — an arbitrary JSON value; see below |
 | `void` return | a fire-and-forget method |
 
+`T` in `T | null` and in an optional field can be any accepted type, `boolean` and a
+named string union included: `verified?: boolean` becomes `*bool`, and
+`status?: Status` becomes `*Status`. A `*bool` that points at `false` stays `false`
+on the wire; only a nil pointer is absent.
+
 Refused, with the fix named in the error: inline object literals, inline string
 unions, ambient host types (`Error`, `Date`, `Map`), tuples, intersections,
 generics, `any`, and optional *positional* parameters — an omitted trailing
 argument is indistinguishable from a Socket.IO ack callback.
+
+One shape of a named union is refused. TypeScript merges an alias that itself
+includes `null` or `undefined` into any union it joins, so with
+`type Maybe = Status | null` the field `n?: Maybe` reaches Go as an inline union
+with no name. Write the alias's own members, `n?: Status | null`, which becomes
+`*Status`.
 
 `any` is refused because it switches TypeScript's checking off at the call site,
 so a contract using it is unchecked at both ends. Declare `unknown` for data

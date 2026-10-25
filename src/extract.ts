@@ -1,6 +1,7 @@
 import * as path from "path";
 import {
   InterfaceDeclaration,
+  MethodSignature,
   Node,
   Project,
   PropertySignature,
@@ -8,6 +9,7 @@ import {
   Symbol as MorphSymbol,
   SyntaxKind,
   Type,
+  type TypeElementTypes,
 } from "ts-morph";
 import {
   RPC_SCHEMA_VERSION,
@@ -47,34 +49,38 @@ const RESERVED_EVENT_NAMES = new Set([
   "removeListener",
 ]);
 
+/** Identifies a declaration across files, where two ts-morph wrappers may not be the same object. */
+function declarationKey(declaration: InterfaceDeclaration): string {
+  return `${declaration.getSourceFile().getFilePath()}:${declaration.getStart()}`;
+}
+
+/** The interfaces an interface extends directly, including those from imported files. */
+function directBaseInterfaces(iface: InterfaceDeclaration): InterfaceDeclaration[] {
+  return iface
+    .getBaseTypes()
+    .flatMap((baseType) => baseType.getSymbol()?.getDeclarations() ?? [])
+    .filter(Node.isInterfaceDeclaration);
+}
+
 /**
- * Recursively collects all base interfaces from an interface, including those from imported files
+ * Recursively collects all base interfaces from an interface, including those from
+ * imported files. A base reached by more than one path appears once, where it was
+ * first reached.
  */
 function getAllBaseInterfaces(
   interfaceDeclaration: InterfaceDeclaration,
 ): InterfaceDeclaration[] {
   const baseInterfaces: InterfaceDeclaration[] = [];
-  const visited = new Set<string>();
+  const visited = new Set<string>([declarationKey(interfaceDeclaration)]);
 
   function collectBases(iface: InterfaceDeclaration): void {
-    const key = `${iface.getSourceFile().getFilePath()}:${iface.getStart()}`;
-    if (visited.has(key)) return;
-    visited.add(key);
-
-    const baseTypes = iface.getBaseTypes();
-    baseTypes.forEach((baseType) => {
-      const symbol = baseType.getSymbol();
-      if (!symbol) return;
-
-      const declarations = symbol.getDeclarations();
-      declarations.forEach((decl) => {
-        if (decl.getKindName() === "InterfaceDeclaration") {
-          const baseInterface = decl as InterfaceDeclaration;
-          baseInterfaces.push(baseInterface);
-          collectBases(baseInterface);
-        }
-      });
-    });
+    for (const base of directBaseInterfaces(iface)) {
+      const key = declarationKey(base);
+      if (visited.has(key)) continue;
+      visited.add(key);
+      baseInterfaces.push(base);
+      collectBases(base);
+    }
   }
 
   collectBases(interfaceDeclaration);
@@ -514,23 +520,156 @@ function parseTypeRef(
   );
 }
 
+/** A member that declares an RPC method: `name: (...) => R` or `name(...): R`. */
+type MethodMember = PropertySignature | MethodSignature;
+
+interface SkippedMember {
+  /** What the author wrote: the member's name, or its text when it has none. */
+  label: string;
+  reason: string;
+}
+
+/** A member's name (absent for call and index signatures) and what it turned out to be. */
+type ClassifiedMember =
+  | { name: string; method: MethodMember }
+  | { name: string | undefined; skipped: SkippedMember };
+
 /**
- * Extracts signature from a single property if it's a valid function
- * Returns null if the property should be skipped
+ * Sorts one member of ClientFunctions / ServerFunctions into an RPC method or
+ * the reason it is not one. The reason is what lets a skipped member be named
+ * instead of vanishing from the generated code.
  */
-function extractMethodFromProperty(
-  property: PropertySignature,
-  processedNames: Set<string>,
+function classifyMember(member: TypeElementTypes): ClassifiedMember {
+  if (Node.isPropertySignature(member) || Node.isMethodSignature(member)) {
+    const name = member.getName();
+    if (
+      Node.isPropertySignature(member) &&
+      member.getTypeNode()?.getKind() !== SyntaxKind.FunctionType
+    ) {
+      return {
+        name,
+        skipped: {
+          label: name,
+          reason: `its type is not a function type; declare an RPC method as '${name}: (...) => ...' or '${name}(...): ...'`,
+        },
+      };
+    }
+    if (member.hasQuestionToken()) {
+      return {
+        name,
+        skipped: {
+          label: name,
+          reason: "an RPC method cannot be optional; remove the '?'",
+        },
+      };
+    }
+    return { name, method: member };
+  }
+
+  const label = member.getText().replace(/\s+/g, " ").replace(/;$/, "");
+  if (Node.isCallSignatureDeclaration(member)) {
+    return { name: undefined, skipped: { label, reason: "call signatures are not RPC methods" } };
+  }
+  if (Node.isIndexSignatureDeclaration(member)) {
+    return { name: undefined, skipped: { label, reason: "index signatures are not RPC methods" } };
+  }
+  return { name: undefined, skipped: { label, reason: "it is not an RPC method" } };
+}
+
+/**
+ * Returns an interface plus its transitive base interfaces, in walk order
+ * (bases first, then the derived interface).
+ */
+function getInterfaceChain(
+  iface: InterfaceDeclaration,
+): InterfaceDeclaration[] {
+  return [...getAllBaseInterfaces(iface), iface];
+}
+
+/**
+ * How many `extends` hops each interface is from the declarations the contract
+ * names, keyed by `declarationKey`. A base reached by several paths takes the
+ * shortest.
+ */
+function hopsFrom(roots: InterfaceDeclaration[]): Map<string, number> {
+  const hops = new Map<string, number>();
+  let frontier = roots;
+  for (let distance = 0; frontier.length > 0; distance += 1) {
+    const next: InterfaceDeclaration[] = [];
+    for (const declaration of frontier) {
+      const key = declarationKey(declaration);
+      if (hops.has(key)) continue;
+      hops.set(key, distance);
+      next.push(...directBaseInterfaces(declaration));
+    }
+    frontier = next;
+  }
+  return hops;
+}
+
+/**
+ * The RPC methods the named interface declarations have, own and inherited, plus
+ * the members among them that are not RPC methods. Declarations of one interface
+ * merge, as they do in TypeScript.
+ *
+ * A name sits where it was first declared and takes the declaration closest to the
+ * contract, so a derived interface that redeclares a method replaces the base's
+ * signature while the order of the contract stays put. When that closest
+ * declaration is not an RPC method, the name is not one either.
+ */
+function scanMembers(roots: InterfaceDeclaration[]): {
+  methods: MethodMember[];
+  skipped: SkippedMember[];
+} {
+  const hops = hopsFrom(roots);
+  const chain = new Map<string, InterfaceDeclaration>();
+  for (const root of roots) {
+    for (const declaration of getInterfaceChain(root)) {
+      chain.set(declarationKey(declaration), declaration);
+    }
+  }
+
+  const candidates = [...chain.entries()].flatMap(([key, declaration]) =>
+    declaration.getMembers().map((member) => ({
+      distance: hops.get(key) ?? 0,
+      classified: classifyMember(member),
+    })),
+  );
+
+  const closest = new Map<string, (typeof candidates)[number]>();
+  for (const candidate of candidates) {
+    const { name } = candidate.classified;
+    if (name === undefined) continue;
+    const best = closest.get(name);
+    if (!best || candidate.distance < best.distance) closest.set(name, candidate);
+  }
+
+  const methods: MethodMember[] = [];
+  const skipped: SkippedMember[] = [];
+  const placed = new Set<string>();
+  for (const candidate of candidates) {
+    const { name } = candidate.classified;
+    if (name !== undefined) {
+      if (placed.has(name)) continue;
+      placed.add(name);
+    }
+    const { classified } = name === undefined ? candidate : closest.get(name)!;
+    if ("method" in classified) methods.push(classified.method);
+    else skipped.push(classified.skipped);
+  }
+  return { methods, skipped };
+}
+
+/**
+ * Extracts the signature of one RPC method member.
+ * Returns null if the member should be skipped.
+ */
+function extractMethodFromMember(
+  member: MethodMember,
   direction: RpcDirection,
   context: SchemaParseContext,
 ): ParsedMethod | null {
-  const typeNode = property.getTypeNode();
-  const name = property.getName();
-
-  // Skip if already processed (derived class overrides base)
-  if (processedNames.has(name)) return null;
-
-  if (!typeNode || typeNode.getKind() !== SyntaxKind.FunctionType) return null;
+  const name = member.getName();
 
   if (!isValidJavaScriptIdentifier(name)) {
     console.error(
@@ -545,14 +684,19 @@ function extractMethodFromProperty(
     );
   }
 
-  const callSignatures = property.getType().getCallSignatures();
+  const callSignatures = member.getType().getCallSignatures();
+  if (callSignatures.length > 1) {
+    throw new Error(
+      `Function '${name}' is overloaded — an RPC method takes exactly one signature, so no one of them can stand for the call. Merge the overloads into a single signature in your ClientFunctions/ServerFunctions interface.`,
+    );
+  }
   const signature = callSignatures[0];
   if (!signature) return null;
 
   const methodParams: RpcMethod["params"] = [];
   const params: FunctionParam[] = signature.getParameters().map((param) => {
-    const paramType = param.getTypeAtLocation(property);
-    const parameterDeclaration = param.getDeclarations()[0] ?? property;
+    const paramType = param.getTypeAtLocation(member);
+    const parameterDeclaration = param.getDeclarations()[0] ?? member;
     let structuredType = parseTypeRef(
       paramType,
       parameterDeclaration,
@@ -563,16 +707,16 @@ function extractMethodFromProperty(
     methodParams.push({ name: param.getName(), type: structuredType });
     return {
       name: param.getName(),
-      type: paramType.getText(property),
+      type: paramType.getText(member),
       isOptional: param.isOptional(),
     };
   });
 
   const returnType = signature.getReturnType();
-  const returnTypeString = returnType.getText(property);
+  const returnTypeString = returnType.getText(member);
   const structuredReturnType = parseTypeRef(
     returnType,
-    property,
+    member,
     context,
     `${direction}.${name}.returnType`,
   );
@@ -594,43 +738,22 @@ function extractMethodFromProperty(
 }
 
 /**
- * Returns an interface plus its transitive base interfaces, in walk order
- * (bases first, then the derived interface).
- */
-function getInterfaceChain(
-  iface: InterfaceDeclaration,
-): InterfaceDeclaration[] {
-  return [...getAllBaseInterfaces(iface), iface];
-}
-
-/**
  * Extracts function signatures from a TypeScript interface using ts-morph.
  * Walks the entire inheritance chain so extended interfaces' methods are included.
+ * Members that are not RPC methods are named on stderr rather than dropped silently.
  */
 function extractInterfaceMethods(
-  interfaceDeclaration: InterfaceDeclaration,
+  interfaceDeclarations: InterfaceDeclaration[],
   direction: RpcDirection,
   context: SchemaParseContext,
 ): ParsedMethod[] {
-  const methods: ParsedMethod[] = [];
-  const processedNames = new Set<string>();
-
-  for (const iface of getInterfaceChain(interfaceDeclaration)) {
-    for (const property of iface.getProperties()) {
-      const extracted = extractMethodFromProperty(
-        property,
-        processedNames,
-        direction,
-        context,
-      );
-      if (extracted) {
-        methods.push(extracted);
-        processedNames.add(extracted.method.name);
-      }
-    }
+  const { methods, skipped } = scanMembers(interfaceDeclarations);
+  for (const { label, reason } of skipped) {
+    console.error(`Warning: Skipping member '${label}' - ${reason}`);
   }
-
-  return methods;
+  return methods.flatMap(
+    (member) => extractMethodFromMember(member, direction, context) ?? [],
+  );
 }
 
 function supportedTypeDeclaration(symbol: MorphSymbol): Node | undefined {
@@ -780,32 +903,23 @@ function collectReferencedSymbols(
 }
 
 /**
- * Walks every function-property type in an interface chain and accumulates the
- * map of named types referenced by those signatures.
+ * Walks every RPC method in an interface chain and accumulates the map of
+ * named types referenced by those signatures.
  */
 function collectUsedTypes(
-  interfaceDeclaration: InterfaceDeclaration,
+  interfaceDeclarations: InterfaceDeclaration[],
   out: Map<string, SourceFile>,
 ): void {
   const visited = new Set<Type>();
 
-  for (const iface of getInterfaceChain(interfaceDeclaration)) {
-    for (const property of iface.getProperties()) {
-      const typeNode = property.getTypeNode();
-      if (!typeNode || typeNode.getKind() !== SyntaxKind.FunctionType) continue;
+  for (const member of scanMembers(interfaceDeclarations).methods) {
+    const signature = member.getType().getCallSignatures()[0];
+    if (!signature) continue;
 
-      const signature = property.getType().getCallSignatures()[0];
-      if (!signature) continue;
-
-      for (const param of signature.getParameters()) {
-        collectReferencedSymbols(
-          param.getTypeAtLocation(property),
-          out,
-          visited,
-        );
-      }
-      collectReferencedSymbols(signature.getReturnType(), out, visited);
+    for (const param of signature.getParameters()) {
+      collectReferencedSymbols(param.getTypeAtLocation(member), out, visited);
     }
+    collectReferencedSymbols(signature.getReturnType(), out, visited);
   }
 }
 
@@ -856,10 +970,12 @@ export async function extractInterfacesFromFile(
     inputProject.addSourceFileAtPath(referencedFile.getFilePath());
   });
 
-  const clientFunctionsInterface = sourceFile.getInterface("ClientFunctions");
-  const serverFunctionsInterface = sourceFile.getInterface("ServerFunctions");
+  const declarationsNamed = (name: string) =>
+    sourceFile.getInterfaces().filter((declaration) => declaration.getName() === name);
+  const clientFunctionsInterface = declarationsNamed("ClientFunctions");
+  const serverFunctionsInterface = declarationsNamed("ServerFunctions");
 
-  if (!clientFunctionsInterface || !serverFunctionsInterface) {
+  if (clientFunctionsInterface.length === 0 || serverFunctionsInterface.length === 0) {
     throw new Error(
       `Could not find ClientFunctions or ServerFunctions interfaces in ${inputPath}.`,
     );

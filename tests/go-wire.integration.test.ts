@@ -6,6 +6,7 @@ import { io as ioClient, type Socket as ClientSocket } from "socket.io-client";
 
 import { createRpcClient, type RpcClient } from "./fixtures/go-wire/client.generated";
 import { isRpcError } from "./fixtures/go-wire/types.generated";
+import { waitForAddress } from "./helpers/go-server";
 
 // Cross-language compatibility harness.
 //
@@ -18,39 +19,6 @@ import { isRpcError } from "./fixtures/go-wire/types.generated";
 // about the wire, not about the generator.
 
 const GO_SERVER_DIR = join(import.meta.dir, "fixtures", "go-wire", "goserver");
-const READY_PREFIX = "LISTENING ";
-
-/**
- * Reads the server's stdout until it announces the address it bound. The Go
- * server listens on 127.0.0.1:0 and prints the resolved host:port once the
- * listener is accepting, so there is no fixed port to collide on and no polling
- * race between "spawned" and "reachable".
- */
-async function waitForAddress(proc: Bun.Subprocess, timeoutMs: number): Promise<string> {
-  const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
-  const decoder = new TextDecoder();
-  const deadline = setTimeout(() => void reader.cancel(), timeoutMs);
-  let buffered = "";
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffered += decoder.decode(value, { stream: true });
-      const lines = buffered.split("\n");
-      // Keep the trailing fragment: a half-received line must not be mistaken
-      // for a complete address.
-      buffered = lines.pop() ?? "";
-      for (const line of lines) {
-        if (line.startsWith(READY_PREFIX)) return line.slice(READY_PREFIX.length).trim();
-      }
-    }
-  } finally {
-    clearTimeout(deadline);
-    reader.releaseLock();
-  }
-  throw new Error(`Go server did not report "${READY_PREFIX}" within ${timeoutMs}ms`);
-}
 
 // Built and started during module evaluation rather than in beforeAll: a cold Go
 // compile-and-link runs well past bun:test's 5s hook budget, and hooks accept no

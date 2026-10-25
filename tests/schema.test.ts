@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "fs";
 import * as path from "path";
 import {
@@ -440,6 +440,294 @@ describe("optional and nullable modifiers on boolean and on named string unions"
       expect((caught as SchemaExtractionError).diagnostics.map(({ code }) => code)).toEqual([
         "UNSUPPORTED_UNION_TYPE",
       ]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "an optional or nullable enum or object stays a reference to its declaration",
+    async () => {
+      const schema = await extractRpcSchemaFromFile(
+        createFixture({
+          "define.ts": `
+            export enum Role { Owner = "owner", Guest = "guest" }
+            export type Owner = { name: string };
+            export type Account = {
+              role?: Role;
+              mentor: Role | null;
+              owner?: Owner;
+              backup: Owner | null;
+            };
+            export interface ServerFunctions { get: () => Account }
+            export interface ClientFunctions {}
+          `,
+        }),
+      );
+      const role = { kind: "named", name: "Role" } as const;
+      const owner = { kind: "named", name: "Owner" } as const;
+      expect(field(schema, "role")).toEqual({ kind: "optional", type: role });
+      expect(field(schema, "mentor")).toEqual({ kind: "nullable", type: role });
+      expect(field(schema, "owner")).toEqual({ kind: "optional", type: owner });
+      expect(field(schema, "backup")).toEqual({ kind: "nullable", type: owner });
+      expect(schema.declarations.find(({ name }) => name === "Role")).toEqual({
+        kind: "enum",
+        name: "Role",
+        values: ["owner", "guest"],
+      });
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "an optional alias that itself includes null is refused with the rewrite that works",
+    async () => {
+      // `Maybe` is merged into the union it joins, so `next?: Maybe` reaches the
+      // backend as `"active" | "archived" | null | undefined` with no name left.
+      // Telling the author to "extract the union into an alias" would send them
+      // back to the declaration they already have.
+      const contractWithAliasOfNull = `
+        export type Status = "active" | "archived";
+        export type Maybe = Status | null;
+        export type Account = { next?: Maybe };
+        export interface ServerFunctions { get: () => Account }
+        export interface ClientFunctions {}
+      `;
+      const schema = await extractRpcSchemaFromFile(
+        createFixture({ "define.ts": contractWithAliasOfNull }),
+      );
+      expect(() => generateGo(schema)).toThrow("includes null or undefined");
+
+      const rewritten = await extractRpcSchemaFromFile(
+        createFixture({
+          "define.ts": contractWithAliasOfNull.replace("next?: Maybe", "next?: Status | null"),
+        }),
+      );
+      expect(generateGo(rewritten)["types.generated.go"]).toMatch(
+        /Next\s+\*Status\s+`json:"next,omitempty"`/,
+      );
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+describe("members of ClientFunctions and ServerFunctions", () => {
+  test(
+    "a method signature is an RPC method, the same as its property form",
+    async () => {
+      const extracted = await extractInterfacesFromFile(
+        createFixture({
+          "define.ts": `
+            export type Chain = { id: string };
+            export type Reply = { ok: boolean };
+            export interface ServerFunctions {
+              asProperty: (chain: Chain, note?: string) => Reply;
+              asMethod(chain: Chain, note?: string): Reply;
+              ping(): void;
+            }
+            export interface ClientFunctions {
+              notify(message: string): void;
+            }
+          `,
+        }),
+      );
+
+      const [asProperty, asMethod, ping] = extracted.clientToServerFunctions;
+      expect(extracted.clientToServerFunctions.map(({ name }) => name)).toEqual([
+        "asProperty",
+        "asMethod",
+        "ping",
+      ]);
+      expect({ ...asMethod, name: "asProperty" }).toEqual(asProperty);
+      expect(ping).toEqual({ name: "ping", params: [], returnType: "void", isVoid: true });
+      expect(extracted.serverToClientFunctions.map(({ name }) => name)).toEqual(["notify"]);
+
+      // Both forms reach the portable schema, with the same shape.
+      const methods = extracted.schema?.methods ?? [];
+      expect(methods.map(({ name }) => name)).toEqual(["asProperty", "asMethod", "ping", "notify"]);
+      expect({ ...methods[1], name: "asProperty" }).toEqual(methods[0]);
+
+      // The type imports are collected from method signatures too: `Reply` is
+      // named by nothing but `asProperty` and `asMethod`.
+      expect([...extracted.usedTypes.keys()].sort()).toEqual(["Chain", "Reply"]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "a member that is not an RPC method is reported by name, not dropped silently",
+    async () => {
+      const warn = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const extracted = await extractInterfacesFromFile(
+          createFixture({
+            "define.ts": `
+              type Handler = (x: string) => void;
+              export interface ServerFunctions {
+                kept: (x: string) => string;
+                optional?: (x: string) => void;
+                optionalMethod?(x: string): void;
+                viaAlias: Handler;
+                version: string;
+                (call: string): void;
+                [key: string]: unknown;
+              }
+              export interface ClientFunctions {}
+            `,
+          }),
+        );
+
+        expect(extracted.clientToServerFunctions.map(({ name }) => name)).toEqual(["kept"]);
+
+        const messages = warn.mock.calls.map(([message]) => String(message));
+        expect(messages).toHaveLength(6);
+        expect(messages[0]).toContain("'optional'");
+        expect(messages[0]).toContain("optional");
+        expect(messages[1]).toContain("'optionalMethod'");
+        expect(messages[1]).toContain("optional");
+        expect(messages[2]).toContain("'viaAlias'");
+        expect(messages[2]).toContain("function type");
+        expect(messages[3]).toContain("'version'");
+        expect(messages[3]).toContain("function type");
+        expect(messages[4]).toContain("call signature");
+        expect(messages[5]).toContain("index signature");
+      } finally {
+        warn.mockRestore();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "an overloaded method is refused: no one signature stands for the call",
+    async () => {
+      const inputPath = createFixture({
+        "define.ts": `
+          export interface ServerFunctions {
+            send(text: string): void;
+            send(count: number): void;
+          }
+          export interface ClientFunctions {}
+        `,
+      });
+      await expect(extractInterfacesFromFile(inputPath)).rejects.toThrow(/'send'.*overload/);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "a method a derived interface redeclares takes the derived signature, in the base's position",
+    async () => {
+      const extracted = await extractInterfacesFromFile(
+        createFixture({
+          "define.ts": `
+            interface Base {
+              first: (x: string) => string;
+              second: (x: string) => string;
+            }
+            export interface ServerFunctions extends Base {
+              first: (x: string | number) => string;
+              third: () => void;
+            }
+            export interface ClientFunctions {}
+          `,
+        }),
+      );
+
+      const { clientToServerFunctions: functions } = extracted;
+      expect(functions.map(({ name }) => name)).toEqual(["first", "second", "third"]);
+      expect(functions[0]?.params[0]?.type).toBe("string | number");
+      expect(functions[1]?.params[0]?.type).toBe("string");
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "the redeclaration closest to the contract wins, however deep the chain",
+    async () => {
+      const extracted = await extractInterfacesFromFile(
+        createFixture({
+          "define.ts": `
+            interface Root { get: (id: string) => string }
+            interface Mid extends Root { get: (id: string) => "a" | "b" }
+            export interface ServerFunctions extends Mid {}
+            export interface ClientFunctions {}
+          `,
+        }),
+      );
+      expect(extracted.clientToServerFunctions.map(({ name, returnType }) => [name, returnType])).toEqual([
+        ["get", '"a" | "b"'],
+      ]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "a base reached by two paths is walked once, and the nearer redeclaration wins",
+    async () => {
+      const warn = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const extracted = await extractInterfacesFromFile(
+          createFixture({
+            "define.ts": `
+              interface D { m: () => string; note: string }
+              interface B extends D {}
+              interface C extends D { m: () => "x" }
+              export interface ServerFunctions extends B, C {}
+              export interface ClientFunctions {}
+            `,
+          }),
+        );
+        expect(extracted.clientToServerFunctions.map(({ name, returnType }) => [name, returnType])).toEqual([
+          ["m", '"x"'],
+        ]);
+        expect(warn.mock.calls.map(([message]) => String(message))).toHaveLength(1);
+      } finally {
+        warn.mockRestore();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "a method redeclared as something that is not a method is not generated from the base",
+    async () => {
+      const warn = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const extracted = await extractInterfacesFromFile(
+          createFixture({
+            "define.ts": `
+              type Handler = (x: string | number) => void;
+              interface Base { ping: (x: string) => void; kept: () => void }
+              export interface ServerFunctions extends Base { ping: Handler }
+              export interface ClientFunctions {}
+            `,
+          }),
+        );
+        // The warning says 'ping' is skipped, so the generated code must agree.
+        expect(extracted.clientToServerFunctions.map(({ name }) => name)).toEqual(["kept"]);
+        const messages = warn.mock.calls.map(([message]) => String(message));
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain("'ping'");
+      } finally {
+        warn.mockRestore();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "declarations of the same interface merge, as they do in TypeScript",
+    async () => {
+      const extracted = await extractInterfacesFromFile(
+        createFixture({
+          "define.ts": `
+            export interface ServerFunctions { first: () => void }
+            export interface ServerFunctions { second: () => void }
+            export interface ClientFunctions {}
+          `,
+        }),
+      );
+      expect(extracted.clientToServerFunctions.map(({ name }) => name)).toEqual(["first", "second"]);
     },
     TEST_TIMEOUT_MS,
   );

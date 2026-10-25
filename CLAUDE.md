@@ -114,6 +114,16 @@ string-literal unions, scalars, arrays, string-keyed records, `T | null`, option
 `Date`), tuples, intersections, generics, `any`, and optional *positional* parameters are
 refused with the declaration to write instead. See `examples/05-go-server/`.
 
+`T` under a `| null` or optional modifier may be any accepted type, `boolean` and a named
+string union included. TypeScript flattens `boolean | undefined` into
+`true | false | undefined`, and `Status | undefined` into `"a" | "b" | undefined`, so
+`parseUnionType` takes the modifiers off the union again to read back what the author wrote.
+That recovery rests on the public `Type.getNonNullableType()`. An alias that itself includes
+null or undefined loses its name that way: with `type Maybe = Status | null`, the field
+`n?: Maybe` is refused with the rewrite named (`n?: Status | null`).
+`tests/optional-nullable.integration.test.ts` compiles and runs these shapes against a live
+Go server, so a pointer that stops being a pointer fails there.
+
 `unknown` is the IR's JSON-value node (`{ kind: "json" }`): an arbitrary JSON value,
 projected onto Go's `any`, and onto `map[string]any` inside `Record<string, unknown>`. It
 is a declared shape, not an escape hatch — `any` stays refused because it switches
@@ -172,6 +182,11 @@ Behaviour parity worth knowing:
 - Do NOT use `Promise` in interface return types (automatically wrapped)
 - Use `void` for fire-and-forget functions
 - Non-void functions automatically get acknowledgment handling and timeout support
+- Declare a function as `name: (args) => R` or `name(args): R`; the two are the same. Any other
+  member (optional, non-function, call or index signature) is named in a stderr warning and not
+  generated. Overloads are refused. The declaration closest to the contract decides a name, the
+  name keeps the position of its first declaration, and declarations of one interface merge
+  (`scanMembers` in `src/extract.ts`)
 
 ### Ergonomic API Usage (Recommended)
 

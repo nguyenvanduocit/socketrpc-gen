@@ -131,7 +131,7 @@ function validateTypeRef(ref: TypeRef, path: string, scope: ValidationScope): vo
     case "enum":
       fail(
         path,
-        "inline string-literal unions have no Go name. Extract the union into a named type alias so it can become a Go string enum.",
+        "inline string-literal unions have no Go name. Extract the union into a named type alias so it can become a Go string enum. If the contract already has one, TypeScript dropped its name: an alias that includes null or undefined is merged into any union it joins, so for `type Maybe = Status | null` a field written `n?: Maybe` reaches Go as an inline union. Write the alias's own members instead: `n?: Status | null`.",
       );
     case "null":
       fail(path, "a bare null carries no value type. Use `T | null` so Go can emit a *T.");

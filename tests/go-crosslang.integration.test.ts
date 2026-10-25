@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { io as ioClient, type Socket as ClientSocket } from "socket.io-client";
+import { run, waitForAddress } from "./helpers/go-server";
 
 // End-to-end cross-language harness: both sides are generated.
 //
@@ -21,49 +22,6 @@ import { io as ioClient, type Socket as ClientSocket } from "socket.io-client";
 
 const FIXTURE_DIR = join(import.meta.dir, "fixtures", "go-crosslang");
 const GENERATOR_PATH = join(resolve(import.meta.dir, ".."), "index.ts");
-const READY_PREFIX = "LISTENING ";
-
-/** Runs a command to completion and fails loudly with both streams on error. */
-function run(command: string[], cwd: string, label: string): void {
-  const result = Bun.spawnSync(command, { cwd, stdout: "pipe", stderr: "pipe" });
-  if (result.exitCode !== 0) {
-    throw new Error(
-      `${label} failed (exit ${result.exitCode}):\n${result.stdout.toString()}\n${result.stderr.toString()}`,
-    );
-  }
-}
-
-/**
- * Reads the server's stdout until it announces the address it bound. The Go
- * server listens on 127.0.0.1:0 and prints the resolved host:port once the
- * listener is accepting, so there is no fixed port to collide on and no polling
- * race between "spawned" and "reachable".
- */
-async function waitForAddress(proc: Bun.Subprocess, timeoutMs: number): Promise<string> {
-  const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
-  const decoder = new TextDecoder();
-  const deadline = setTimeout(() => void reader.cancel(), timeoutMs);
-  let buffered = "";
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffered += decoder.decode(value, { stream: true });
-      const lines = buffered.split("\n");
-      // Keep the trailing fragment: a half-received line must not be mistaken
-      // for a complete address.
-      buffered = lines.pop() ?? "";
-      for (const line of lines) {
-        if (line.startsWith(READY_PREFIX)) return line.slice(READY_PREFIX.length).trim();
-      }
-    }
-  } finally {
-    clearTimeout(deadline);
-    reader.releaseLock();
-  }
-  throw new Error(`Go server did not report "${READY_PREFIX}" within ${timeoutMs}ms`);
-}
 
 // Generated, compiled and started during module evaluation rather than in
 // beforeAll: generation plus a cold Go compile-and-link runs well past

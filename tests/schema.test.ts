@@ -5,6 +5,7 @@ import {
   extractInterfacesFromFile,
   extractRpcSchemaFromFile,
 } from "../src/extract";
+import { generateGo } from "../src/go";
 import { SchemaExtractionError } from "../src/schema";
 
 const fixtureRoot = path.join(
@@ -313,6 +314,132 @@ describe("SocketRPC schema extraction", () => {
         caught = error;
       }
       expect(caught).toBeInstanceOf(SchemaExtractionError);
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+describe("optional and nullable modifiers on boolean and on named string unions", () => {
+  // TypeScript spells `boolean | undefined` as the union `true | false | undefined`,
+  // and flattens `Status | undefined` into `"a" | "b" | undefined`, dropping the
+  // alias. Both have to reach the IR as what the author wrote.
+  const contract = `
+    export type Status = "active" | "archived";
+
+    export type Account = {
+      id: string;
+      verified?: boolean;
+      suspended: boolean | null;
+      reviewed?: boolean | null;
+      status?: Status;
+      previous: Status | null;
+      next?: Status | null;
+      current: Status;
+      theme?: "light" | "dark";
+    };
+
+    export interface ServerFunctions {
+      get: (id: string) => Account;
+      setStatus: (id: string, status: Status | null) => void;
+    }
+    export interface ClientFunctions {}
+  `;
+
+  const field = (schema: Awaited<ReturnType<typeof extractRpcSchemaFromFile>>, name: string) => {
+    const account = schema.declarations.find((d) => d.name === "Account");
+    if (account?.kind !== "object") throw new Error("Account is not an object");
+    return account.fields.find((f) => f.name === name)?.type;
+  };
+
+  test(
+    "an optional or nullable boolean is a boolean with that modifier",
+    async () => {
+      const schema = await extractRpcSchemaFromFile(createFixture({ "define.ts": contract }));
+      const boolean = { kind: "scalar", name: "boolean" } as const;
+      expect(field(schema, "verified")).toEqual({ kind: "optional", type: boolean });
+      expect(field(schema, "suspended")).toEqual({ kind: "nullable", type: boolean });
+      expect(field(schema, "reviewed")).toEqual({
+        kind: "optional",
+        type: { kind: "nullable", type: boolean },
+      });
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "an optional or nullable alias of a string union stays a reference to the alias",
+    async () => {
+      const schema = await extractRpcSchemaFromFile(createFixture({ "define.ts": contract }));
+      const status = { kind: "named", name: "Status" } as const;
+      expect(field(schema, "current")).toEqual(status);
+      expect(field(schema, "status")).toEqual({ kind: "optional", type: status });
+      expect(field(schema, "previous")).toEqual({ kind: "nullable", type: status });
+      expect(field(schema, "next")).toEqual({
+        kind: "optional",
+        type: { kind: "nullable", type: status },
+      });
+      expect(
+        schema.methods.find(({ name }) => name === "setStatus")?.params[1]?.type,
+      ).toEqual({ kind: "nullable", type: status });
+      expect(schema.declarations.find(({ name }) => name === "Status")).toEqual({
+        kind: "enum",
+        name: "Status",
+        values: ["active", "archived"],
+      });
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "a union written inline stays inline: it has no name to refer to",
+    async () => {
+      const schema = await extractRpcSchemaFromFile(createFixture({ "define.ts": contract }));
+      expect(field(schema, "theme")).toEqual({
+        kind: "optional",
+        type: { kind: "enum", values: ["light", "dark"] },
+      });
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "the Go backend writes them as pointers, a bool and a named enum",
+    async () => {
+      const schema = await extractRpcSchemaFromFile(
+        createFixture({
+          "define.ts": contract.replace('theme?: "light" | "dark";', ""),
+        }),
+      );
+      const types = generateGo(schema)["types.generated.go"]!;
+      expect(types).toMatch(/Verified\s+\*bool\s+`json:"verified,omitempty"`/);
+      expect(types).toMatch(/Suspended\s+\*bool\s+`json:"suspended"`/);
+      expect(types).toMatch(/Status\s+\*Status\s+`json:"status,omitempty"`/);
+      expect(types).toMatch(/Previous\s+\*Status\s+`json:"previous"`/);
+      expect(types).toMatch(/Current\s+Status\s+`json:"current"`/);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "a union that mixes boolean with another type is still refused",
+    async () => {
+      const inputPath = createFixture({
+        "define.ts": `
+          export type Mixed = { value: string | boolean };
+          export interface ServerFunctions { get: () => Mixed }
+          export interface ClientFunctions {}
+        `,
+      });
+      let caught: unknown;
+      try {
+        await extractRpcSchemaFromFile(inputPath);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(SchemaExtractionError);
+      expect((caught as SchemaExtractionError).diagnostics.map(({ code }) => code)).toEqual([
+        "UNSUPPORTED_UNION_TYPE",
+      ]);
     },
     TEST_TIMEOUT_MS,
   );

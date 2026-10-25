@@ -232,6 +232,19 @@ function parseUnionType(
     );
   }
 
+  // TypeScript flattens `Status | undefined` into `"a" | "b" | undefined`, losing the alias, and `boolean | undefined`
+  // into `true | false | undefined`. Taking the modifiers off again gives back what the author wrote: the alias (or
+  // enum), or `boolean`. A union with no name of its own stays what it was below.
+  if (hasUndefined || hasNull) {
+    const base = type.getNonNullableType();
+    if (base.isBoolean() || getPortableNamedSymbol(base)) {
+      ref = parseTypeRef(base, location, context, diagnosticPath);
+      if (hasNull) ref = nullableType(ref);
+      if (hasUndefined) ref = optionalType(ref);
+      return ref;
+    }
+  }
+
   const enumValues = stringEnumValuesFromMembers(valueMembers);
   if (enumValues) {
     ref = { kind: "enum", values: enumValues };

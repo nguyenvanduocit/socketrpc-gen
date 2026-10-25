@@ -1,5 +1,12 @@
 # Changelog
 
+## [8.1.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v8.0.1...v8.1.0) (2026-10-25)
+
+
+### Features
+
+* accept method signatures and name every member the generator skips ([#46](https://github.com/nguyenvanduocit/socketrpc-gen/issues/46)) ([8ed52e5](https://github.com/nguyenvanduocit/socketrpc-gen/commit/8ed52e54c60a04565e0abacf1d8fb515c1ceb48e))
+
 ## [8.0.1](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v8.0.0...v8.0.1) (2026-10-25)
 
 

@@ -1,0 +1,632 @@
+// Package engine implements the Engine.IO socket, which manages client connections, transport upgrades, and protocol state.
+package engine
+
+import (
+	"encoding/json"
+	"io"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/parsers/engine/packet"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/pkg/log"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/pkg/slices"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/pkg/types"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/pkg/utils"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/servers/engine/errors"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/servers/engine/transports"
+)
+
+var socketLog = log.NewLog("engine:socket")
+
+const (
+	// DefaultUpgradeCheckInterval is the interval between upgrade readiness checks during transport upgrade.
+	DefaultUpgradeCheckInterval = 100 * time.Millisecond
+)
+
+type socket struct {
+	types.EventEmitter
+
+	// The revision of the protocol:
+	//
+	// - 3rd is used in Engine.IO v3 / Socket.IO v2
+	// - 4th is used in Engine.IO v4 and above / Socket.IO v3 and above
+	//
+	// It is found in the `EIO` query parameters of the HTTP requests.
+	//
+	// See: https://github.com/socketio/engine.io-protocol
+	protocol int
+	// A reference to the first HTTP request of the session
+	//
+	// TODO for the next major release: remove it
+	request *types.HttpContext
+	// The IP address of the client.
+	remoteAddress string
+
+	// The current state of the socket.
+	readyState types.Atomic[string]
+	// The current low-level transport.
+	transport atomic.Pointer[transports.Transport]
+
+	// This is the session identifier that the client will use in the subsequent HTTP requests. It must not be shared with
+	// others parties, as it might lead to session hijacking.
+	id                string
+	server            BaseServer
+	upgrading         atomic.Bool
+	upgraded          atomic.Bool
+	writeBuffer       *types.Slice[*packet.Packet]
+	packetsFn         *types.Slice[SendCallback]
+	sentCallbackFn    *types.Slice[[]SendCallback]
+	cleanupFn         *types.Slice[types.Callable]
+	pingTimeoutTimer  atomic.Pointer[utils.Timer]
+	pingIntervalTimer atomic.Pointer[utils.Timer]
+
+	flushMu sync.Mutex
+}
+
+func (s *socket) Protocol() int {
+	return s.protocol
+}
+
+func (s *socket) Upgraded() bool {
+	return s.upgraded.Load()
+}
+
+func (s *socket) Upgrading() bool {
+	return s.upgrading.Load()
+}
+
+func (s *socket) Id() string {
+	return s.id
+}
+
+func (s *socket) RemoteAddress() string {
+	return s.remoteAddress
+}
+
+func (s *socket) Request() *types.HttpContext {
+	return s.request
+}
+
+func (s *socket) Transport() transports.Transport {
+	if v := s.transport.Load(); v != nil {
+		return *v
+	}
+	return nil
+}
+
+func (s *socket) Server() BaseServer {
+	return s.server
+}
+
+func (s *socket) ReadyState() string {
+	return s.readyState.Load()
+}
+
+func (s *socket) SetReadyState(state string) {
+	socketLog.Debug("readyState updated from %s to %s", s.ReadyState(), state)
+
+	s.readyState.Store(state)
+}
+
+// Client class.
+func MakeSocket() Socket {
+	s := &socket{
+		EventEmitter: types.NewEventEmitter(),
+
+		writeBuffer:    types.NewSlice[*packet.Packet](),
+		packetsFn:      types.NewSlice[SendCallback](),
+		sentCallbackFn: types.NewSlice[[]SendCallback](),
+		cleanupFn:      types.NewSlice[types.Callable](),
+	}
+	s.readyState.Store("opening")
+
+	return s
+}
+
+// Client class.
+func NewSocket(id string, server BaseServer, transport transports.Transport, ctx *types.HttpContext, protocol int) Socket {
+	s := MakeSocket()
+
+	s.Construct(id, server, transport, ctx, protocol)
+
+	return s
+}
+
+func (s *socket) Construct(id string, server BaseServer, transport transports.Transport, ctx *types.HttpContext, protocol int) {
+	s.id = id
+	s.server = server
+	s.request = ctx
+	s.protocol = protocol
+
+	// Cache IP since it might not be in the req later
+	if ctx.WebTransport != nil {
+		s.remoteAddress = ctx.WebTransport.RemoteAddr().String()
+	} else if ctx.Websocket != nil && ctx.Websocket.Conn != nil {
+		s.remoteAddress = ctx.Websocket.RemoteAddr().String()
+	} else {
+		s.remoteAddress = ctx.Request().RemoteAddr
+	}
+
+	s.setTransport(transport)
+	opened := s.onOpen()
+	if ctx.TransportReadPermission() != nil {
+		// Managed streams start heartbeat when their initialization completes.
+		ctx.SetTransportReady(s.startHeartbeat)
+	} else if opened {
+		s.startHeartbeat()
+	}
+}
+
+// onOpen queues OPEN and reports whether it reached the open event.
+func (s *socket) onOpen() bool {
+	// Initialization can lose to a transport error or its startup deadline.
+	if !s.readyState.CompareAndSwap("opening", "open") {
+		return false
+	}
+
+	// sends an `open` packet
+	s.Transport().SetSid(s.id)
+
+	data, err := json.Marshal(map[string]any{
+		"sid":          s.id,
+		"upgrades":     s.getAvailableUpgrades(),
+		"pingInterval": int64(s.server.Opts().PingInterval() / time.Millisecond),
+		"pingTimeout":  int64(s.server.Opts().PingTimeout() / time.Millisecond),
+		"maxPayload":   s.server.Opts().MaxHttpBufferSize(),
+	})
+
+	if err != nil {
+		socketLog.Debug("json.Marshal err: %s", err)
+		s.OnClose("encode error")
+		return false
+	}
+	s.sendPacket(
+		packet.OPEN,
+		types.NewStringBuffer(data),
+		nil, nil,
+	)
+
+	if i := s.server.Opts().InitialPacket(); i != nil {
+		s.sendPacket(packet.MESSAGE, i, nil, nil)
+	}
+
+	if s.ReadyState() != "open" {
+		return false
+	}
+	s.Emit("open")
+	return true
+}
+
+func (s *socket) startHeartbeat() {
+	if s.ReadyState() == "closed" {
+		return
+	}
+	if s.protocol == 3 {
+		// in protocol v3, the client sends a ping, and the server answers with a pong
+		s.resetPingTimeout()
+	} else {
+		// in protocol v4, the server sends a ping, and the client answers with a pong
+		s.schedulePing()
+	}
+}
+
+// Called upon transport packet.
+func (s *socket) onPacket(data *packet.Packet) {
+	if data == nil {
+		socketLog.Debug("packet received nil")
+		return
+	}
+
+	if s.ReadyState() != "open" {
+		socketLog.Debug("packet received with closed socket")
+		return
+	}
+
+	// export packet event
+	socketLog.Debug(`received packet %s`, data.Type)
+	s.Emit("packet", data)
+
+	switch data.Type {
+	case packet.PING:
+		if s.Transport().Protocol() != 3 {
+			s.onError(errors.ErrInvalidHeartbeat)
+			return
+		}
+		socketLog.Debug("got ping")
+		if timer := s.pingTimeoutTimer.Load(); timer != nil {
+			timer.Refresh()
+		}
+		s.sendPacket(packet.PONG, nil, nil, nil)
+		s.Emit("heartbeat")
+	case packet.PONG:
+		if s.Transport().Protocol() == 3 {
+			s.onError(errors.ErrInvalidHeartbeat)
+			return
+		}
+		socketLog.Debug("got pong")
+		utils.ClearTimeout(s.pingTimeoutTimer.Load())
+		if timer := s.pingIntervalTimer.Load(); timer != nil {
+			timer.Refresh()
+		}
+		s.Emit("heartbeat")
+	case packet.ERROR:
+		s.OnClose("parse error")
+	case packet.MESSAGE:
+		s.Emit("data", data.Data)
+		s.Emit("message", data.Data)
+	}
+}
+
+// Called upon transport error.
+func (s *socket) onError(err error) {
+	socketLog.Debug("transport error %v", err)
+	s.OnClose("transport error", err)
+}
+
+// Pings client every `this.pingInterval` and expects response
+// within `this.pingTimeout` or closes connection.
+func (s *socket) schedulePing() {
+	timer := utils.SetTimeout(func() {
+		if s.ReadyState() == "closed" {
+			return
+		}
+		socketLog.Debug("writing ping packet - expecting pong within %dms", int64(s.server.Opts().PingTimeout()/time.Millisecond))
+		s.sendPacket(packet.PING, nil, nil, nil)
+		s.resetPingTimeout()
+	}, s.server.Opts().PingInterval())
+	s.pingIntervalTimer.Store(timer)
+	// A close may have cleared the old timer before this one was published.
+	if s.ReadyState() == "closed" {
+		utils.ClearTimeout(timer)
+	}
+}
+
+// Resets ping timeout.
+func (s *socket) resetPingTimeout() {
+	utils.ClearTimeout(s.pingTimeoutTimer.Load())
+	if s.ReadyState() == "closed" {
+		return
+	}
+	timer := utils.SetTimeout(func() {
+		if s.ReadyState() == "closed" {
+			return
+		}
+		s.OnClose("ping timeout")
+	}, s.resetPingTimeoutDuration())
+	s.pingTimeoutTimer.Store(timer)
+	if s.ReadyState() == "closed" {
+		utils.ClearTimeout(timer)
+	}
+}
+func (s *socket) resetPingTimeoutDuration() time.Duration {
+	if s.protocol == 3 {
+		return s.server.Opts().PingInterval() + s.server.Opts().PingTimeout()
+	}
+	return s.server.Opts().PingTimeout()
+}
+
+// Attaches handlers for the given transport.
+func (s *socket) setTransport(transport transports.Transport) {
+	onError := func(err ...any) {
+		s.onError(slices.TryGetAny[error](err, 0))
+	}
+	onReady := func(...any) { s.flush() }
+	onPacket := func(packets ...any) {
+		s.onPacket(slices.TryGetAny[*packet.Packet](packets, 0))
+	}
+	onDrain := func(...any) { s.onDrain() }
+	onClose := func(...any) { s.OnClose("transport close") }
+
+	s.transport.Store(&transport)
+
+	_ = transport.Once("error", onError)
+	_ = transport.On("ready", onReady)
+	_ = transport.On("packet", onPacket)
+	_ = transport.On("drain", onDrain)
+	_ = transport.Once("close", onClose)
+
+	s.cleanupFn.Push(func() {
+		transport.RemoveListener("error", onError)
+		transport.RemoveListener("ready", onReady)
+		transport.RemoveListener("packet", onPacket)
+		transport.RemoveListener("drain", onDrain)
+		transport.RemoveListener("close", onClose)
+	})
+	// Closing can finish before the listener cleanup is published.
+	if s.ReadyState() == "closed" {
+		s.clearTransport()
+	}
+}
+
+// Upon transport "drain" event
+func (s *socket) onDrain() {
+	if seqFn, err := s.sentCallbackFn.Shift(); err == nil {
+		socketLog.Debug("executing batch send callback")
+		for _, fn := range seqFn {
+			fn(s.Transport())
+		}
+	}
+}
+
+// Upgrades socket to the given transport
+func (s *socket) MaybeUpgrade(transport transports.Transport) {
+	socketLog.Debug(`might upgrade socket transport from "%s" to "%s"`, s.Transport().Name(), transport.Name())
+
+	s.upgrading.Store(true)
+
+	var check, cleanup func()
+	var onPacket, onError, onTransportClose, onClose types.EventListener
+	var upgradeTimeoutTimer, checkIntervalTimer atomic.Pointer[utils.Timer]
+
+	onPacket = func(datas ...any) {
+		data, ok := datas[0].(*packet.Packet)
+		if !ok {
+			return
+		}
+		sb := new(strings.Builder)
+		_, _ = io.Copy(sb, data.Data)
+		if data.Type == packet.PING && sb.String() == "probe" {
+			socketLog.Debug("got probe ping packet, sending pong")
+			transport.Send([]*packet.Packet{{Type: packet.PONG, Data: strings.NewReader("probe")}})
+			s.Emit("upgrading", transport)
+
+			utils.ClearInterval(checkIntervalTimer.Load())
+			checkIntervalTimer.Store(utils.SetInterval(check, DefaultUpgradeCheckInterval))
+
+		} else if packet.UPGRADE == data.Type && s.ReadyState() != "closed" {
+			socketLog.Debug("got upgrade packet - upgrading")
+			cleanup()
+			s.Transport().Discard()
+
+			s.upgraded.Store(true)
+
+			s.clearTransport()
+			s.setTransport(transport)
+			s.Emit("upgrade", transport)
+			s.flush()
+			if s.ReadyState() == "closing" {
+				transport.Close(func() {
+					s.OnClose("forced close")
+				})
+			}
+		} else {
+			cleanup()
+			transport.Close()
+		}
+	}
+
+	// we force a polling cycle to ensure a fast upgrade
+	check = func() {
+		if transports.POLLING == s.Transport().Name() && s.Transport().Writable() {
+			socketLog.Debug("writing a noop packet to polling for fast upgrade")
+			s.Transport().Send([]*packet.Packet{{Type: packet.NOOP}})
+		}
+	}
+
+	cleanup = func() {
+		s.upgrading.Store(false)
+
+		utils.ClearInterval(checkIntervalTimer.Load())
+		utils.ClearTimeout(upgradeTimeoutTimer.Load())
+
+		transport.RemoveListener("packet", onPacket)
+		transport.RemoveListener("close", onTransportClose)
+		transport.RemoveListener("error", onError)
+		s.RemoveListener("close", onClose)
+	}
+
+	onError = func(errs ...any) {
+		socketLog.Debug("client did not complete upgrade - %v", slices.TryGetAny[error](errs, 0))
+		cleanup()
+		transport.Close()
+	}
+
+	onTransportClose = func(...any) {
+		onError("transport closed")
+	}
+
+	onClose = func(...any) {
+		onError("socket closed")
+	}
+
+	// set transport upgrade timer
+	upgradeTimeoutTimer.Store(utils.SetTimeout(func() {
+		socketLog.Debug("client did not complete upgrade - closing transport")
+		cleanup()
+		transport.Close()
+	}, s.server.Opts().UpgradeTimeout()))
+
+	_ = transport.On("packet", onPacket)
+	_ = transport.Once("close", onTransportClose)
+	_ = transport.Once("error", onError)
+
+	_ = s.Once("close", onClose)
+	// A startup deadline may have closed the candidate before these listeners
+	// were installed. Do not leave a dead candidate marked as upgrading.
+	if state := transport.ReadyState(); state == "closing" || state == "closed" || s.ReadyState() == "closed" {
+		cleanup()
+		transport.Close()
+	}
+}
+
+// Clears listeners and timers associated with current transport.
+func (s *socket) clearTransport() {
+	s.cleanupFn.DoWrite(func(cleanups []types.Callable) []types.Callable {
+		for _, cleanup := range cleanups {
+			cleanup()
+		}
+		return cleanups[:0]
+	})
+
+	// silence further transport errors and prevent uncaught exceptions
+	_ = s.Transport().On("error", func(...any) {
+		socketLog.Debug("error triggered by discarded transport")
+	})
+
+	// ensure transport won't stay open
+	s.Transport().Close()
+
+	utils.ClearTimeout(s.pingTimeoutTimer.Load())
+}
+
+// Called upon transport considered closed.
+// Possible reasons: `ping timeout`, `client error`, `parse error`,
+// `transport error`, `server close`, `transport close`
+func (s *socket) OnClose(reason string, description ...error) {
+	if s.readyState.Swap("closed") != "closed" {
+		description = append(description, nil)
+
+		// clear timers
+		utils.ClearTimeout(s.pingIntervalTimer.Load())
+
+		utils.ClearTimeout(s.pingTimeoutTimer.Load())
+
+		// clean writeBuffer in defer, so developers can still
+		// grab the writeBuffer on 'close' event
+		defer s.writeBuffer.Clear()
+
+		s.packetsFn.Clear()
+
+		s.sentCallbackFn.Clear()
+
+		s.clearTransport()
+		s.Emit("close", reason, description[0])
+	}
+}
+
+// Sends a message packet.
+func (s *socket) Send(
+	data io.Reader,
+	options *packet.Options,
+	callback SendCallback,
+) Socket {
+	s.sendPacket(packet.MESSAGE, data, options, callback)
+	return s
+}
+
+// Alias of [Send]
+func (s *socket) Write(
+	data io.Reader,
+	options *packet.Options,
+	callback SendCallback,
+) Socket {
+	s.sendPacket(packet.MESSAGE, data, options, callback)
+	return s
+}
+
+// Sends a packet.
+func (s *socket) sendPacket(
+	packetType packet.Type,
+	data io.Reader,
+	options *packet.Options,
+	callback SendCallback,
+) {
+	if readystate := s.ReadyState(); readystate != "closing" && readystate != "closed" {
+		socketLog.Debug(`sending packet "%s" (%p)`, packetType, data)
+
+		// Clone options to avoid data races when the same Options pointer
+		// is shared across multiple sockets during broadcast.
+		opts := &packet.Options{}
+		if options != nil {
+			opts.WsPreEncodedFrame = options.WsPreEncodedFrame
+			if options.Compress != nil {
+				compress := *options.Compress
+				opts.Compress = &compress
+			}
+		}
+
+		if opts.Compress == nil || *opts.Compress {
+			opts.Compress = new(true)
+		} else {
+			opts.Compress = new(false)
+		}
+
+		packet := &packet.Packet{
+			Type:    packetType,
+			Data:    data,
+			Options: opts,
+		}
+
+		// exports packetCreate event
+		s.Emit("packetCreate", packet)
+
+		s.writeBuffer.Push(packet)
+
+		// add send callback to object, if defined
+		if callback != nil {
+			s.packetsFn.Push(callback)
+		}
+
+		s.flush()
+	}
+}
+
+// Attempts to flush the packets buffer.
+func (s *socket) flush() {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
+	if s.ReadyState() != "closed" && s.Transport().Writable() {
+		if wbuf := s.writeBuffer.AllAndClear(); len(wbuf) > 0 {
+			socketLog.Debug("flushing buffer to transport")
+			s.Emit("flush", wbuf)
+			s.server.Emit("flush", s, wbuf)
+			if packetsFn := s.packetsFn.AllAndClear(); len(packetsFn) > 0 {
+				s.sentCallbackFn.Push(packetsFn)
+			} else {
+				s.sentCallbackFn.Push(nil)
+			}
+			s.Transport().Send(wbuf)
+			s.Emit("drain")
+			s.server.Emit("drain", s)
+		}
+	}
+}
+
+// Get available upgrades for this socket.
+func (s *socket) getAvailableUpgrades() []string {
+	availableUpgrades := []string{}
+	for _, upg := range s.server.Upgrades(s.Transport().Name()) {
+		if s.server.Transports().Has(upg) && (s.protocol == 4 || upg != transports.WEBTRANSPORT) {
+			availableUpgrades = append(availableUpgrades, upg)
+		}
+	}
+	return availableUpgrades
+}
+
+// Closes the socket and underlying transport.
+func (s *socket) Close(discard bool) {
+	if discard {
+		if state := s.ReadyState(); state == "open" || state == "closing" {
+			// The transport may have closed before its listeners were installed.
+			// Finalize the socket even when Transport.Close cannot call back.
+			s.Transport().Discard()
+			s.OnClose("forced close")
+		}
+		return
+	}
+
+	if !s.readyState.CompareAndSwap("open", "closing") {
+		return
+	}
+
+	if length := s.writeBuffer.Len(); length > 0 {
+		socketLog.Debug("there are %d remaining packets in the buffer, waiting for the 'drain' event", length)
+		_ = s.Once("drain", func(...any) {
+			socketLog.Debug("all packets have been sent, closing the transport")
+			s.closeTransport()
+		})
+		return
+	}
+
+	socketLog.Debug("the buffer is empty, closing the transport right away")
+	s.closeTransport()
+}
+
+// Closes the underlying transport.
+func (s *socket) closeTransport() {
+	socketLog.Debug("closing the transport")
+	s.Transport().Close(func() { s.OnClose("forced close") })
+}

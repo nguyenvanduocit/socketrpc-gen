@@ -48,16 +48,21 @@ export function unwrapOptionality(ref: TypeRef): UnwrappedType {
  * Renders a validated type reference. Unvalidated kinds throw rather than
  * guessing, so a gap between the two passes surfaces as a crash in tests
  * instead of as malformed Go.
+ *
+ * `qualifier` is the package selector a contract declaration is reached
+ * through — `""` inside the types package, `"wire."` from a client generated
+ * into its own package. Only named references take it: scalars, slices and maps
+ * are spelled the same everywhere.
  */
-export function renderGoType(ref: TypeRef): string {
+export function renderGoType(ref: TypeRef, qualifier = ""): string {
   const { core, nilable } = unwrapOptionality(ref);
-  const rendered = renderCoreGoType(core);
+  const rendered = renderCoreGoType(core, qualifier);
   // `any` is already the Go value that can be nil, so a pointer to one would add
   // a second, meaningless way to spell the absence the JSON value itself carries.
   return nilable && core.kind !== "json" ? `*${rendered}` : rendered;
 }
 
-function renderCoreGoType(ref: TypeRef): string {
+function renderCoreGoType(ref: TypeRef, qualifier: string): string {
   switch (ref.kind) {
     case "json":
       return "any";
@@ -72,11 +77,11 @@ function renderCoreGoType(ref: TypeRef): string {
       }
     // falls through for an unknown scalar, which validation rejects first
     case "named":
-      return goTypeName(ref.name);
+      return `${qualifier}${goTypeName(ref.name)}`;
     case "array":
-      return `[]${renderGoType(ref.element)}`;
+      return `[]${renderGoType(ref.element, qualifier)}`;
     case "map":
-      return `map[string]${renderGoType(ref.value)}`;
+      return `map[string]${renderGoType(ref.value, qualifier)}`;
     default:
       throw new Error(
         `Internal error: type kind '${ref.kind}' reached the Go emitter without validation.`,
@@ -84,12 +89,12 @@ function renderCoreGoType(ref: TypeRef): string {
   }
 }
 
-/** Methods the TypeScript client calls; the generated Go server handles them. */
+/** Methods a client calls and a server handles. */
 export function inboundMethods(schema: RpcSchema): RpcMethod[] {
   return schema.methods.filter((method) => method.direction === "client-to-server");
 }
 
-/** Methods the generated Go server calls; the TypeScript client handles them. */
+/** Methods a server calls and a client handles. */
 export function outboundMethods(schema: RpcSchema): RpcMethod[] {
   return schema.methods.filter((method) => method.direction === "server-to-client");
 }
@@ -136,17 +141,18 @@ function resolveComposite(
 export function emptyCompositeLiteral(
   ref: TypeRef,
   declarations: DeclarationScope,
+  qualifier = "",
 ): string | undefined {
   const { core, nilable } = unwrapOptionality(ref);
   if (nilable) return undefined;
   const resolved = resolveComposite(core, declarations);
   if (!resolved) return undefined;
-  return `${renderGoType(resolved)}{}`;
+  return `${renderGoType(resolved, qualifier)}{}`;
 }
 
 /** A method's Go result type, or undefined when it is fire-and-forget. */
-export function resultGoType(method: RpcMethod): string | undefined {
-  return method.returnType.kind === "void" ? undefined : renderGoType(method.returnType);
+export function resultGoType(method: RpcMethod, qualifier = ""): string | undefined {
+  return method.returnType.kind === "void" ? undefined : renderGoType(method.returnType, qualifier);
 }
 
 export function declarationsByName(schema: RpcSchema): Map<string, TypeDeclaration> {

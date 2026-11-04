@@ -9,6 +9,8 @@
 
 import type { ObjectField, RpcMethod, RpcSchema, TypeDeclaration, TypeRef } from "../schema";
 import {
+  GENERATED_PREFIX,
+  GO_PREDECLARED,
   clientMethodName,
   exportedIdentifier,
   handlerMethodName,
@@ -16,7 +18,7 @@ import {
   isGoIdentifier,
   localIdentifier,
 } from "./names";
-import type { GoBackendOptions } from "./options";
+import { DEFAULT_GO_PACKAGE_NAME, type GoBackendOptions, type GoClientOptions } from "./options";
 import { declarationsByName, goTypeName, unwrapOptionality } from "./project";
 import { RPC_ERROR_EVENT } from "../types";
 
@@ -47,17 +49,17 @@ const RESERVED_EVENTS = new Set([
  */
 const RESERVED_PARAMETER_NAMES = new Set(["ctx"]);
 
-const RESERVED_DECLARATIONS = new Set([
+/**
+ * The exported identifiers a side adds to the package it is generated into.
+ *
+ * A contract declaration shares that package, so its Go name must avoid every
+ * one of them. The types file is always there; the server or the client joins
+ * it only when it is generated into the same package. A client generated into
+ * its own package declares no contract types, so its API constrains nothing.
+ */
+const CORE_API = [
   "RpcError",
   "RpcErrorCode",
-  "ServerHandler",
-  "ServerBinding",
-  "Client",
-  "ClientOptions",
-]);
-
-const RESERVED_PACKAGE_IDENTIFIERS = new Set([
-  ...RESERVED_DECLARATIONS,
   "RPCErrorEvent",
   "CodeTimeout",
   "CodeDisposed",
@@ -67,8 +69,41 @@ const RESERVED_PACKAGE_IDENTIFIERS = new Set([
   "CodeInvalidArgument",
   "NewRpcError",
   "IsRpcError",
-  "BindServer",
-  "NewClient",
+];
+const SERVER_API = ["ServerHandler", "ServerBinding", "Client", "ClientOptions", "BindServer", "NewClient"];
+const CLIENT_API = ["ClientHandler", "Conn", "Dial", "DialOptions"];
+
+/** Which Go side a validation run is for. */
+export type GoSideName = "server" | "client";
+
+function reservedPackageIdentifiers(side: GoSideName, options: GoBackendOptions): Set<string> {
+  if (side === "server") return new Set([...CORE_API, ...SERVER_API]);
+  return new Set(options.client?.separate ? CORE_API : [...CORE_API, ...CLIENT_API]);
+}
+
+/**
+ * The names the client file already resolves at file scope: the packages it
+ * imports, and Go's predeclared identifiers, which an import of the same name
+ * would shadow.
+ *
+ * A separate client imports the types package by its package name, so that
+ * name must not be any of them, nor carry the generated prefix the client's
+ * package-level identifiers are spelled with. Nothing else can meet it: the
+ * client names the package only at file scope and in exported signatures,
+ * whose parameters are scoped to the body, and every body reaches the types
+ * package through `rpc_` aliases instead (`writeTypesBridge`).
+ */
+const CLIENT_FILE_NAMES = new Set([
+  ...GO_PREDECLARED,
+  "context",
+  "errors",
+  "fmt",
+  "json",
+  "reflect",
+  "sync",
+  "time",
+  "url",
+  "sioclient",
 ]);
 
 const WIRE_IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
@@ -311,7 +346,7 @@ function validateValueCycles(schema: RpcSchema, scope: ValidationScope): void {
   for (const name of objects.keys()) visit(name, []);
 }
 
-function validateDeclarationNames(schema: RpcSchema): Set<string> {
+function validateDeclarationNames(schema: RpcSchema, reserved: ReadonlySet<string>): Set<string> {
   const goNames = new Map<string, string>();
 
   schema.declarations.forEach((declaration, index) => {
@@ -323,7 +358,7 @@ function validateDeclarationNames(schema: RpcSchema): Set<string> {
         `cannot derive an exported Go type name from ${JSON.stringify(declaration.name)}`,
       );
     }
-    if (RESERVED_PACKAGE_IDENTIFIERS.has(goName)) {
+    if (reserved.has(goName)) {
       fail(`${path}.name`, `${goName} collides with the generated package API`);
     }
     const previous = goNames.get(goName);
@@ -364,25 +399,65 @@ function validateEnumConstants(
   });
 }
 
+function validatePackageName(packageName: string, path: string): void {
+  // The blank identifier matches the pattern but is no package name at all.
+  if (!/^[a-z_][a-z0-9_]*$/.test(packageName) || !isGoIdentifier(packageName) || packageName === "_") {
+    fail(path, "must be a lower-case Go package identifier");
+  }
+}
+
+function validateImportPath(importPath: string, path: string): void {
+  if (!importPath.trim()) fail(path, "must not be empty");
+  if (!/^[A-Za-z0-9._~/-]+$/.test(importPath)) {
+    fail(path, "contains characters that are not valid in a Go import path");
+  }
+}
+
+/**
+ * Refuses client options that cannot produce a compiling client file. Each
+ * message names the CLI flag that sets the value.
+ */
+function validateGoClientOptions(client: GoClientOptions, typesPackageName: string | undefined): void {
+  if (client.socketImport !== undefined) {
+    validateImportPath(client.socketImport, "options.client.socketImport (--go-client-socket-import)");
+  }
+  const separate = client.separate;
+  if (!separate) return;
+  validatePackageName(separate.packageName, "options.client.separate.packageName (--go-client-package)");
+  validateImportPath(separate.typesImport, "options.client.separate.typesImport (derived from --go-out)");
+  const typesName = typesPackageName ?? DEFAULT_GO_PACKAGE_NAME;
+  if (separate.packageName === typesName) {
+    fail(
+      "options.client.separate.packageName (--go-client-package)",
+      `must differ from the types package ${JSON.stringify(typesName)} (--go-package): the client is a separate package that imports it`,
+    );
+  }
+  if (CLIENT_FILE_NAMES.has(typesName) || typesName.startsWith(GENERATED_PREFIX)) {
+    fail(
+      "options.packageName (--go-package)",
+      `the client file imports the types package as ${JSON.stringify(typesName)}, a name that file already uses for an import, a predeclared Go identifier or its own ${GENERATED_PREFIX} identifiers. Choose another --go-package`,
+    );
+  }
+}
+
 /**
  * Validates a canonical schema against the Go backend. Throws `GoSchemaError`
  * with the offending logical path on the first unsupported shape.
+ *
+ * `side` names the Go file being generated, which decides the identifiers a
+ * contract declaration must avoid: those of the server, or those of a client
+ * that shares the types package.
  */
-export function validateGoSchema(schema: RpcSchema, options: GoBackendOptions = {}): void {
+export function validateGoSchema(
+  schema: RpcSchema,
+  options: GoBackendOptions = {},
+  side: GoSideName = "server",
+): void {
   if (!schema || typeof schema !== "object") fail("schema", "expected an object");
 
-  const packageName = options.packageName;
-  if (packageName !== undefined) {
-    if (!/^[a-z_][a-z0-9_]*$/.test(packageName) || !isGoIdentifier(packageName)) {
-      fail("options.packageName", "must be a lower-case Go package identifier");
-    }
-  }
-  if (options.socketImport !== undefined) {
-    if (!options.socketImport.trim()) fail("options.socketImport", "must not be empty");
-    if (!/^[A-Za-z0-9._~/-]+$/.test(options.socketImport)) {
-      fail("options.socketImport", "contains characters that are not valid in a Go import path");
-    }
-  }
+  if (options.packageName !== undefined) validatePackageName(options.packageName, "options.packageName (--go-package)");
+  if (options.socketImport !== undefined) validateImportPath(options.socketImport, "options.socketImport");
+  if (side === "client") validateGoClientOptions(options.client ?? {}, options.packageName);
   if (
     options.defaultTimeoutMs !== undefined &&
     (!Number.isSafeInteger(options.defaultTimeoutMs) ||
@@ -392,10 +467,11 @@ export function validateGoSchema(schema: RpcSchema, options: GoBackendOptions = 
     fail("options.defaultTimeoutMs", "must be a positive integer representable by time.Duration");
   }
 
-  const goDeclarationNames = validateDeclarationNames(schema);
+  const reserved = reservedPackageIdentifiers(side, options);
+  const goDeclarationNames = validateDeclarationNames(schema, reserved);
   const scope: ValidationScope = { declarations: declarationsByName(schema) };
 
-  const packageIdentifiers = new Set<string>([...RESERVED_PACKAGE_IDENTIFIERS, ...goDeclarationNames]);
+  const packageIdentifiers = new Set<string>([...reserved, ...goDeclarationNames]);
 
   schema.declarations.forEach((declaration, index) => {
     const path = `declarations[${index}]`;

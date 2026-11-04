@@ -4,7 +4,7 @@ import { extractInterfacesFromFile, requireRpcSchema } from "./extract";
 import type { RpcSchema } from "./schema";
 import { generateSideFile } from "./emit-side";
 import { generateTypesFile } from "./emit-types";
-import { generateGoServerFiles, validateGoTarget } from "./emit-go";
+import { generateGoClientFiles, generateGoServerFiles, validateGoTarget } from "./emit-go";
 import { ensurePackageStructure, validateInputFile } from "./emit-pkg";
 import { resolveConfig, type FunctionSignature, type ResolvedConfig, type GeneratorConfig } from "./types";
 
@@ -24,6 +24,11 @@ function logGenerationSummary(
     console.log(`🐹 Go server package '${config.goPackageName}' in ${config.goOutputDir}`);
     console.log(`   Transport: ${config.goSocketImport}`);
   }
+  if (config.clientLanguages.has("go")) {
+    const clientPackage = config.goClientPackageName ?? config.goPackageName;
+    console.log(`🐹 Go client package '${clientPackage}' in ${config.goClientOutputDir ?? config.goOutputDir}`);
+    console.log(`   Transport: ${config.goClientSocketImport}`);
+  }
 
   const handled = (fns: FunctionSignature[]) =>
     fns.forEach((f) => console.log(`     - ${f.name}(${f.params.map((p) => p.name).join(", ")})`));
@@ -32,14 +37,18 @@ function logGenerationSummary(
       console.log(`     - ${f.name}(${f.params.map((p) => p.name).join(", ")}) -> ${f.returnType}`),
     );
 
-  console.log("\n📋 Client API (createRpcClient):");
-  if (serverToClientFunctions.length > 0) {
-    console.log("   .handle (from server):");
-    handled(serverToClientFunctions);
-  }
-  if (clientToServerFunctions.length > 0) {
-    console.log("   .server (to server):");
-    called(clientToServerFunctions);
+  for (const language of config.clientLanguages) {
+    const clientHeading =
+      language === "go" ? "Client API (Go ClientHandler / Conn)" : "Client API (createRpcClient)";
+    console.log(`\n📋 ${clientHeading}:`);
+    if (serverToClientFunctions.length > 0) {
+      console.log("   .handle (from server):");
+      handled(serverToClientFunctions);
+    }
+    if (clientToServerFunctions.length > 0) {
+      console.log("   .server (to server):");
+      called(clientToServerFunctions);
+    }
   }
 
   const serverHeading =
@@ -59,10 +68,11 @@ function logGenerationSummary(
  * Runs the full generation pipeline: parse input → extract signatures →
  * emit types/client/server files → write scaffold package.json/tsconfig.
  *
- * The TypeScript client is always emitted. The server follows
- * `config.serverLanguage`: TypeScript reads the same string signatures the
- * client does, while Go reads the portable `RpcSchema` IR and therefore refuses
- * contracts the IR cannot model.
+ * Each side follows its language, and the client may be generated in several
+ * languages from one run. TypeScript reads the string signatures as written;
+ * Go reads the portable `RpcSchema` IR and therefore refuses contracts the IR
+ * cannot model. The TypeScript package — types, scaffold, and the TypeScript
+ * sides — is written only when at least one side is TypeScript.
  *
  * Errors propagate to the caller (the CLI boundary handles exit codes).
  */
@@ -79,65 +89,61 @@ export async function generateRpcPackage(userConfig: GeneratorConfig): Promise<v
   // `requireRpcSchema` rejects what the IR cannot model at all, and
   // `validateGoTarget` rejects what it models but Go cannot spell.
   let goSchema: RpcSchema | undefined;
-  if (config.serverLanguage === "go") {
+  const emitsGoClient = config.clientLanguages.has("go");
+  if (config.serverLanguage === "go" || emitsGoClient) {
     goSchema = requireRpcSchema(extracted);
     validateGoTarget(goSchema, config);
   }
 
-  await ensurePackageStructure(config.outputDir, config);
-
-  const outputProject = new Project({
-    useInMemoryFileSystem: false,
-    tsConfigFilePath: path.join(config.outputDir, "tsconfig.json"),
-    compilerOptions: {
-      outDir: path.join(config.outputDir, "dist"),
-      rootDir: config.outputDir,
-    },
-  });
-
-  generateTypesFile(
-    outputProject,
-    config.outputDir,
-    config,
-    clientToServerFunctions,
-    serverToClientFunctions,
-    usedTypes,
-    inputFile,
-  );
-  generateSideFile(
-    "client",
-    outputProject,
-    config.outputDir,
-    clientToServerFunctions,
-    serverToClientFunctions,
-    config,
-    usedTypes,
-    inputFile,
-  );
-
+  const emitsTypeScriptClient = config.clientLanguages.has("typescript");
   const emitsTypeScriptServer = config.serverLanguage === "typescript";
-  if (emitsTypeScriptServer) {
-    generateSideFile(
-      "server",
+  const emittedFiles: string[] = [];
+
+  if (emitsTypeScriptClient || emitsTypeScriptServer) {
+    await ensurePackageStructure(config.outputDir, config);
+
+    const outputProject = new Project({
+      useInMemoryFileSystem: false,
+      tsConfigFilePath: path.join(config.outputDir, "tsconfig.json"),
+      compilerOptions: {
+        outDir: path.join(config.outputDir, "dist"),
+        rootDir: config.outputDir,
+      },
+    });
+
+    generateTypesFile(
       outputProject,
       config.outputDir,
+      config,
       clientToServerFunctions,
       serverToClientFunctions,
-      config,
       usedTypes,
       inputFile,
     );
+    const sides = [
+      ...(emitsTypeScriptClient ? (["client"] as const) : []),
+      ...(emitsTypeScriptServer ? (["server"] as const) : []),
+    ];
+    for (const side of sides) {
+      generateSideFile(
+        side,
+        outputProject,
+        config.outputDir,
+        clientToServerFunctions,
+        serverToClientFunctions,
+        config,
+        usedTypes,
+        inputFile,
+      );
+      emittedFiles.push(`${side}.generated.ts`);
+    }
+    emittedFiles.push("types.generated.ts");
+
+    await outputProject.save();
   }
 
-  const emittedFiles = [
-    "client.generated.ts",
-    ...(emitsTypeScriptServer ? ["server.generated.ts"] : []),
-    "types.generated.ts",
-  ];
-
-  await outputProject.save();
-
-  if (goSchema) emittedFiles.push(...generateGoServerFiles(goSchema, config));
+  if (goSchema && config.serverLanguage === "go") emittedFiles.push(...generateGoServerFiles(goSchema, config));
+  if (goSchema && emitsGoClient) emittedFiles.push(...generateGoClientFiles(goSchema, config));
 
   logGenerationSummary(clientToServerFunctions, serverToClientFunctions, emittedFiles, config);
 }

@@ -26,6 +26,15 @@ const GO_KEYWORDS = new Set([
   "var",
 ]);
 
+/** Go's predeclared identifiers: legal to redeclare, and shadowed when one is. */
+export const GO_PREDECLARED: readonly string[] = [
+  "any", "bool", "byte", "comparable", "complex64", "complex128", "error", "float32",
+  "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8",
+  "uint16", "uint32", "uint64", "uintptr", "true", "false", "iota", "nil", "append", "cap",
+  "clear", "close", "complex", "copy", "delete", "imag", "len", "make", "max", "min", "new",
+  "panic", "print", "println", "real", "recover",
+];
+
 export function isGoIdentifier(value: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value) && !GO_KEYWORDS.has(value);
 }
@@ -108,8 +117,8 @@ export function generated(name: string): string {
  * standard library gives a fixed signature — `MarshalJSON`, `Scan`, `Seek`,
  * `WriteTo` and the rest — whoever declared it and whatever it means. A contract
  * is free to call an RPC method `scan` or `marshalJSON`, so an unprefixed name
- * reaches `ServerHandler` and `Client` verbatim and the generated package stops
- * vetting.
+ * reaches the handler interfaces (`ServerHandler`, `ClientHandler`) and the
+ * callers (`Client`, `Conn`) verbatim and the generated package stops vetting.
  *
  * A prefix closes that class by construction rather than by a list that would
  * have to track the standard library release by release. `exportedIdentifier`
@@ -126,12 +135,16 @@ export function generated(name: string): string {
 export const HANDLER_METHOD_PREFIX = "Handle";
 export const CLIENT_METHOD_PREFIX = "Call";
 
-/** The `ServerHandler` method a client-to-server contract method is implemented as. */
+/** The handler-interface method an inbound contract method is implemented as. */
 export function handlerMethodName(wireName: string): string {
   return `${HANDLER_METHOD_PREFIX}${exportedIdentifier(wireName)}`;
 }
 
-/** The `Client` method a server-to-client contract method is called through. */
+/**
+ * The caller method an outbound contract method is called through. The prefix
+ * also keeps contract methods clear of the caller's own API (`Socket`, `Done`,
+ * `Connected`, `Dispose`, and `OnConnect`/`OnDisconnect`/`Err` on `Conn`).
+ */
 export function clientMethodName(wireName: string): string {
   return `${CLIENT_METHOD_PREFIX}${exportedIdentifier(wireName)}`;
 }

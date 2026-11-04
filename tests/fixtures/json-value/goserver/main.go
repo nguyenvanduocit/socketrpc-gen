@@ -26,7 +26,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zishang520/socket.io/servers/socket/v3"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/servers/socket"
 
 	"socketrpc.jsonvalue.test/rpc"
 )

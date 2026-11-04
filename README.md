@@ -11,7 +11,7 @@
 -   **Ergonomic API:** Clean `client.handle.*` / `client.server.*` pattern with automatic cleanup.
 -   **Unopinionated:** Generates only the type-safe bindings, leaving you in full control of your `socket.io` setup.
 -   **Bidirectional Communication:** Supports both client-to-server and server-to-client RPC calls.
--   **Multi-Language:** Generate a TypeScript client with either a TypeScript or a **Go** server, from one contract.
+-   **Multi-Language:** Generate either side in TypeScript or **Go** from one contract: a Go server for a TypeScript client, a Go client for a TypeScript server, or both sides in Go sharing one set of types.
 -   **Simple to Use:** Get started with a single command.
 -   **Robust Error Handling:** Branded `RpcError` (no shape collisions), standard error codes (`TIMEOUT`, `DISCONNECTED`, `ABORTED`, …), and a per-call `return`-or-`throw` error mode.
 -   **Connection-Aware:** `connected` state plus `onConnect` / `onDisconnect` / `onReconnect` hooks for re-syncing after reconnects.
@@ -32,6 +32,7 @@ Check out the [`examples/`](./examples) directory for comprehensive examples:
 - **[03-multi-level-extension](./examples/03-multi-level-extension/)** - Multi-layer architecture patterns
 - **[04-zod-integration](./examples/04-zod-integration/)** - Runtime validation with Zod schemas
 - **[05-go-server](./examples/05-go-server/)** - TypeScript client with a Go server
+- **[06-go-client](./examples/06-go-client/)** - Go client and Go server in one Go module
 
 See the [examples README](./examples/README.md) for detailed comparisons and use cases.
 
@@ -255,12 +256,15 @@ socketrpc-gen <path> [options]
 -   `-t, --timeout <ms>`: Default timeout in milliseconds for RPC calls that expect a response. This can be overridden per-call. (Default: "5000")
 -   `-l, --error-logger <path>`: Custom error logger import path (e.g., '@/lib/logger'). The module must default-export `(message: string, ...args: unknown[]) => void`. By default uses `console.error`.
 -   `-e, --error-mode <mode>`: How call methods surface failures — `return` the `RpcError` (default, check with `isRpcError`) or `throw` it (use `try/catch`).
--   `-c, --client <language>`: Language of the generated client. (Default: "typescript")
--   `-s, --server <language>`: Language of the generated server — `typescript` or `go`. (Default: "typescript")
--   `--go-package <name>`: Go package clause for the generated server. (Default: "rpc")
--   `--go-out <dir>`: Directory for the generated Go files. (Default: the input file's directory)
--   `--go-socket-import <path>`: Go Socket.IO server import path the bindings are written against. (Default: "github.com/zishang520/socket.io/servers/socket/v3")
--   `-w, --watch`: Watch for changes in the definition file and regenerate automatically. (Default: false)
+-   `-c, --client <languages>`: Language of the generated client — `typescript` or `go` — or a comma-separated list of distinct languages, such as `typescript,go`, to generate a client in each from one run. An unknown language or one listed twice is refused. (Default: "typescript")
+-   `-s, --server <language>`: Language of the generated server — `typescript` or `go`. Takes one language. (Default: "typescript")
+-   `--go-package <name>`: Go package clause of the Go types package and the Go server. (Default: "rpc")
+-   `--go-out <dir>`: Directory of the Go types package and the Go server. A Go client without `--go-client-out` is written here too. (Default: the input file's directory)
+-   `--go-socket-import <path>`: Go Socket.IO server import path the Go server is written against. (Default: "github.com/nguyenvanduocit/socketrpc-gen/go/socketio/servers/socket")
+-   `--go-client-out <dir>`: Directory of a Go client in its own package, importing the types in `--go-out`. Required when `--client` includes `go` and `--server` is `go`, refused otherwise. Must be a different directory from `--go-out`, compared after resolving symlinks and ignoring case, since Go refuses two import paths that differ only in case.
+-   `--go-client-package <name>`: Go package clause of the client in `--go-client-out`. Required with `--go-client-out`, and must differ from `--go-package`.
+-   `--go-client-socket-import <path>`: Go Socket.IO client import path the Go client is written against. (Default: "github.com/nguyenvanduocit/socketrpc-gen/go/socketio/clients/socket")
+-   `-w, --watch`: Watch for changes in the definition file and regenerate every output automatically. (Default: false)
 -   `-h, --help`: Display help for command.
 
 ## Framework Integration
@@ -532,8 +536,9 @@ bunx socketrpc-gen ./rpc/define.ts --client typescript --server go --go-out ./rp
 That emits `client.generated.ts` + `types.generated.ts` for the browser and
 `types.generated.go` + `server.generated.go` for the server. No
 `server.generated.ts` is produced. The Go bindings are written against
-[`zishang520/socket.io/servers/socket/v3`](https://github.com/zishang520/socket.io)
-and are gofmt-clean, `go vet`-clean and race-clean out of the box.
+[`go/socketio/servers/socket`](https://github.com/nguyenvanduocit/socketrpc-gen/tree/main/go/socketio),
+the Socket.IO implementation this repository carries, and are gofmt-clean,
+`go vet`-clean and race-clean out of the box.
 
 A contract method `getUser` is implemented as `HandleGetUser` and called as
 `CallGetUser`: the generated APIs prefix the contract's own names, so a method
@@ -705,6 +710,10 @@ the plain Go type, so handler code is unchanged.
 
 ### Upgrading
 
+Coming from v8, read the v9 section of [MIGRATION.md](./MIGRATION.md): the Go
+server is generated against `go/socketio/servers/socket` by default, its API is
+unchanged, and `--client go` adds the [Go client](#go-client).
+
 Coming from v7, read [MIGRATION.md](./MIGRATION.md): v8 is a naming pass over the
 generated API in both backends (`Unsubscribe`, `RpcClientRemote` /
 `RpcServerRemote`, additive `rpc.onRpcError`, the `ClientToServerEvents` /
@@ -721,6 +730,258 @@ generated API prefixed, so `getUser` is implemented as `HandleGetUser` and calle
 as `CallGetUser`. That prefix is what buys a clean `go vet ./...` with no analyzer
 excluded, and it is why a method may be named `scan`, `marshalJSON`, `dispose` or
 `socket` without meeting a name Go has already claimed.
+
+## Go Client
+
+The client can be Go too: a worker, a CLI or a service that dials a SocketRPC
+server. It is generated from the same `define.ts`, and against either server.
+
+### Package layout
+
+`types.generated.go` always lives in `--go-out`, as package `--go-package`. A Go
+client shares that package unless it is given its own directory:
+
+| Invocation | Go output | TypeScript output |
+| --- | --- | --- |
+| `--server go` | `<go-out>/types.generated.go`, `<go-out>/server.generated.go` | `client.generated.ts`, `types.generated.ts` |
+| `--client go --server typescript` | `<go-out>/types.generated.go`, `<go-out>/client.generated.go` | `server.generated.ts`, `types.generated.ts` |
+| `--client go --server go` | `<go-out>/types.generated.go`, `<go-out>/server.generated.go`, `<go-client-out>/client.generated.go` | none |
+| `--client typescript,go --server typescript` | `<go-out>/types.generated.go`, `<go-out>/client.generated.go` | `client.generated.ts`, `server.generated.ts`, `types.generated.ts` |
+| `--client typescript,go --server go` | `<go-out>/types.generated.go`, `<go-out>/server.generated.go`, `<go-client-out>/client.generated.go` | `client.generated.ts`, `types.generated.ts` |
+
+The server's language decides where a Go client goes, whatever else `--client`
+lists: beside a TypeScript server it shares the types package in `--go-out`, and
+beside a Go server it is its own package in `--go-client-out`. A run with several
+clients writes, byte for byte, the files the single-client runs write.
+
+A Go client for a TypeScript server sits next to its types:
+
+```bash
+bunx socketrpc-gen ./rpc/define.ts --client go --server typescript --go-out ./worker/rpc
+```
+
+When both sides are Go, the server and the client are two packages of one Go
+module, and the types are generated once:
+
+```bash
+bunx socketrpc-gen ./rpc/define.ts --client go --server go \
+  --go-out ./wire --go-package wire \
+  --go-client-out ./wireclient --go-client-package wireclient
+```
+
+`wireclient/client.generated.go` declares no contract types. It imports the types
+package as `wire`, through the import path the generator reads from the `go.mod`
+at or above `--go-out`, and spells every contract type `wire.X`. It imports the
+Socket.IO client as `sioclient`. No TypeScript, `package.json` or
+`tsconfig.json` is written. See [`examples/06-go-client`](./examples/06-go-client/).
+
+To ship a TypeScript client as well, list both languages. One run writes the Go
+server package, the Go client package and the TypeScript client package next to
+`define.ts`:
+
+```bash
+bunx socketrpc-gen ./rpc/define.ts --client typescript,go --server go \
+  --go-out ./wire --go-package wire \
+  --go-client-out ./workerclient --go-client-package workerclient
+```
+
+Refused before anything is written, each with the flag to change in the message:
+a Go client and a Go server without `--go-client-out`; `--go-client-out` naming
+the directory of `--go-out`, including through a symlink or a spelling that
+differs only in case; `--go-client-out` without `--go-client-package`, or without
+both a Go client and a Go server;
+`--go-client-package` without `--go-client-out`, or equal to `--go-package`; and
+no `go.mod` at or above `--go-out`.
+
+The client is written against
+[`go/socketio/clients/socket`](https://github.com/nguyenvanduocit/socketrpc-gen/tree/main/go/socketio)
+(`--go-client-socket-import`):
+
+```bash
+go get github.com/nguyenvanduocit/socketrpc-gen/go/socketio
+```
+
+### Dialing
+
+```go
+type worker struct{}
+
+// worker implements the generated wireclient.ClientHandler: one Handle<Method>
+// per method the server calls.
+func (worker) HandleRunTask(ctx context.Context, task wire.Task) (wire.TaskResult, error) {
+    return wire.TaskResult{TaskID: task.ID, Output: "ok"}, nil
+}
+
+func (worker) HandleCancelTask(ctx context.Context, taskID string) error { return nil }
+
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+conn, err := wireclient.Dial(ctx, "https://coordinator.example.com", worker{}, &wireclient.DialOptions{
+    Namespace: "/worker",
+    Auth:      map[string]any{"token": token},
+})
+if err != nil {
+    return err // a *wire.RpcError
+}
+defer conn.Dispose()
+
+registration, err := conn.CallRegister(ctx, wire.Worker{Name: "worker-1", Capacity: 4})
+```
+
+`Dial` returns once the namespace has accepted the connection:
+
+- A handshake the server refuses (a `Use` middleware calling `next` with an
+  error, or the TypeScript server's `io.use`) returns at once, as an `*RpcError`
+  with code `DISCONNECTED`, method `Dial` and the server's message.
+- An unreachable server is retried with the Manager's backoff until `ctx` ends,
+  so a worker may start before its server (with reconnection turned off in
+  `Manager`, the first failed attempt ends `Dial` with `DISCONNECTED`). `Dial` then returns `TIMEOUT` (deadline) or `ABORTED` (cancel), and
+  the message names the last connect error. With `context.Background()` it waits
+  for as long as the server stays unreachable.
+
+| `DialOptions` | |
+| --- | --- |
+| `Namespace` | The namespace to join; `"/"` when empty. The address passed to `Dial` is `http`, `https`, `ws` or `wss` with no path of its own: a path there is refused with `INVALID_ARGUMENT` naming `Namespace`. |
+| `Auth` | Sent in the CONNECT packet of every attempt, reconnects included. `Dial` copies the map. |
+| `Timeout` | The acknowledgement timeout of every call; zero means the generator's `--timeout`. Negative is refused. |
+| `Manager` | `sioclient.ManagerOptionsInterface`: transports, TLS, extra headers, path and the reconnection backoff. `Dial` copies it and turns `AutoConnect` off. With no transports set, `Dial` connects over WebSocket alone (`sioclient.WebSocketOnly()`), with no long-polling first. |
+
+```go
+manager := sioclient.DefaultManagerOptions()
+manager.SetTransports(types.NewSet(sioclient.WebSocket)) // types: go/socketio/pkg/types
+manager.SetReconnectionDelayMax(2000)
+
+conn, err := wireclient.Dial(ctx, address, worker{}, &wireclient.DialOptions{Manager: manager})
+```
+
+Every `Conn` owns its Manager and its socket; two `Dial` calls to one server
+never share a connection.
+
+### Reconnects
+
+Once connected, the socket reconnects by itself with the Manager's backoff and
+sends `Auth` again on every attempt. The handler given to `Dial` keeps answering
+across reconnects; nothing is registered twice.
+
+`OnConnect` runs after every reconnect from the moment it is registered; the
+first connect has already happened when `Dial` returns. To announce something the
+server must hear on every connection, register it first and then call it once
+yourself. It is never missed, and at worst sent twice:
+
+```go
+announce := func() {
+    callCtx, cancel := context.WithTimeout(conn.Context(), 5*time.Second)
+    defer cancel()
+    if _, err := conn.CallRegister(callCtx, self); err != nil {
+        log.Printf("register: %v", err)
+    }
+}
+conn.OnConnect(announce)
+announce()
+
+conn.OnDisconnect(func(reason string) { log.Printf("offline: %s", reason) })
+```
+
+| `Conn` | |
+| --- | --- |
+| `Call<Method>(ctx, …)` | One per method the server serves. Safe from any goroutine. |
+| `OnConnect(fn) func()` | After every reconnect. Returns an unsubscribe. |
+| `OnDisconnect(fn) func()` | Once per loss of the connection, with Socket.IO's reason. Calls in flight have already failed. |
+| `OnRpcError(fn) func()` | Failures the server reports out of band: its handler for a fire-and-forget call failed. |
+| `Connected() bool` | Whether the connection is up right now. |
+| `Context()` | The context every handler call receives; `Dispose` cancels it. |
+| `Done()`, `Err()` | Closed, and set, when the connection ends for good. |
+| `Socket()` | The underlying `*sioclient.Socket`, which the `Conn` owns. |
+| `Dispose()` | Ends the connection. Idempotent, safe from any goroutine, a handler included. |
+
+`OnConnect`, `OnDisconnect` and `OnRpcError` observers are additive and run in
+registration order, off the socket's goroutines, so an observer may make calls.
+A panicking observer does not stop the ones after it.
+
+`Done` is closed by `Dispose` (`Err` is `DISPOSED`) or by a loss the socket will
+not recover from (`Err` is `DISCONNECTED`): a server-side disconnect, a refused
+reconnect, or the Manager running out of reconnection attempts, which it never
+does by default.
+
+### Calls
+
+Every call takes a `context.Context` first. Cancelling it fails the call with
+`ABORTED`; its deadline, or the call timeout (`DialOptions.Timeout`, else
+`--timeout`), fails it with `TIMEOUT`, whichever comes first.
+
+**A call made while the connection is down fails at once with `DISCONNECTED`.**
+This is the one deliberate difference from the TypeScript client, which buffers
+such a call and sends it after the reconnect. A Go call never waits on a
+reconnect it cannot see: retry it from `OnConnect`, or after `Connected()` turns
+true again. A call in flight when the connection drops fails the same way,
+promptly, rather than waiting out its timeout. `DISCONNECTED` means the outcome
+is unknown, since the server may have run the call before the connection went,
+so methods that are retried should be idempotent.
+
+### Handling the server's calls
+
+`ClientHandler` has one `Handle<Method>` per method the server calls. Its ctx
+belongs to the connection the call arrived on: losing that connection, or
+`Dispose`, cancels it, so a handler that respects ctx frees its method's queue for
+the calls that follow a reconnect. Each method has its own dispatch queue: repeated calls
+to one method run in the order they arrived, a slow handler holds up only its own
+method, and calls to different methods run concurrently.
+
+Return an `*RpcError` for a typed failure; any other error becomes
+`INTERNAL_ERROR`, and so does a panic. Either way the calls after it still run.
+A failing fire-and-forget handler has no acknowledgement to answer through, so
+the client reports it to the server, which observes it with
+`binding.OnRpcError` (or `rpc.onRpcError` on a TypeScript server).
+
+An answer whose connection was replaced by a reconnect while the handler ran is
+dropped: the server failed that call when the old connection closed, and the new
+connection numbers its acknowledgements afresh.
+
+### Payload limit
+
+Engine.IO closes a connection that carries a packet larger than the server
+accepts, which would fail every call in flight. The client measures each outbound
+packet against the limit the server advertised in its handshake (its
+`MaxHttpBufferSize`, 1,000,000 bytes by default on both servers), allowing 24
+bytes for framing:
+
+- a call whose arguments are too large fails with `INVALID_ARGUMENT`, nothing is
+  sent, and the connection stays up;
+- a handler reply that is too large answers the server with `INTERNAL_ERROR`
+  instead.
+
+The advertised limit is read through `MaxPayload()` on the engine socket of
+`go/socketio`; a `--go-client-socket-import` without it is held to 1,000,000
+bytes.
+
+### Errors
+
+Every failure is a `*RpcError` (`errors.As(err, &failure)`) with `Code`,
+`Message`, `Method` and `Data`, the same type the Go server uses:
+
+| Code | From the client when |
+| --- | --- |
+| `TIMEOUT` | the call's deadline or timeout passed; `Dial`'s deadline passed |
+| `ABORTED` | the call's or `Dial`'s context was cancelled |
+| `DISCONNECTED` | the connection is down or dropped in flight; the handshake was refused; the connection ended for good |
+| `DISPOSED` | the `Conn` was disposed, before or during the call |
+| `INVALID_ARGUMENT` | the payload is over the limit; `DialOptions` or the address is invalid; an answer does not decode |
+| `INTERNAL_ERROR` | an argument does not encode; the server's handler failed without a typed error |
+
+A typed error the server's handler returns arrives with its own code.
+
+### Naming
+
+`register` is called as `CallRegister` on `Conn` and implemented as
+`HandleRegister` on the server's `ServerHandler`; `runTask` is `HandleRunTask` on
+`ClientHandler` and `CallRunTask` on the server's `Client`. The prefixes keep
+contract methods clear of `Conn`'s own methods, so a method may be named
+`dispose`, `done` or `socket`. `ctx` stays reserved as a parameter name. A client
+that shares the types package also reserves the declaration names
+`ClientHandler`, `Conn`, `Dial` and `DialOptions`; a separate one reserves none,
+but `--go-package` must not be a name its file already uses (`context`, `errors`,
+`fmt`, `json`, `reflect`, `sync`, `time`, `url`, `sioclient`, a predeclared Go
+identifier, or a name starting with `rpc_`). `--error-mode` applies to the TypeScript client only.
 
 ## How It Works
 

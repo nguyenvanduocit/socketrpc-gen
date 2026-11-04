@@ -2,7 +2,13 @@
 // package, compile a handler against it, and drive the resulting server from a
 // TypeScript client.
 
+import { resolve } from "path";
+
 const READY_PREFIX = "LISTENING ";
+
+/** The module generated Go code imports its Socket.IO packages from. */
+const SOCKETIO_MODULE = "github.com/nguyenvanduocit/socketrpc-gen/go/socketio";
+const SOCKETIO_DIR = resolve(import.meta.dir, "..", "..", "go", "socketio");
 
 /** Runs a command to completion and fails loudly with both streams on error. */
 export function run(command: string[], cwd: string, label: string): void {
@@ -12,6 +18,16 @@ export function run(command: string[], cwd: string, label: string): void {
       `${label} failed (exit ${result.exitCode}):\n${result.stdout.toString()}\n${result.stderr.toString()}`,
     );
   }
+}
+
+/**
+ * Points a fixture module, copied out of the repository, at the working tree's
+ * `go/socketio`. The fixtures require the module without a `replace`, so the
+ * path is attached here, where the copy's location is known: the tests then
+ * exercise the Socket.IO code this checkout carries, not a published version.
+ */
+export function useLocalSocketio(goDir: string): void {
+  run(["go", "mod", "edit", `-replace=${SOCKETIO_MODULE}=${SOCKETIO_DIR}`], goDir, "go mod edit -replace");
 }
 
 /**

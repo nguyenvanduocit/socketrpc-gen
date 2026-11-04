@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { io as ioClient, type Socket as ClientSocket } from "socket.io-client";
-import { run, waitForAddress } from "./helpers/go-server";
+import { run, useLocalSocketio, waitForAddress } from "./helpers/go-server";
 
 // End-to-end cross-language harness: both sides are generated.
 //
@@ -18,7 +18,7 @@ import { run, waitForAddress } from "./helpers/go-server";
 //
 // Everything below therefore asserts one of two things: that the two backends
 // agree on the wire, or that the Go the generator emits is real Go (gofmt-clean,
-// vet-clean, race-clean, compiling against the real zishang520/socket.io v3).
+// vet-clean, race-clean, compiling against the repository's own go/socketio).
 
 const FIXTURE_DIR = join(import.meta.dir, "fixtures", "go-crosslang");
 const GENERATOR_PATH = join(resolve(import.meta.dir, ".."), "index.ts");
@@ -37,6 +37,7 @@ cpSync(join(FIXTURE_DIR, "define.ts"), join(tsDir, "define.ts"));
 for (const file of ["go.mod", "go.sum", "main.go"]) {
   cpSync(join(FIXTURE_DIR, "goserver", file), join(goDir, file));
 }
+useLocalSocketio(goDir);
 
 // One CLI invocation produces both sides. Driving the real binary rather than
 // the library keeps the flag surface (`--client`, `--server`, `--go-out`,

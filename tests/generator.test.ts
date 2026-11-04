@@ -2,6 +2,7 @@ import { describe, expect, test, afterAll } from "bun:test";
 import { readFileSync, mkdirSync, rmSync, cpSync, writeFileSync } from "fs";
 import * as path from "path";
 import { spawnSync } from "child_process";
+import { run, useLocalSocketio } from "./helpers/go-server";
 
 const PROJECT_ROOT = path.resolve(import.meta.dir, "..");
 const GENERATOR_PATH = path.join(PROJECT_ROOT, "index.ts");
@@ -42,6 +43,32 @@ const EXAMPLES: Example[] = [
       "types.generated.ts",
       "rpc/types.generated.go",
       "rpc/server.generated.go",
+    ],
+  },
+  {
+    // Go client + Go server in one Go module: nothing TypeScript is emitted.
+    // The client package imports the types the server package declares, through
+    // the import path the generator reads from the go.mod above --go-out.
+    dir: "examples/06-go-client",
+    deps: ["go.mod"],
+    flags: [
+      "--client",
+      "go",
+      "--server",
+      "go",
+      "--go-out",
+      "wire",
+      "--go-package",
+      "wire",
+      "--go-client-out",
+      "wireclient",
+      "--go-client-package",
+      "wireclient",
+    ],
+    files: [
+      "wire/types.generated.go",
+      "wire/server.generated.go",
+      "wireclient/client.generated.go",
     ],
   },
 ];
@@ -117,6 +144,29 @@ describe("generator snapshot tests", () => {
       TEST_TIMEOUT_MS,
     );
   }
+});
+
+describe("Go example compiles", () => {
+  // The snapshot above proves the committed Go is what the generator writes;
+  // this proves it, and the programs written against it, compile. The example's
+  // go.mod requires go/socketio by module path, so the copy is pointed at this
+  // checkout's go/socketio the way the Go integration tests are.
+  test(
+    "examples/06-go-client builds and vets",
+    () => {
+      const tmp = path.join(
+        PROJECT_ROOT,
+        ".test-tmp",
+        `sockrpc-go-example-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      );
+      createdDirs.push(tmp);
+      cpSync(path.join(PROJECT_ROOT, "examples/06-go-client"), tmp, { recursive: true });
+      useLocalSocketio(tmp);
+      run(["go", "build", "./..."], tmp, "go build ./... (examples/06-go-client)");
+      run(["go", "vet", "./..."], tmp, "go vet ./... (examples/06-go-client)");
+    },
+    180_000,
+  );
 });
 
 describe("generated API shape", () => {

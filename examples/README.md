@@ -156,19 +156,39 @@ interface ServerFunctions {
 
 ---
 
+### [06-go-client](./06-go-client/) - Go Client, Go Server
+
+**What it demonstrates:**
+- Generating a Go client and a Go server from one `define.ts`, into two packages of one Go module
+- Contract types declared once, in the server's package, and imported by the client's
+- `Dial` with a named namespace and an auth payload, and a refused handshake returned as an error
+- Re-announcing after every reconnect with `OnConnect`
+- The `--go-client-out` / `--go-client-package` flags, and runnable `cmd/server` and `cmd/worker`
+
+**Complexity:** ⭐⭐ Intermediate
+
+**Use when:**
+- A Go worker, CLI or service dials a SocketRPC server
+- Both ends are Go and should share one set of types
+
+**Functions generated:** 4 total (2 server, 2 client)
+
+---
+
 ## Feature Comparison
 
-| Feature | Example 00 | Example 01 | Example 02 | Example 03 | Example 04 | Example 05 |
-|---------|-----------|-----------|-----------|-----------|-----------|-----------|
-| Full Implementation | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Interface Extension | ✅ Multi-level | ❌ | ✅ Single-level | ✅ Multi-level | ❌ | ❌ |
-| Zod Schemas | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| Go server (`--server go`) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Multiple Files | ✅ 3 files | ❌ | ✅ 2 files | ✅ 3 files | ❌ | ❌ |
-| Layered Architecture | ✅ 3 layers | ❌ | ✅ 2 layers | ✅ 3 layers | ❌ | ❌ |
-| Client/Server Code | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Complexity | Medium | Low | Medium | High | Medium | Medium |
-| Real-world Use | Production app | Simple apps | Frameworks | Enterprise | AI Integration | Go backends |
+| Feature | Example 00 | Example 01 | Example 02 | Example 03 | Example 04 | Example 05 | Example 06 |
+|---------|-----------|-----------|-----------|-----------|-----------|-----------|-----------|
+| Full Implementation | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Interface Extension | ✅ Multi-level | ❌ | ✅ Single-level | ✅ Multi-level | ❌ | ❌ | ❌ |
+| Zod Schemas | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| Go server (`--server go`) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Go client (`--client go`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Multiple Files | ✅ 3 files | ❌ | ✅ 2 files | ✅ 3 files | ❌ | ❌ | ❌ |
+| Layered Architecture | ✅ 3 layers | ❌ | ✅ 2 layers | ✅ 3 layers | ❌ | ❌ | ❌ |
+| Client/Server Code | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Go |
+| Complexity | Medium | Low | Medium | High | Medium | Medium | Medium |
+| Real-world Use | Production app | Simple apps | Frameworks | Enterprise | AI Integration | Go backends | Go workers |
 
 ## Common Patterns
 

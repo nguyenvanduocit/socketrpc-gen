@@ -74,6 +74,19 @@ bun run ../../index.ts ./define.ts \
 
 ---
 
+## 🐹 Go Client? → [Example 06](./06-go-client/)
+
+```bash
+bun run generate:go-client-example   # from the repository root
+```
+
+**Perfect for:**
+- A Go worker or service dialing a SocketRPC server
+- Go client + Go server from one contract, sharing one set of types
+- `Dial` with a namespace and auth, `Call…` methods, `OnConnect` to re-announce after a reconnect
+
+---
+
 ## What Gets Generated?
 
 For each example, you'll get:
@@ -105,11 +118,16 @@ bun run ../../index.ts ./define.ts --error-mode throw
 bun run ../../index.ts ./define.ts \
   --client typescript --server go --go-out ./rpc --go-package rpc
 
+# Go client + Go server in one Go module (needs a go.mod at or above --go-out)
+bun run ../../index.ts ./define.ts \
+  --client go --server go --go-out ./wire --go-package wire \
+  --go-client-out ./wireclient --go-client-package wireclient
+
 # Watch mode (auto-regenerate on changes)
 bun run ../../index.ts ./define.ts --watch
 ```
 
-Run `bun run ../../index.ts --help` for the full list, including `--go-socket-import`.
+Run `bun run ../../index.ts --help` for the full list, including `--go-socket-import` and `--go-client-socket-import`.
 
 ## Next Steps
 

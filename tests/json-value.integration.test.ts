@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { io as ioClient, type Socket as ClientSocket } from "socket.io-client";
-import { run, waitForAddress } from "./helpers/go-server";
+import { run, useLocalSocketio, waitForAddress } from "./helpers/go-server";
 
 // End-to-end harness for the JSON-value node of the IR.
 //
@@ -38,6 +38,7 @@ cpSync(join(FIXTURE_DIR, "define.ts"), join(tsDir, "define.ts"));
 for (const file of ["go.mod", "go.sum", "main.go"]) {
   cpSync(join(FIXTURE_DIR, "goserver", file), join(goDir, file));
 }
+useLocalSocketio(goDir);
 
 // One CLI invocation produces both sides, so a contract carrying `unknown` is
 // proven to reach the Go backend through the real flag surface rather than only

@@ -1,0 +1,367 @@
+package engine
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"sync"
+	"time"
+
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/parsers/engine/packet"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/parsers/engine/parser"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/pkg/queue"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/pkg/request"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/pkg/slices"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/pkg/types"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/pkg/webtransport"
+	"github.com/nguyenvanduocit/socketrpc-gen/go/socketio/servers/engine/transports"
+	wt "github.com/quic-go/webtransport-go"
+)
+
+// webTransport implements the WebTransport transport for Engine.IO.
+// This transport provides low-latency, bidirectional communication using the QUIC protocol.
+// It offers several advantages over WebSocket:
+// - Lower latency
+// - Better multiplexing support
+// - Built-in congestion control
+// - Support for unreliable datagrams
+type webTransport struct {
+	Transport
+
+	// dialer is the WebTransport dialer used to establish connections
+	dialer *wt.Transport
+
+	// session is the WebTransport connection instance
+	session *types.WebTransportConn
+
+	// mu is a mutex to protect concurrent access to the WebTransport connection
+	mu sync.Mutex
+
+	writeQueue *queue.Queue
+}
+
+// Name returns the identifier for the WebTransport transport.
+func (w *webTransport) Name() string {
+	return transports.WEBTRANSPORT
+}
+
+// MakeWebTransport creates a new WebTransport instance with default settings.
+// This is the factory function for creating a new WebTransport.
+func MakeWebTransport() WebTransport {
+	s := &webTransport{
+		Transport: MakeTransport(),
+	}
+
+	s.Prototype(s)
+
+	return s
+}
+
+// NewWebTransport creates a new WebTransport instance with the specified socket and options.
+//
+// Parameters:
+//   - socket: The parent socket instance
+//   - opts: The socket options configuration
+//
+// Returns: A new WebTransport instance
+func NewWebTransport(socket Socket, opts SocketOptionsInterface) WebTransport {
+	s := MakeWebTransport()
+
+	s.Construct(socket, opts)
+
+	return s
+}
+
+// Construct initializes the WebTransport with the given socket and options.
+// This sets up the WebTransport dialer with appropriate configuration for the connection.
+func (w *webTransport) Construct(socket Socket, opts SocketOptionsInterface) {
+	w.Transport.Construct(socket, opts)
+
+	w.writeQueue = queue.New()
+
+	w.dialer = &wt.Transport{
+		TLSClientConfig: w.Opts().TLSClientConfig(),
+		QUICConfig:      w.Opts().QUICConfig(),
+	}
+}
+
+// DoOpen initiates the WebTransport connection.
+// This method establishes the WebTransport connection, handles cookie management,
+// and sets up event listeners.
+func (w *webTransport) DoOpen() {
+	headers := http.Header{}
+	for k, vs := range w.Opts().ExtraHeaders() {
+		for _, v := range vs {
+			headers.Add(k, v)
+		}
+	}
+
+	uri := w.uri()
+	if w.Socket().CookieJar() != nil {
+		for _, cookie := range w.Socket().CookieJar().Cookies(uri) {
+			s := fmt.Sprintf("%s=%s", request.SanitizeCookieName(cookie.Name), request.SanitizeCookieValue(cookie.Value, cookie.Quoted))
+			if c := headers.Get("Cookie"); c != "" {
+				headers.Set("Cookie", c+"; "+s)
+			} else {
+				headers.Set("Cookie", s)
+			}
+		}
+	}
+	response, session, err := w.dialer.Dial(context.Background(), uri.String(), headers)
+	if err != nil {
+		w.Emit("error", err)
+		return
+	}
+	if w.Socket().CookieJar() != nil {
+		w.Socket().CookieJar().SetCookies(uri, response.Cookies())
+	}
+
+	stream, err := session.OpenStreamSync(context.Background())
+	if err != nil {
+		clientWebtransportLog.Debug("session is closed")
+		w.Emit("error", err)
+		return
+	}
+
+	w.session = &types.WebTransportConn{EventEmitter: types.NewEventEmitter(), Conn: webtransport.NewConn(session, stream, true, 0, 0, nil, nil, nil)}
+
+	w.addEventListeners()
+}
+
+func (w *webTransport) _error(err error) {
+	if webtransport.IsUnexpectedCloseError(err) || errors.Is(err, net.ErrClosed) {
+		w.session.Emit("close")
+	} else {
+		w.session.Emit("error", err)
+	}
+}
+
+// message handles the WebTransport message reading loop.
+// This method processes incoming WebTransport messages and handles different message types.
+func (w *webTransport) message() {
+	defer func() {
+		if !w.writeQueue.IsShuttingDown() {
+			w.session.Emit("close")
+		}
+	}()
+
+	for {
+		if w.Opts().IdleTimeout() > 0 {
+			_ = w.session.SetReadDeadline(time.Now().Add(w.Opts().IdleTimeout()))
+		}
+		mt, message, err := w.session.NextReader()
+		if err != nil {
+			w._error(err)
+			return
+		}
+
+		switch mt {
+		case webtransport.BinaryMessage:
+			read := types.NewBytesBuffer(nil)
+			if _, err := read.ReadFrom(message); err != nil {
+				w._error(err)
+			} else {
+				w.OnData(read)
+			}
+		case webtransport.TextMessage:
+			read := types.NewStringBuffer(nil)
+			if _, err := read.ReadFrom(message); err != nil {
+				w._error(err)
+			} else {
+				w.OnData(read)
+			}
+		}
+		if c, ok := message.(io.Closer); ok {
+			_ = c.Close()
+		}
+	}
+}
+
+// handshake performs the initial handshake with the server.
+// This method sends an OPEN packet with the session ID if available.
+func (w *webTransport) handshake() {
+	packet := &packet.Packet{
+		Type: packet.OPEN,
+	}
+	if w.Query().Has("sid") {
+		if data, err := json.Marshal(map[string]any{
+			"sid": w.Query().Get("sid"),
+		}); err != nil {
+			clientWebtransportLog.Debug("JSON Marshal error: %s", err.Error())
+		} else {
+			packet.Data = types.NewStringBuffer(data)
+		}
+	}
+
+	data, err := parser.Parserv4().EncodePacket(packet, w.SupportsBinary())
+	if err != nil {
+		clientWebtransportLog.Debug(`Send Error "%s"`, err.Error())
+		w._error(err)
+		return
+	}
+	w.doWrite(data, true)
+
+	w.OnOpen()
+}
+
+// addEventListeners sets up event handlers for the WebTransport connection.
+// This method configures error and close event handlers and starts the message reading loop.
+func (w *webTransport) addEventListeners() {
+	_ = w.session.On("error", func(errs ...any) {
+		w.OnError("webtransport error", slices.TryGetAny[error](errs, 0), w.session.Session().Context())
+	})
+	_ = w.session.Once("close", func(...any) {
+		clientWebtransportLog.Debug(`transport closed gracefully`)
+		w.OnClose(NewTransportError("webtransport connection closed", nil, w.session.Session().Context()).Err())
+	})
+
+	// This goroutine is invoked only once.
+	go w.message()
+
+	// This goroutine is invoked only once.
+	go w.handshake()
+}
+
+// Write sends packets over the WebTransport connection.
+// This method handles packet encoding and WebTransport message framing.
+func (w *webTransport) Write(packets []*packet.Packet) {
+	w.SetWritable(false)
+
+	w.writeQueue.Enqueue(func() { w.write(packets) })
+}
+func (w *webTransport) write(packets []*packet.Packet) {
+	// fake drain
+	// defer to next tick to allow Socket to clear writeBuffer
+	defer func() {
+		w.SetWritable(true)
+		w.Emit("drain")
+	}()
+
+	var writeErr error
+
+	w.mu.Lock()
+	// encodePacket efficient as it uses webTransport framing
+	// no need for encodePayload
+	for _, packet := range packets {
+		// always creates a new object since ws modifies it
+		compress := true
+		if packet.Options != nil {
+			if packet.Options.Compress != nil && !*packet.Options.Compress {
+				compress = false
+			}
+
+			if w.Opts().PerMessageDeflate() == nil && packet.Options.WsPreEncodedFrame != nil {
+				mt := webtransport.BinaryMessage
+				if _, ok := packet.Options.WsPreEncodedFrame.(*types.StringBuffer); ok {
+					mt = webtransport.TextMessage
+				}
+				pm, err := webtransport.NewPreparedMessage(mt, packet.Options.WsPreEncodedFrame.Bytes())
+				if err != nil {
+					clientWebtransportLog.Debug(`Send Error "%s"`, err.Error())
+					writeErr = err
+					break
+				}
+				if err := w.session.WritePreparedMessage(pm); err != nil {
+					clientWebtransportLog.Debug(`Send Error "%s"`, err.Error())
+					writeErr = err
+					break
+				}
+				continue
+			}
+		}
+
+		data, err := parser.Parserv4().EncodePacket(packet, w.SupportsBinary())
+		if err != nil {
+			clientWebtransportLog.Debug(`Send Error "%s"`, err.Error())
+			writeErr = err
+			break
+		}
+		w.doWrite(data, compress, &writeErr)
+		if writeErr != nil {
+			break
+		}
+	}
+	w.mu.Unlock()
+
+	// Report errors outside of the lock to prevent potential deadlocks
+	// from event handlers that may try to write.
+	if writeErr != nil {
+		w._error(writeErr)
+	}
+}
+
+// doWrite performs the actual WebTransport write operation.
+// This method handles message compression and WebTransport message framing.
+// When called from write() under lock, errors are stored in writeErr instead of
+// calling _error() directly, to prevent deadlocks from event handlers.
+func (w *webTransport) doWrite(data types.BufferInterface, _ bool, writeErr ...*error) {
+	reportErr := func(err error) {
+		if len(writeErr) > 0 && writeErr[0] != nil {
+			*writeErr[0] = err
+		} else {
+			w._error(err)
+		}
+	}
+
+	// if perMessageDeflate := w.Opts().PerMessageDeflate(); perMessageDeflate != nil {
+	// 	if data.Len() < perMessageDeflate.Threshold {
+	// 		compress = false
+	// 	}
+	// }
+	clientWebtransportLog.Debug(`writing %#v`, data)
+
+	// w.session.EnableWriteCompression(compress)
+	mt := webtransport.BinaryMessage
+	if _, ok := data.(*types.StringBuffer); ok {
+		mt = webtransport.TextMessage
+	}
+	write, err := w.session.NextWriter(mt)
+	if err != nil {
+		reportErr(err)
+		return
+	}
+	defer func() {
+		if err := write.Close(); err != nil {
+			reportErr(err)
+			return
+		}
+	}()
+	if _, err := io.Copy(write, data); err != nil {
+		reportErr(err)
+		return
+	}
+}
+
+// DoClose gracefully closes the WebTransport connection.
+// This method ensures proper cleanup of the WebTransport connection.
+func (w *webTransport) DoClose() {
+	w.writeQueue.TryClose()
+	if w.session != nil {
+		_ = w.session.CloseWithError(0, "")
+	}
+}
+
+// Generates uri for connection.
+func (w *webTransport) uri() *url.URL {
+	query := url.Values{}
+	for k, vs := range w.Query() {
+		for _, v := range vs {
+			query.Add(k, v)
+		}
+	}
+
+	if w.Opts().TimestampRequests() {
+		query.Set(w.Opts().TimestampParam(), request.RandomString())
+	}
+
+	if !w.SupportsBinary() {
+		query.Set("b64", "1")
+	}
+
+	return w.CreateUri("https", query)
+}

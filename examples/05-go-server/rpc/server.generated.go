@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	socket "github.com/zishang520/socket.io/servers/socket/v3"
+	socket "github.com/nguyenvanduocit/socketrpc-gen/go/socketio/servers/socket"
 )
 
 // Socket.IO carries the ack timeout as a flag mutated on the socket and

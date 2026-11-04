@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	socket "github.com/zishang520/socket.io/servers/socket/v3"
+	socket "github.com/nguyenvanduocit/socketrpc-gen/go/socketio/servers/socket"
 )
 
 type testHandler struct {

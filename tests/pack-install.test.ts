@@ -170,4 +170,42 @@ describe("the installed package", () => {
     },
     TIMEOUT,
   );
+
+  test(
+    "generates a Go server and a Go client as two packages of one module",
+    () => {
+      const workspace = consumer();
+      // The client imports the types package by the path go.mod gives it, so
+      // the run reads a module the installed package has never seen.
+      mkdirSync(path.join(workspace, "goapp"), { recursive: true });
+      writeFileSync(path.join(workspace, "goapp", "go.mod"), "module example.com/consumer\n\ngo 1.22\n");
+      const { status, output } = runInstalledCli([
+        "./rpc/define.ts",
+        "--client",
+        "go",
+        "--server",
+        "go",
+        "--go-out",
+        "./goapp/wire",
+        "--go-package",
+        "wire",
+        "--go-client-out",
+        "./goapp/wireclient",
+        "--go-client-package",
+        "wireclient",
+      ]);
+      expect(output, "Go client generation failed").not.toContain("Error:");
+      expect(status).toBe(0);
+
+      const client = path.join(workspace, "goapp", "wireclient", "client.generated.go");
+      expect(existsSync(client), "client.generated.go was not written").toBe(true);
+      const source = readFileSync(client, "utf-8");
+      expect(source).toContain('wire "example.com/consumer/wire"');
+      expect(source).toContain("func Dial(");
+      // The contract's own vocabulary on both of the client's surfaces.
+      expect(source).toContain("CallGreet");
+      expect(source).toContain("HandleNotify");
+    },
+    TIMEOUT,
+  );
 });

@@ -40,7 +40,7 @@ No `server.generated.ts` is emitted — the server is Go.
 Add the transport and implement the generated interface:
 
 ```bash
-go get github.com/zishang520/socket.io/servers/socket/v3
+go get github.com/nguyenvanduocit/socketrpc-gen/go/socketio
 ```
 
 A contract method `createRoom` is implemented as `HandleCreateRoom` and called
@@ -53,7 +53,7 @@ package main
 import (
     "context"
 
-    "github.com/zishang520/socket.io/servers/socket/v3"
+    "github.com/nguyenvanduocit/socketrpc-gen/go/socketio/servers/socket"
 
     "example.com/chat/rpc"
 )

@@ -18,9 +18,21 @@ export function validateInputFile(inputPath: string): void {
  * Generates the package.json shape for the output RPC package.
  */
 function generatePackageJson(config: ResolvedConfig): object {
-  // A Go server needs no socket.io server package here, and exposes no
-  // ./server.generated entry point, so the scaffold advertises only what exists.
+  // A Go side needs no socket.io package here, and exposes no entry point, so
+  // the scaffold advertises only what exists.
   const hasTypeScriptServer = config.serverLanguage === "typescript";
+  const hasTypeScriptClient = config.clientLanguages.has("typescript");
+
+  const clientEntries = hasTypeScriptClient
+    ? {
+        "./client.generated": {
+          types: "./dist/client.generated.d.ts",
+          default: "./dist/client.generated.js",
+        },
+      }
+    : {};
+  const clientDependency = hasTypeScriptClient ? { "socket.io-client": "^4.8.1" } : {};
+  const clientPeerDependency = hasTypeScriptClient ? { "socket.io-client": "^4.0.0" } : {};
 
   const serverEntries = hasTypeScriptServer
     ? {
@@ -47,10 +59,7 @@ function generatePackageJson(config: ResolvedConfig): object {
         types: "./dist/types.generated.d.ts",
         default: "./dist/types.generated.js",
       },
-      "./client.generated": {
-        types: "./dist/client.generated.d.ts",
-        default: "./dist/client.generated.js",
-      },
+      ...clientEntries,
       ...serverEntries,
       "./types.generated": {
         types: "./dist/types.generated.d.ts",
@@ -63,7 +72,7 @@ function generatePackageJson(config: ResolvedConfig): object {
     },
     dependencies: {
       ...serverDependency,
-      "socket.io-client": "^4.8.1",
+      ...clientDependency,
     },
     devDependencies: {
       "@types/node": "^20.0.0",
@@ -71,7 +80,7 @@ function generatePackageJson(config: ResolvedConfig): object {
     },
     peerDependencies: {
       ...serverPeerDependency,
-      "socket.io-client": "^4.0.0",
+      ...clientPeerDependency,
     },
   };
 }

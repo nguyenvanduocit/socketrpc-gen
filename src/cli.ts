@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
 import { generateRpcPackage } from "./generate";
-import { DEFAULT_GO_PACKAGE_NAME, DEFAULT_GO_SOCKET_IMPORT } from "./go";
+import { DEFAULT_GO_CLIENT_SOCKET_IMPORT, DEFAULT_GO_PACKAGE_NAME, DEFAULT_GO_SOCKET_IMPORT } from "./go";
 import { TARGET_LANGUAGES, type GeneratorConfig } from "./types";
 
 /**
@@ -66,18 +66,39 @@ export function runCli(argv: string[]): void {
       "How call methods surface failures: 'return' the RpcError or 'throw' it",
       "return",
     )
-    .option("-c, --client <language>", "Language of the generated client", "typescript")
+    .option(
+      "-c, --client <languages>",
+      `Language of the generated client (${TARGET_LANGUAGES.join(" | ")}), or a comma-separated list of distinct languages to generate a client in each`,
+      "typescript",
+    )
     .option(
       "-s, --server <language>",
       `Language of the generated server (${TARGET_LANGUAGES.join(" | ")})`,
       "typescript",
     )
-    .option("--go-package <name>", "Go package clause for the generated server", DEFAULT_GO_PACKAGE_NAME)
-    .option("--go-out <dir>", "Directory for generated Go files (defaults to the input file's directory)")
+    .option(
+      "--go-package <name>",
+      "Go package clause of the Go types package and the Go server",
+      DEFAULT_GO_PACKAGE_NAME,
+    )
+    .option(
+      "--go-out <dir>",
+      "Directory of the Go types package and the Go server (defaults to the input file's directory)",
+    )
     .option(
       "--go-socket-import <path>",
-      "Go Socket.IO server import path the bindings are written against",
+      "Go Socket.IO server import path the Go server is written against",
       DEFAULT_GO_SOCKET_IMPORT,
+    )
+    .option(
+      "--go-client-out <dir>",
+      "Directory of a Go client in its own package, importing the types in --go-out (required with --client go --server go)",
+    )
+    .option("--go-client-package <name>", "Go package clause of the client in --go-client-out")
+    .option(
+      "--go-client-socket-import <path>",
+      "Go Socket.IO client import path the Go client is written against",
+      DEFAULT_GO_CLIENT_SOCKET_IMPORT,
     )
     .option("-w, --watch", "Watch for changes and regenerate automatically", false)
     .action((filePath, options) => {
@@ -99,11 +120,14 @@ export function runCli(argv: string[]): void {
         defaultTimeout: parseInt(options.timeout, 10),
         errorLogger: options.errorLogger,
         errorMode,
-        clientLanguage: options.client,
+        clientLanguage: options.client.split(",").map((language: string) => language.trim()),
         serverLanguage: options.server,
         goOutputDir: options.goOut ? path.resolve(process.cwd(), options.goOut) : outputDir,
         goPackageName: options.goPackage,
         goSocketImport: options.goSocketImport,
+        goClientOutputDir: options.goClientOut ? path.resolve(process.cwd(), options.goClientOut) : undefined,
+        goClientPackageName: options.goClientPackage,
+        goClientSocketImport: options.goClientSocketImport,
       };
 
       const run = options.watch ? watchMode(config) : generateRpcPackage(config);

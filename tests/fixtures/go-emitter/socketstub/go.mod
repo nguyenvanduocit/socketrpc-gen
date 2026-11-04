@@ -1,3 +1,3 @@
-module github.com/zishang520/socket.io/servers/socket/v3
+module github.com/nguyenvanduocit/socketrpc-gen/go/socketio
 
 go 1.22

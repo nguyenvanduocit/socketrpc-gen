@@ -1,5 +1,86 @@
 # Migration Guide
 
+## v8 → v9
+
+v9 adds the Go client and changes one default of the Go server. TypeScript output, event
+names, argument order, the acknowledgement protocol and the generated Go server API are the
+same as v8.
+
+### The Go server's default transport
+
+`--go-socket-import` defaults to `github.com/nguyenvanduocit/socketrpc-gen/go/socketio/servers/socket`,
+the Socket.IO implementation this repository carries under
+[`go/socketio`](https://github.com/nguyenvanduocit/socketrpc-gen/tree/main/go/socketio). It is one
+Go module holding the packages of [zishang520/socket.io](https://github.com/zishang520/socket.io)
+v3.0.6 under the same names and APIs, plus the fixes listed in its README. Regenerating changes
+one line of `server.generated.go`, the import.
+
+To move your own code with it, swap the module and every import of it (the `sed -i ''` is the
+BSD/macOS form; on Linux, drop the `''`):
+
+```bash
+go get github.com/nguyenvanduocit/socketrpc-gen/go/socketio
+# socket.io/servers/socket/v3 → go/socketio/servers/socket (likewise clients/, parsers/)
+# socket.io/v3/pkg/types      → go/socketio/pkg/types
+grep -rl 'github.com/zishang520/socket.io/' --include='*.go' . | xargs sed -i '' \
+  -e 's#github.com/zishang520/socket.io/v3/#github.com/nguyenvanduocit/socketrpc-gen/go/socketio/#g' \
+  -e 's#github.com/zishang520/socket.io/\([a-z]*/[a-z]*\)/v3#github.com/nguyenvanduocit/socketrpc-gen/go/socketio/\1#g'
+go mod tidy
+```
+
+To stay on upstream instead, pass the v8 default explicitly. The generated Go is then
+byte-identical to v8's, without the fixes `go/socketio` carries:
+
+```bash
+bunx socketrpc-gen ./rpc/define.ts --server go \
+  --go-socket-import github.com/zishang520/socket.io/servers/socket/v3
+```
+
+Nothing else changes for a Go server: `ServerHandler`, `BindServer`, `ServerBinding`, `Client`,
+`NewClient`, `ClientOptions`, `OnRpcError` and `Dispose` keep their signatures and behaviour.
+
+### The Go client
+
+`--client go` generates a Go client: `Dial` → `*Conn`, with `Call<Method>` for the server's
+methods and a `ClientHandler` to implement for the client's. Against a TypeScript server it sits
+in `--go-out` beside the Go types:
+
+```bash
+bunx socketrpc-gen ./rpc/define.ts --client go --server typescript --go-out ./worker/rpc
+```
+
+With a Go server it is a separate package of the same Go module, importing the server's types:
+
+```bash
+bunx socketrpc-gen ./rpc/define.ts --client go --server go \
+  --go-out ./wire --go-package wire \
+  --go-client-out ./wireclient --go-client-package wireclient
+```
+
+It is written against `go/socketio/clients/socket` (`--go-client-socket-import`). Read the
+[Go Client](./README.md#go-client) section before porting code from the TypeScript client: a call
+made while disconnected fails at once with `DISCONNECTED` instead of being buffered until the
+reconnect.
+
+`--client` takes a comma-separated list, so one run can write both a TypeScript and a Go client:
+
+```bash
+bunx socketrpc-gen ./rpc/define.ts --client typescript,go --server go \
+  --go-out ./wire --go-package wire \
+  --go-client-out ./workerclient --go-client-package workerclient
+```
+
+Through the library API, `GeneratorConfig.clientLanguage` takes the same list as an array
+(`["typescript", "go"]`); a single language works as in v8. The exported `ResolvedConfig` type
+carries the result as `clientLanguages: ReadonlySet<TargetLanguage>` in place of
+`clientLanguage`, so code that reads `config.clientLanguage` off a `ResolvedConfig` reads
+`config.clientLanguages.has(...)` instead.
+
+Invocations whose `--client` does not include `go` are unaffected. `--go-client-out` and `--go-client-package` are
+refused without it, and `--go-client-socket-import` is read only with it.
+
+---
+
 ## v7 → v8
 
 v8 is a naming pass over the generated API, in both backends. Event names, argument order and

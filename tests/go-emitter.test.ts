@@ -4,7 +4,14 @@ import { tmpdir } from "os";
 import * as path from "path";
 import { spawnSync } from "child_process";
 import { RPC_SCHEMA_VERSION, type RpcSchema } from "../src/schema";
-import { DEFAULT_GO_SOCKET_IMPORT, generateGo } from "../src/go";
+import {
+  DEFAULT_GO_CLIENT_SOCKET_IMPORT,
+  DEFAULT_GO_SOCKET_IMPORT,
+  generateGo,
+  generateGoClient,
+  goImportPath,
+  type GoBackendOptions,
+} from "../src/go";
 
 const FIXTURE_DIR = path.join(import.meta.dir, "fixtures", "go-emitter");
 const temporaryDirectories: string[] = [];
@@ -86,6 +93,69 @@ const schema: RpcSchema = {
 afterAll(() => {
   for (const directory of temporaryDirectories) rmSync(directory, { recursive: true, force: true });
 });
+
+/**
+ * The contract `client_runtime_test.go` is written against: one acknowledged
+ * and one fire-and-forget method in each direction.
+ */
+const clientSchema: RpcSchema = {
+  version: RPC_SCHEMA_VERSION,
+  declarations: [
+    {
+      kind: "object",
+      name: "Item",
+      fields: [
+        { name: "id", type: scalar("string") },
+        { name: "tags", type: { kind: "array", element: scalar("string") } },
+      ],
+    },
+  ],
+  methods: [
+    {
+      name: "lookup",
+      direction: "client-to-server",
+      params: [{ name: "id", type: scalar("string") }],
+      returnType: { kind: "named", name: "Item" },
+    },
+    {
+      name: "report",
+      direction: "client-to-server",
+      params: [{ name: "text", type: scalar("string") }],
+      returnType: VOID,
+    },
+    {
+      name: "confirm",
+      direction: "server-to-client",
+      params: [{ name: "question", type: scalar("string") }],
+      returnType: scalar("string"),
+    },
+    {
+      name: "notify",
+      direction: "server-to-client",
+      params: [{ name: "seq", type: scalar("number") }],
+      returnType: VOID,
+    },
+  ],
+};
+
+/** A client in its own package, importing the types package `wire`. */
+const SEPARATE: GoBackendOptions = {
+  packageName: "wire",
+  client: { separate: { packageName: "wireclient", typesImport: "example.com/app/wire" } },
+};
+
+function expectGofmtClean(files: Readonly<Record<string, string | undefined>>, label: string): void {
+  const directory = mkdtempSync(path.join(tmpdir(), "socketrpc-go-format-"));
+  temporaryDirectories.push(directory);
+  for (const [filename, source] of Object.entries(files)) {
+    if (source === undefined) continue;
+    const file = path.join(directory, filename);
+    writeFileSync(file, source);
+    const formatted = spawnSync("gofmt", ["-d", file], { encoding: "utf8" });
+    expect(formatted.status, formatted.stderr).toBe(0);
+    expect(formatted.stdout, `${label}: ${filename} is not gofmt-clean`).toBe("");
+  }
+}
 
 describe("isolated Go emitter", () => {
   test("emits deterministic types matching the golden file", () => {
@@ -442,9 +512,9 @@ describe("isolated Go emitter", () => {
 
 go 1.22
 
-require github.com/zishang520/socket.io/servers/socket/v3 v3.0.0
+require github.com/nguyenvanduocit/socketrpc-gen/go/socketio v0.0.0
 
-replace github.com/zishang520/socket.io/servers/socket/v3 => ${JSON.stringify(stub)}
+replace github.com/nguyenvanduocit/socketrpc-gen/go/socketio => ${JSON.stringify(stub)}
 `,
       );
       const result = spawnSync("go", ["test", "-race", "./..."], {
@@ -455,5 +525,161 @@ replace github.com/zishang520/socket.io/servers/socket/v3 => ${JSON.stringify(st
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     },
     35_000,
+  );
+});
+
+describe("isolated Go client emitter", () => {
+  test("shares the types package, or imports it from its own package", () => {
+    // Colocated: the client and the types file share one package, and the types
+    // are exactly the ones the server's generation writes.
+    const colocated = generateGoClient(clientSchema);
+    expect(Object.keys(colocated).sort()).toEqual(["client.generated.go", "types.generated.go"]);
+    expect(colocated["types.generated.go"]).toBe(generateGo(clientSchema)["types.generated.go"]);
+    const local = colocated["client.generated.go"];
+    expect(local).toMatch(/^package rpc$/m);
+    expect(local).toContain(`sioclient "${DEFAULT_GO_CLIENT_SOCKET_IMPORT}"`);
+    expect(local).toContain("HandleConfirm(ctx context.Context, question string) (string, error)");
+    expect(local).toContain("func (rpc_c *Conn) CallLookup(ctx context.Context, id string) (rpc_result Item, rpc_err error)");
+    // The runtime helpers come from the types file, so the client carries no copy.
+    expect(local).not.toContain("func rpc_decodeValue(");
+
+    // Separate: no contract type is declared, every one is reached through the
+    // types package, and the client carries its own unexported runtime.
+    const separate = generateGoClient(clientSchema, SEPARATE);
+    expect(Object.keys(separate)).toEqual(["client.generated.go"]);
+    const client = separate["client.generated.go"];
+    expect(client).toMatch(/^package wireclient$/m);
+    expect(client).toContain('wire "example.com/app/wire"');
+    expect(client).toContain("func (rpc_c *Conn) CallLookup(ctx context.Context, id string) (rpc_result wire.Item, rpc_err error)");
+    expect(client).toContain("func rpc_decodeValue(");
+    expect(client).not.toMatch(/^type (Item|RpcError) /m);
+    for (const api of [
+      "type ClientHandler interface",
+      "type DialOptions struct",
+      "type Conn struct",
+      "func Dial(ctx context.Context, address string, handler ClientHandler, options *DialOptions) (*Conn, error)",
+      "func (c *Conn) OnConnect(fn func()) func()",
+      "func (c *Conn) OnDisconnect(fn func(reason string)) func()",
+      "func (c *Conn) OnRpcError(fn func(*wire.RpcError)) func()",
+      "func (c *Conn) Connected() bool",
+      "func (c *Conn) Context() context.Context",
+      "func (c *Conn) Done() <-chan struct{}",
+      "func (c *Conn) Err() error",
+      "func (c *Conn) Socket() *sioclient.Socket",
+      "func (c *Conn) Dispose()",
+    ]) {
+      expect(client, `${api} is no longer emitted`).toContain(api);
+    }
+
+    // The default call timeout is the generator's, as for the server's Client.
+    expect(generateGoClient(clientSchema, { defaultTimeoutMs: 1500 })["client.generated.go"]).toContain(
+      "timeout := 1500 * time.Millisecond",
+    );
+
+    expectGofmtClean(colocated, "colocated client");
+    expectGofmtClean(separate, "separate client");
+  });
+
+  test("leaves the server output exactly as it was", () => {
+    // Generating a client must not touch what a server-only run writes.
+    const before = generateGo(schema);
+    generateGoClient(schema);
+    generateGoClient(schema, SEPARATE);
+    expect(generateGo(schema)).toEqual(before);
+    expect(before["server.generated.go"]).not.toContain("sioclient");
+  });
+
+  test("refuses client options that cannot compile, naming the flag", () => {
+    const separate = (packageName: string, typesPackage = "wire"): GoBackendOptions => ({
+      packageName: typesPackage,
+      client: { separate: { packageName, typesImport: "example.com/app/wire" } },
+    });
+
+    expect(() => generateGoClient(clientSchema, separate("WireClient"))).toThrow("--go-client-package");
+    expect(() => generateGoClient(clientSchema, separate("wire"))).toThrow(
+      "must differ from the types package",
+    );
+    // The client imports the types package by name, so that name must not
+    // shadow one of its imports or a predeclared identifier.
+    for (const shadowing of ["json", "sync", "sioclient", "string", "error"]) {
+      expect(() => generateGoClient(clientSchema, separate("wireclient", shadowing)), shadowing).toThrow(
+        "Choose another --go-package",
+      );
+    }
+    // Colocated, nothing is imported by that name, so it is accepted.
+    expect(() => generateGoClient(clientSchema, { packageName: "json" })).not.toThrow();
+    expect(() =>
+      generateGoClient(clientSchema, { client: { socketImport: "example.com/socket io" } }),
+    ).toThrow("--go-client-socket-import");
+    expect(() =>
+      generateGoClient(clientSchema, {
+        ...SEPARATE,
+        client: { separate: { packageName: "wireclient", typesImport: "" } },
+      }),
+    ).toThrow("must not be empty");
+  });
+
+  test("reserves the client's API only in the package it shares with the contract", () => {
+    const declaring = (name: string): RpcSchema => ({
+      ...clientSchema,
+      declarations: [...clientSchema.declarations, { kind: "object", name, fields: [] }],
+    });
+    for (const name of ["Conn", "Dial", "DialOptions", "ClientHandler"]) {
+      expect(() => generateGoClient(declaring(name)), name).toThrow("collides with the generated package API");
+      // A separate client declares no contract types, and a server-only package
+      // never holds the client, so neither refuses the name.
+      expect(() => generateGoClient(declaring(name), SEPARATE), name).not.toThrow();
+      expect(() => generateGo(declaring(name)), name).not.toThrow();
+    }
+    // The server's API is reserved where the server is, and only there.
+    expect(() => generateGo(declaring("ServerBinding"))).toThrow("collides with the generated package API");
+    expect(() => generateGoClient(declaring("ServerBinding"))).not.toThrow();
+  });
+
+  test("derives the types import path from the module's go.mod", () => {
+    expect(goImportPath("module example.com/app\n\ngo 1.22\n", "/src/app", "/src/app/wire")).toBe(
+      "example.com/app/wire",
+    );
+    expect(goImportPath('module "example.com/app" // quoted\n', "/src/app", "/src/app/internal/wire")).toBe(
+      "example.com/app/internal/wire",
+    );
+    expect(goImportPath("module example.com/app\n", "/src/app", "/src/app")).toBe("example.com/app");
+    expect(() => goImportPath("module example.com/app\n", "/src/app", "/src/other")).toThrow(
+      "outside the Go module",
+    );
+    expect(() => goImportPath("go 1.22\n", "/src/app", "/src/app/wire")).toThrow("declares no module path");
+  });
+
+  test(
+    "compiled client dials, calls, serves, reconnects, limits payloads and disposes",
+    () => {
+      const directory = mkdtempSync(path.join(tmpdir(), "socketrpc-go-client-"));
+      temporaryDirectories.push(directory);
+      for (const [filename, source] of Object.entries(generateGoClient(clientSchema, { defaultTimeoutMs: 250 }))) {
+        if (source !== undefined) writeFileSync(path.join(directory, filename), source);
+      }
+      cpSync(path.join(FIXTURE_DIR, "client_runtime_test.go"), path.join(directory, "client_runtime_test.go"));
+      const stub = path.join(FIXTURE_DIR, "socketstub");
+      writeFileSync(
+        path.join(directory, "go.mod"),
+        `module socketrpc.generated.test
+
+go 1.22
+
+require github.com/nguyenvanduocit/socketrpc-gen/go/socketio v0.0.0
+
+replace github.com/nguyenvanduocit/socketrpc-gen/go/socketio => ${JSON.stringify(stub)}
+`,
+      );
+      const vet = spawnSync("go", ["vet", "./..."], { cwd: directory, encoding: "utf8", timeout: 60_000 });
+      expect(vet.status, `${vet.stdout}\n${vet.stderr}`).toBe(0);
+      const result = spawnSync("go", ["test", "-race", "-count=1", "./..."], {
+        cwd: directory,
+        encoding: "utf8",
+        timeout: 90_000,
+      });
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    },
+    120_000,
   );
 });

@@ -20,8 +20,9 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test",
-    "generate:examples": "bun run index.ts ./examples/01-basic/define.ts && bun run index.ts ./examples/02-single-extension/define.ts && bun run index.ts ./examples/03-multi-level-extension/define.ts && bun run index.ts ./examples/04-zod-integration/define.ts && bun run index.ts ./examples/00-full-app/pkg/rpc/define.ts && bun run generate:go-example",
-    "generate:go-example": "bun run index.ts ./examples/05-go-server/define.ts --client typescript --server go --go-out ./examples/05-go-server/rpc"
+    "generate:examples": "bun run index.ts ./examples/01-basic/define.ts && bun run index.ts ./examples/02-single-extension/define.ts && bun run index.ts ./examples/03-multi-level-extension/define.ts && bun run index.ts ./examples/04-zod-integration/define.ts && bun run index.ts ./examples/00-full-app/pkg/rpc/define.ts && bun run generate:go-example && bun run generate:go-client-example",
+    "generate:go-example": "bun run index.ts ./examples/05-go-server/define.ts --client typescript --server go --go-out ./examples/05-go-server/rpc",
+    "generate:go-client-example": "bun run index.ts ./examples/06-go-client/define.ts --client go --server go --go-out ./examples/06-go-client/wire --go-package wire --go-client-out ./examples/06-go-client/wireclient --go-client-package wireclient"
   },
   "repository": {
     "type": "git",

@@ -1,4 +1,5 @@
 import { describe, expect, test, afterAll, afterEach } from "bun:test";
+import { cpSync, mkdirSync } from "fs";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -6,7 +7,7 @@ import { io as ioClient, type Socket as ClientSocket } from "socket.io-client";
 
 import { createRpcClient, type RpcClient } from "./fixtures/go-wire/client.generated";
 import { isRpcError } from "./fixtures/go-wire/types.generated";
-import { waitForAddress } from "./helpers/go-server";
+import { run, useLocalSocketio, waitForAddress } from "./helpers/go-server";
 
 // Cross-language compatibility harness.
 //
@@ -14,7 +15,7 @@ import { waitForAddress } from "./helpers/go-server";
 // agree with each other — but both are emitted from the same templates, so they
 // would agree even on a convention no other language could implement. This file
 // closes that gap: the peer is a handcrafted Go Socket.IO server
-// (fixtures/go-wire/goserver/main.go, github.com/zishang520/socket.io/servers/socket/v3)
+// (fixtures/go-wire/goserver/main.go, on the repository's own go/socketio servers/socket)
 // written from the interface definitions alone. Every assertion below is a claim
 // about the wire, not about the generator.
 
@@ -24,18 +25,17 @@ const GO_SERVER_DIR = join(import.meta.dir, "fixtures", "go-wire", "goserver");
 // compile-and-link runs well past bun:test's 5s hook budget, and hooks accept no
 // timeout override.
 const workDir = await mkdtemp(join(tmpdir(), "socketrpc-go-wire-"));
+const goDir = join(workDir, "goserver");
 const binary = join(workDir, "go-wire-server");
+mkdirSync(goDir, { recursive: true });
+for (const file of ["go.mod", "go.sum", "main.go"]) {
+  cpSync(join(GO_SERVER_DIR, file), join(goDir, file));
+}
+useLocalSocketio(goDir);
 
 // Build rather than `go run`: `go run` starts the real server as a grandchild,
 // which survives killing the parent and leaks a listening process.
-const build = Bun.spawnSync(["go", "build", "-o", binary, "."], {
-  cwd: GO_SERVER_DIR,
-  stdout: "pipe",
-  stderr: "pipe",
-});
-if (build.exitCode !== 0) {
-  throw new Error(`go build failed:\n${build.stderr.toString()}`);
-}
+run(["go", "build", "-o", binary, "."], goDir, "go build");
 
 // stderr is inherited so a Go-side panic lands in the test output instead of
 // filling an undrained pipe.

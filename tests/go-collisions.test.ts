@@ -1,12 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import * as path from "path";
 import { spawnSync } from "child_process";
 import { RPC_SCHEMA_VERSION, type ObjectField, type RpcMethod, type RpcSchema } from "../src/schema";
-import { generateGo } from "../src/go";
+import { generateGo, generateGoClient, type GoBackendOptions } from "../src/go";
 import {
   CLIENT_METHOD_PREFIX,
+  GO_PREDECLARED,
   GENERATED_PREFIX,
   HANDLER_METHOD_PREFIX,
   clientMethodName,
@@ -36,6 +37,11 @@ import {
  * Every channel is vetted with the analyzer set `go vet` runs by default and no
  * exclusions, so an emitter change that reintroduces a name the standard library
  * has claimed fails here rather than in a consumer's build.
+ *
+ * Every Go layout a contract can be generated into is held to the same bar: the
+ * server package, the client sharing the types package, and the client in its
+ * own package importing the server's. A name is accepted only if every layout
+ * accepts it, and each accepted name is compiled in all three at once.
  */
 
 const FIXTURE_DIR = path.join(import.meta.dir, "fixtures", "go-emitter");
@@ -81,6 +87,35 @@ const probe: RpcSchema = {
     { name: "push", direction: "server-to-client", params: [], returnType: VOID },
   ],
 };
+
+const MODULE = "socketrpc.collisions.test";
+
+/** The client in its own package, importing the server's types package `wire`. */
+const SEPARATE: GoBackendOptions = {
+  packageName: "wire",
+  client: { separate: { packageName: "wireclient", typesImport: `${MODULE}/wire` } },
+};
+
+type Generator = (schema: RpcSchema) => Readonly<Record<string, string | undefined>>;
+
+/** Every layout, keyed by the directory of the module it is written into. */
+const LAYOUTS: Readonly<Record<string, Generator>> = {
+  ".": (schema) => generateGo(schema),
+  colocated: (schema) => generateGoClient(schema, { packageName: "colocated" }),
+  wire: (schema) => generateGo(schema, { packageName: "wire" }),
+  wireclient: (schema) => generateGoClient(schema, SEPARATE),
+};
+
+/** Every file every layout generates for one contract, as module-relative paths. */
+function allLayouts(schema: RpcSchema): Record<string, string> {
+  const files: Record<string, string> = {};
+  for (const [directory, generate] of Object.entries(LAYOUTS)) {
+    for (const [filename, source] of Object.entries(generate(schema))) {
+      if (source !== undefined) files[path.posix.join(directory, filename)] = source;
+    }
+  }
+  return files;
+}
 
 /** Every Go identifier the emitter puts on the page. */
 function harvestIdentifiers(sources: readonly string[]): string[] {
@@ -144,13 +179,21 @@ interface Verdict {
   readonly refused: Map<string, string>;
 }
 
-/** Runs one name through one channel and records whether the backend took it. */
-function verdictFor(names: readonly string[], build: (name: string) => RpcSchema): Verdict {
+/**
+ * Runs one name through one channel and records whether the backend took it:
+ * accepted only when every layout in `generators` accepts it, refused with the
+ * first refusal otherwise.
+ */
+function verdictFor(
+  names: readonly string[],
+  build: (name: string) => RpcSchema,
+  generators: readonly Generator[] = Object.values(LAYOUTS),
+): Verdict {
   const accepted: string[] = [];
   const refused = new Map<string, string>();
   for (const name of names) {
     try {
-      generateGo(build(name));
+      for (const generate of generators) generate(build(name));
       accepted.push(name);
     } catch (error) {
       refused.set(name, (error as Error).message);
@@ -159,22 +202,23 @@ function verdictFor(names: readonly string[], build: (name: string) => RpcSchema
   return { accepted, refused };
 }
 
-/** Builds, vets and gofmt-checks one generated package. */
+/** Builds, vets and gofmt-checks one module of generated packages. */
 function compile(label: string, sources: Record<string, string>): void {
   const directory = mkdtempSync(path.join(tmpdir(), "socketrpc-go-collisions-"));
   temporaryDirectories.push(directory);
   for (const [filename, source] of Object.entries(sources)) {
+    mkdirSync(path.dirname(path.join(directory, filename)), { recursive: true });
     writeFileSync(path.join(directory, filename), source);
   }
   writeFileSync(
     path.join(directory, "go.mod"),
-    `module socketrpc.collisions.test
+    `module ${MODULE}
 
 go 1.22
 
-require github.com/zishang520/socket.io/servers/socket/v3 v3.0.0
+require github.com/nguyenvanduocit/socketrpc-gen/go/socketio v0.0.0
 
-replace github.com/zishang520/socket.io/servers/socket/v3 => ${JSON.stringify(path.join(FIXTURE_DIR, "socketstub"))}
+replace github.com/nguyenvanduocit/socketrpc-gen/go/socketio => ${JSON.stringify(path.join(FIXTURE_DIR, "socketstub"))}
 `,
   );
 
@@ -196,7 +240,7 @@ replace github.com/zishang520/socket.io/servers/socket/v3 => ${JSON.stringify(pa
   expect(formatted.stdout.trim(), `${label} is not gofmt-clean`).toBe("");
 }
 
-const corpus = candidateWireNames(Object.values(generateGo(probe)));
+const corpus = candidateWireNames(Object.values(allLayouts(probe)));
 
 /**
  * The method names the standard library gives a fixed signature, as of Go 1.26
@@ -261,7 +305,22 @@ describe("Go identifier collision safety", () => {
 
     // A harvest that collapsed to nothing would make this suite vacuous.
     expect(hostile.length).toBeGreaterThan(20);
-    for (const regression of ["b", "c", "result", "err", "response", "fmt", "sync", "context"]) {
+    for (const regression of [
+      "b",
+      "c",
+      "result",
+      "err",
+      "response",
+      "fmt",
+      "sync",
+      "context",
+      // The client file's own imports, the types package among them.
+      "wire",
+      "sioclient",
+      "json",
+      "reflect",
+      "url",
+    ]) {
       expect(hostile, `${regression} is no longer covered by the harvest`).toContain(regression);
     }
 
@@ -303,7 +362,7 @@ describe("Go identifier collision safety", () => {
       );
     });
 
-    compile("parameter names", generateGo({ ...probe, methods }));
+    compile("parameter names", allLayouts({ ...probe, methods }));
   }, 90_000);
 
   test("every emitter-owned identifier survives being used as a method name", () => {
@@ -311,7 +370,20 @@ describe("Go identifier collision safety", () => {
     expect(hostile.length).toBeGreaterThan(20);
     // The inbound listener field and dispatch method are derived from the method
     // name, which is how `Disconnect` used to redeclare the emitter's own.
-    for (const regression of ["Disconnect", "Handler", "Dispose", "Context", "MarshalJSON"]) {
+    for (const regression of [
+      "Disconnect",
+      "Handler",
+      "Dispose",
+      "Context",
+      "MarshalJSON",
+      // Conn's own API and lifecycle members.
+      "Dial",
+      "OnConnect",
+      "Done",
+      "Err",
+      "Socket",
+      "HandleConnect",
+    ]) {
       expect(hostile, `${regression} is no longer covered by the harvest`).toContain(regression);
     }
 
@@ -353,7 +425,7 @@ describe("Go identifier collision safety", () => {
       );
     }
 
-    compile("inbound method names", generateGo({
+    compile("inbound method names", allLayouts({
       ...probe,
       methods: inbound.accepted.map((name) => ({
         name,
@@ -363,7 +435,7 @@ describe("Go identifier collision safety", () => {
       })),
     }));
 
-    compile("outbound method names", generateGo({
+    compile("outbound method names", allLayouts({
       ...probe,
       methods: outbound.accepted.map((name) => ({
         name,
@@ -400,7 +472,7 @@ describe("Go identifier collision safety", () => {
     }
 
     // …and the same names driven through the emitter, vetted with no exclusions.
-    const inbound = generateGo({
+    const inboundSchema: RpcSchema = {
       ...probe,
       methods: GO_STDMETHODS.map((canonical) => ({
         name: localIdentifier(canonical),
@@ -408,13 +480,13 @@ describe("Go identifier collision safety", () => {
         params: [{ name: "value", type: scalar("string") }],
         returnType: { kind: "named" as const, name: "Record" },
       })),
-    });
-    expect(inbound["server.generated.go"]).toContain(
+    };
+    expect(generateGo(inboundSchema)["server.generated.go"]).toContain(
       "HandleMarshalJSON(ctx context.Context, value string) (Record, error)",
     );
-    compile("canonical method names, inbound", inbound);
+    compile("canonical method names, inbound", allLayouts(inboundSchema));
 
-    const outbound = generateGo({
+    const outboundSchema: RpcSchema = {
       ...probe,
       methods: GO_STDMETHODS.map((canonical) => ({
         name: localIdentifier(canonical),
@@ -422,9 +494,9 @@ describe("Go identifier collision safety", () => {
         params: [{ name: "value", type: scalar("string") }],
         returnType: scalar("string"),
       })),
-    });
-    expect(outbound["server.generated.go"]).toContain("func (rpc_c *Client) CallSeek(");
-    compile("canonical method names, outbound", outbound);
+    };
+    expect(generateGo(outboundSchema)["server.generated.go"]).toContain("func (rpc_c *Client) CallSeek(");
+    compile("canonical method names, outbound", allLayouts(outboundSchema));
   }, 120_000);
 
   test("every emitter-owned identifier survives being used as an object field name", () => {
@@ -444,7 +516,7 @@ describe("Go identifier collision safety", () => {
     expect([...refused.keys()]).toEqual([]);
 
     const fields: ObjectField[] = accepted.map((name) => ({ name, type: scalar("string") }));
-    compile("object field names", generateGo({
+    compile("object field names", allLayouts({
       ...probe,
       declarations: [
         ...probe.declarations,
@@ -485,11 +557,22 @@ describe("Go identifier collision safety", () => {
         "collides with the generated package API",
       );
     }
-    for (const reserved of ["ServerHandler", "ServerBinding", "Client", "ClientOptions"]) {
+    // The server's API where the server shares the contract's package, and the
+    // client's where the client does.
+    for (const reserved of [
+      "ServerHandler",
+      "ServerBinding",
+      "Client",
+      "ClientOptions",
+      "ClientHandler",
+      "Conn",
+      "Dial",
+      "DialOptions",
+    ]) {
       expect(refused.get(reserved), `${reserved} no longer collides`).toBeDefined();
     }
 
-    compile("declaration names", generateGo({
+    compile("declaration names", allLayouts({
       ...probe,
       declarations: accepted.map((name) => ({
         kind: "object",
@@ -498,6 +581,41 @@ describe("Go identifier collision safety", () => {
       })),
       methods: [],
     }));
+
+    // A separate client declares no contract types, so the client's own API is
+    // free for the contract there, and in the server package it is compiled with.
+    const separateOnly = [LAYOUTS.wire!, LAYOUTS.wireclient!];
+    const clientApi = ["ClientHandler", "Conn", "Dial", "DialOptions"];
+    const separately = verdictFor(clientApi, (name) => ({
+      ...probe,
+      declarations: [...probe.declarations, { kind: "object", name, fields: [{ name: "value", type: scalar("string") }] }],
+      methods: [
+        ...probe.methods,
+        { name: "probeDeclaration", direction: "client-to-server", params: [], returnType: { kind: "named", name } },
+      ],
+    }), separateOnly);
+    expect(separately.accepted).toEqual(clientApi);
+    const declared: RpcSchema = {
+      ...probe,
+      declarations: [
+        ...probe.declarations,
+        ...clientApi.map((name) => ({ kind: "object" as const, name, fields: [{ name: "value", type: scalar("string") }] })),
+      ],
+      methods: [
+        ...probe.methods,
+        ...clientApi.map((name) => ({
+          name: `use${name}`,
+          direction: "server-to-client" as const,
+          params: [{ name: "value", type: { kind: "named" as const, name } }],
+          returnType: { kind: "named" as const, name },
+        })),
+      ],
+    };
+    compile("client API as declaration names, separate client", {
+      "wire/types.generated.go": generateGo(declared, { packageName: "wire" })["types.generated.go"],
+      "wire/server.generated.go": generateGo(declared, { packageName: "wire" })["server.generated.go"],
+      "wireclient/client.generated.go": generateGoClient(declared, SEPARATE)["client.generated.go"],
+    });
   }, 90_000);
 
   test("ServerBinding's own members stay inside the reserved namespace", () => {
@@ -532,5 +650,136 @@ describe("Go identifier collision safety", () => {
     for (const derived of contractDerived) {
       expect(members, `${derived} is no longer emitted`).toContain(derived);
     }
+  });
+
+  test("the separate client compiles whatever lower-case name the types package has", () => {
+    // The separate client reaches the types package by its package name, so
+    // that name is aimed at every lower-case identifier the client itself
+    // spells — its locals, parameters, receivers, imports and field selectors.
+    const separateFor = (packageName: string, typesImport: string): GoBackendOptions => ({
+      packageName,
+      client: { separate: { packageName: "wireclient", typesImport } },
+    });
+    const client = generateGoClient(probe, separateFor("wire", `${MODULE}/wire`))["client.generated.go"];
+    const code = client
+      .replace(/\/\/.*$/gm, "")
+      .replace(/"(?:[^"\\]|\\.)*"|`[^`]*`|'(?:[^'\\]|\\.)*'/g, '""');
+    const hostile = [
+      ...new Set(
+        [...code.matchAll(/(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*/g)]
+          .map(([identifier]) => identifier)
+          .filter((identifier) => /^[a-z_][a-z0-9_]*$/.test(identifier) && isGoIdentifier(identifier)),
+      ),
+    ].sort();
+    // The names the review found breaking the build, kept explicit so a change
+    // in the emitter's wording can never quietly drop them from the corpus.
+    for (const regression of [
+      "handler",
+      "conn",
+      "options",
+      "message",
+      "method",
+      "binding",
+      "call",
+      "value",
+      "code",
+      "args",
+      "err",
+      "failure",
+      "ctx",
+      "b",
+      "c",
+      "namespace",
+      "query",
+      "question",
+    ]) {
+      expect(hostile, `${regression} is no longer covered by the harvest`).toContain(regression);
+    }
+
+    // Refused are only the names the file scope already holds: the client's
+    // imports, Go's predeclared identifiers an import would shadow, the
+    // emitter's own reserved namespace, and the blank identifier, which is no
+    // package name at all. The import names are read back from the output.
+    const imports = client.match(/^import \(\n([\s\S]*?)\n\)/m)?.[1];
+    expect(imports, "the client no longer has an import block").toBeDefined();
+    // The types package's own import is the name under test, not a neighbour of it.
+    const importNames = [...imports!.matchAll(/^\t(?:([A-Za-z_][A-Za-z0-9_]*) )?"([^"]+)"$/gm)]
+      .filter(([, , importPath]) => importPath !== `${MODULE}/wire`)
+      .map(([, alias, importPath]) => alias ?? importPath!.split("/").pop()!);
+    expect(importNames).toContain("sioclient");
+    // The client's own package name is refused too: the two packages must differ.
+    const fileScope = new Set([...importNames, ...GO_PREDECLARED, "_", "wireclient"]);
+    const accepted: string[] = [];
+    for (const name of hostile) {
+      const typesImport = `${MODULE}/types${accepted.length}`;
+      try {
+        generateGoClient(probe, separateFor(name, typesImport));
+      } catch (error) {
+        expect(
+          fileScope.has(name) || name.startsWith(GENERATED_PREFIX),
+          `--go-package ${name} was refused although the client file scope does not hold it: ${(error as Error).message}`,
+        ).toBe(true);
+        expect((error as Error).message, name).toContain("--go-package");
+        continue;
+      }
+      expect(
+        fileScope.has(name) || name.startsWith(GENERATED_PREFIX),
+        `--go-package ${name} was accepted although the client file scope holds it`,
+      ).toBe(false);
+      accepted.push(name);
+    }
+    expect(accepted.length).toBeGreaterThan(50);
+
+    const sources: Record<string, string> = {};
+    accepted.forEach((name, index) => {
+      sources[`types${index}/types.generated.go`] = generateGo(probe, { packageName: name })["types.generated.go"];
+      sources[`client${index}/client.generated.go`] = generateGoClient(
+        probe,
+        separateFor(name, `${MODULE}/types${index}`),
+      )["client.generated.go"];
+    });
+    compile("separate client against every lower-case types package name", sources);
+  }, 180_000);
+
+  test("the client binding's and Conn's own members stay clear of contract-derived ones", () => {
+    const client = generateGoClient(probe, SEPARATE)["client.generated.go"];
+    const membersOf = (type: string): string[] => {
+      const struct = client.match(new RegExp(`type ${type} struct \\{\\n([\\s\\S]*?)\\n\\}`))?.[1];
+      expect(struct, `${type} is no longer a struct literal in the output`).toBeDefined();
+      return [
+        ...[...struct!.matchAll(/^\t([A-Za-z_][A-Za-z0-9_]*)\s/gm)].map(([, name]) => name!),
+        ...[...client.matchAll(new RegExp(`^func \\([a-z_]+ \\*${type}\\) ([A-Za-z_][A-Za-z0-9_]*)\\(`, "gm"))].map(
+          ([, name]) => name!,
+        ),
+      ];
+    };
+
+    // The binding serves the server's calls, so its contract-derived members
+    // are the `listen…`/`handle…` pair of each server-to-client method.
+    const bindingDerived = probe.methods
+      .filter((method) => method.direction === "server-to-client")
+      .flatMap((method) => [`listen${exportedIdentifier(method.name)}`, `handle${exportedIdentifier(method.name)}`]);
+    const binding = membersOf("rpc_clientBinding");
+    for (const member of binding) {
+      if (bindingDerived.includes(member)) continue;
+      expect(
+        member.startsWith(GENERATED_PREFIX) || isExportedGoIdentifier(member),
+        `rpc_clientBinding.${member} is neither exported API nor in the ${GENERATED_PREFIX} namespace`,
+      ).toBe(true);
+    }
+    for (const derived of bindingDerived) expect(binding).toContain(derived);
+
+    // Conn's contract-derived members are `Call…`, a shape none of its own
+    // members — exported or not — can take.
+    const callShape = new RegExp(`^${CLIENT_METHOD_PREFIX}[A-Z]`);
+    const connDerived = probe.methods
+      .filter((method) => method.direction === "client-to-server")
+      .map((method) => clientMethodName(method.name));
+    const conn = membersOf("Conn");
+    for (const member of conn) {
+      if (connDerived.includes(member)) continue;
+      expect(member, `Conn.${member} is shaped like a contract-derived method`).not.toMatch(callShape);
+    }
+    for (const derived of connDerived) expect(conn).toContain(derived);
   });
 });

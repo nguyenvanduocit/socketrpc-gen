@@ -33,13 +33,24 @@ jobs:
           bun-version: 1.3.11
 
       # The suite is cross-language: it generates Go, then compiles it, vets it
-      # with no analyzer excluded, and runs it under -race against the real
-      # zishang520 transport. Without a Go toolchain those tests fail rather
-      # than skip, which is the point.
+      # with no analyzer excluded, and runs it under -race against the
+      # repository's own go/socketio transport. Without a Go toolchain those
+      # tests fail rather than skip, which is the point.
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
-          cache-dependency-path: tests/fixtures/**/go.sum
+          cache-dependency-path: |
+            go/socketio/go.sum
+            tests/fixtures/**/go.sum
+
+      # go/socketio is the Socket.IO implementation every generated Go file
+      # imports, so its own suite gates a release like the generator's does.
+      - name: go/socketio vet and race tests
+        working-directory: go/socketio
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+          go test -race -count=1 ./...
 
       - name: Install dependencies
         # Frozen: CI resolves exactly what bun.lock records, so a dependency

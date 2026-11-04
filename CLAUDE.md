@@ -14,6 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `bun run index.ts ./examples/01-basic/define.ts` - Generate from basic example (simple interfaces)
 - `bun run index.ts ./examples/00-full-app/pkg/rpc/define.ts --package-name "my-rpc" --timeout 3000`
 - `bun run index.ts ./examples/05-go-server/define.ts --client typescript --server go --go-out ./examples/05-go-server/rpc` - TypeScript client + Go server
+- `bun run generate:go-client-example` - Go client + Go server into `examples/06-go-client/{wire,wireclient}`
 
 ### Verification Commands
 - `bun run check` - typecheck then run the full suite
@@ -79,7 +80,11 @@ This is a TypeScript code generator for Socket.IO RPC packages. The tool generat
 - `options.ts` - Go-only knobs: package clause, socket import, default ack timeout
 - `project.ts` - the single projection of `TypeRef` onto Go types, shared by both passes
 - `validate.ts` - refuses shapes with no sound Go spelling, naming the fix in the message
-- `emitter.ts` - writes gofmt-clean `types.generated.go` + `server.generated.go`
+- `emitter.ts` - writes gofmt-clean `types.generated.go` + `server.generated.go`, through
+  writers parameterized by a `GoSide` descriptor (`SERVER_SIDE` reproduces the server's bytes)
+- `client.ts` - writes `client.generated.go` from the same writers with the client's `GoSide`,
+  plus what only a reconnecting client has: `Dial`, `DialOptions` and the `Conn` lifecycle
+- `module.ts` - pure: the import path of `--go-out`, derived from the go.mod above it
 - Identifiers are derived idiomatically (`id` → `ID`, `roomId` → `RoomID`), so the schema
   carries no per-name override channel.
 
@@ -103,10 +108,35 @@ This is a TypeScript code generator for Socket.IO RPC packages. The tool generat
 ### Multi-Language Generation
 
 `--client <lang>` and `--server <lang>` select the backends; both default to `typescript`,
-so existing invocations are unchanged. `--server go` emits `types.generated.go` and
+so existing invocations are unchanged. `--client` also takes a comma-separated list of distinct
+languages (`--client typescript,go`) and writes a client in each from one run, every file byte for
+byte what the single-client run writes (`tests/cli-targets.test.ts`); `--server` takes one.
+`resolveConfig` parses the list into `ResolvedConfig.clientLanguages`, a set, and refuses an
+unknown language or one listed twice by the flag. `--server go` emits `types.generated.go` and
 `server.generated.go` (into `--go-out`, default the input file's directory) and skips
 `server.generated.ts`. `--go-package` sets the Go package clause and `--go-socket-import`
-the transport, which defaults to `github.com/zishang520/socket.io/servers/socket/v3`.
+the transport, which defaults to `github.com/nguyenvanduocit/socketrpc-gen/go/socketio/servers/socket`:
+the Socket.IO implementation this repository carries under `go/socketio` (see its README).
+A bug in that transport is fixed there, with a test and a README entry, never worked around in
+generated code.
+
+`--client go` emits `client.generated.go` and skips `client.generated.ts`, written against
+`--go-client-socket-import` (default `…/go/socketio/clients/socket`, imported as `sioclient`).
+The layout rule: `types.generated.go` always lives in `--go-out` / `--go-package`, and a Go side
+not given its own directory shares that package. The server's language alone decides where a Go
+client goes, whatever else `--client` lists.
+
+- `--client go --server typescript`: the client sits in `--go-out` beside the types and spells
+  them unqualified.
+- `--client go --server go`: the client goes to `--go-client-out` as `--go-client-package`
+  (both required, both distinct from the server's; the directories are compared after `realpath`
+  of the nearest existing ancestor, case-folded, because `go build` refuses import paths that
+  differ only in case), declares no contract types, and imports
+  `--go-out` under its package name, through the path `src/go/module.ts` derives from the go.mod
+  above it. It carries its own unexported copy of the runtime helpers. Nothing TypeScript is
+  written unless `--client` also lists `typescript`, which adds the TypeScript client package
+  next to `define.ts`. `src/types.ts` `assertGoLayout` refuses every other combination before any file is
+  touched. See `examples/06-go-client/`.
 
 The Go backend only accepts the portable subset of the IR — named object types, named
 string-literal unions, scalars, arrays, string-keyed records, `T | null`, optional fields,
@@ -170,6 +200,42 @@ Behaviour parity worth knowing:
 - Contract names are refused only where a name genuinely has no sound Go projection: `ctx` as a
   parameter, Socket.IO's own event names, and a declaration whose Go name is one the package
   already exports. Object field names are never refused.
+- The Go client is `Dial` → `*Conn`. `Dial` builds its own Manager (`NewManager`, never the
+  package cache) and socket with AutoConnect off, registers every listener, then connects, so
+  each `Conn` owns its socket outright and `Dispose` removing listeners by code pointer can never
+  reach another binding's. A refused handshake returns at once as DISCONNECTED with the server's
+  message; an unreachable server is retried until the ctx ends.
+- One state mutex guards `live` and the connection epoch, a channel the `connect` listener
+  creates on a down-to-up transition and the `disconnect` listener closes on up-to-down (the
+  socket can report one loss twice). A call captures the epoch before it emits and selects on
+  it, so a call in flight fails DISCONNECTED the moment its connection drops, without relying on
+  the socket clearing its acks.
+- A call made while disconnected fails at once with DISCONNECTED, like the Go server's `Client`,
+  and is never sent later: every emit goes through `go/socketio`'s `Socket.NoBuffer()`, which
+  decides send-or-refuse under the same lock the socket's connect/disconnect transitions take.
+  This is the documented difference from the TypeScript client, which buffers it until the
+  reconnect.
+- `OnConnect` / `OnDisconnect` observers are queued on a lifecycle `rpc_eventQueue`, in
+  transition order and off the socket's goroutines, so an observer may make a call. `OnConnect`
+  fires on reconnects only; the documented pattern is register, then call once yourself.
+- A handler's ctx is the session of the connection its call arrived on, derived from
+  `Conn.Context()` and cancelled when that connection drops or on `Dispose`, so a stale handler
+  frees its method's queue for the calls after a reconnect. Its answer needs no guard of its own:
+  `go/socketio` binds an inbound call's ack to the engine session it arrived on and drops it if
+  that session has ended, because the server numbers acks per connection.
+- `checkPayload` measures `json.Marshal([event, args...])` + namespace + 24 bytes against the
+  engine's `MaxPayload()` (the server's advertised `maxPayload`, a `go/socketio` addition read
+  through an interface assertion), else 1,000,000. An oversized call fails INVALID_ARGUMENT with
+  nothing sent; an oversized handler reply answers INTERNAL_ERROR. Without it Engine.IO closes
+  the connection with 1009 and fails every call in flight.
+- `src/go/validate.ts` reservations are side-aware: a colocated client reserves `ClientHandler`,
+  `Conn`, `Dial`, `DialOptions`; a separate one reserves no declaration names, but its types
+  package name must not shadow a name the client file imports.
+- Client coverage: `tests/fixtures/go-emitter/client_runtime_test.go` runs the generated client
+  hermetically under `-race` against a stub socket; `tests/go-client.integration.test.ts` runs it
+  against the generated Go server (namespaces, auth, refusal, reconnect after a kill and after a
+  graceful close, ordering, the payload limit, 2000 dials); `tests/go-client-ts.integration.test.ts`
+  runs it against the TypeScript server.
 - `tests/go-collisions.test.ts` derives its adversarial contract from the emitter's own output
   and feeds it back through every channel a contract owns — parameters, inbound and outbound
   method names, object field names, declaration names — asserting each either compiles

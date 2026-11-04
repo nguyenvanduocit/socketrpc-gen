@@ -1,5 +1,16 @@
 # Changelog
 
+## [9.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v8.1.0...v9.0.0) (2026-11-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* generated Go code imports github.com/nguyenvanduocit/socketrpc-gen/go/socketio instead of github.com/zishang520/socket.io. Run `go get github.com/nguyenvanduocit/socketrpc-gen/go/socketio@v0.1.0` and regenerate.
+
+### Features
+
+* generate a Go client, served by our own Socket.IO implementation ([#48](https://github.com/nguyenvanduocit/socketrpc-gen/issues/48)) ([e9aecf2](https://github.com/nguyenvanduocit/socketrpc-gen/commit/e9aecf21731a14fddbd434a239b8dbf94a27058b))
+
 ## [8.1.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v8.0.1...v8.1.0) (2026-10-25)
 
 

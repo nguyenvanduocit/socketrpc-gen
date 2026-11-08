@@ -6,7 +6,7 @@
  * write, and the emitters write only shapes that survived validation.
  */
 
-import type { ObjectField, RpcMethod, RpcSchema, TypeDeclaration, TypeRef } from "../schema";
+import type { ObjectField, RpcMethod, RpcSchema, ScalarTypeName, TypeDeclaration, TypeRef } from "../schema";
 import { rustTypeName } from "./names";
 
 export type DeclarationScope = ReadonlyMap<string, TypeDeclaration>;
@@ -53,10 +53,13 @@ export function enumVariantName(value: string): string {
 
 export const JSON_VALUE = "::serde_json::Value";
 
+/** The Rust spelling of a scalar; `Copy` for all but `String`. */
+const RUST_SCALARS: Record<ScalarTypeName, string> = { string: "String", number: "f64", integer: "i64", boolean: "bool" };
+
 function renderCore(core: TypeRef): string {
   switch (core.kind) {
     case "scalar":
-      return core.name === "string" ? "String" : core.name === "number" ? "f64" : "bool";
+      return RUST_SCALARS[core.name];
     case "json":
       return JSON_VALUE;
     case "named":
@@ -100,7 +103,7 @@ export function renderParamType(ref: TypeRef, declarations: DeclarationScope): s
   const borrowed = ((): string => {
     switch (core.kind) {
       case "scalar":
-        return core.name === "string" ? "&str" : core.name === "number" ? "f64" : "bool";
+        return core.name === "string" ? "&str" : RUST_SCALARS[core.name];
       case "named":
         return isCopyNamed(core.name, declarations) ? rustTypeName(core.name) : `&${rustTypeName(core.name)}`;
       case "array":
@@ -119,11 +122,28 @@ function byValueDependency(ref: TypeRef): string | undefined {
   return core.kind === "named" ? core.name : undefined;
 }
 
+/**
+ * The fields a declaration stores inline: an object's own, or every variant's
+ * of a discriminated union, which Rust lays out like a struct per variant.
+ * Undefined for declarations that hold no fields.
+ */
+function inlineFields(declaration: TypeDeclaration): readonly ObjectField[] | undefined {
+  switch (declaration.kind) {
+    case "object":
+      return declaration.fields;
+    case "union":
+      return declaration.variants.flatMap((variant) => variant.fields);
+    default:
+      return undefined;
+  }
+}
+
 /** The named types a declaration embeds by value. */
 function byValueEdges(declaration: TypeDeclaration): string[] {
   switch (declaration.kind) {
     case "object":
-      return declaration.fields.flatMap((field) => byValueDependency(field.type) ?? []);
+    case "union":
+      return (inlineFields(declaration) ?? []).flatMap((field) => byValueDependency(field.type) ?? []);
     case "alias":
       return byValueDependency(declaration.target) ? [byValueDependency(declaration.target) as string] : [];
     case "enum":
@@ -146,17 +166,18 @@ function reaches(from: string, target: string, declarations: DeclarationScope): 
 }
 
 /**
- * Whether `field` of object `owner` is spelled `Option<Box<T>>`.
+ * Whether `field` of object or discriminated union `owner` is spelled `Option<Box<T>>`.
  *
  * `Option<T>` is no indirection in Rust — it stores `T` inline — so a struct
  * reaching itself through optional fields alone has no finite size. Every
- * optional or nullable field whose object type leads back to its owner by value
- * is boxed; a cycle with no such field anywhere is refused by validation.
+ * optional or nullable field whose object or union type leads back to its owner
+ * by value is boxed; a cycle with no such field anywhere is refused by validation.
  */
 export function isBoxedField(owner: string, field: ObjectField, declarations: DeclarationScope): boolean {
   const { core, optional, nullable } = unwrapOptionality(field.type);
   if (!(optional || nullable) || core.kind !== "named") return false;
-  if (declarations.get(core.name)?.kind !== "object") return false;
+  const target = declarations.get(core.name);
+  if (!target || inlineFields(target) === undefined) return false;
   return reaches(core.name, owner, declarations);
 }
 
@@ -171,8 +192,9 @@ export function unboxedCycle(declarations: DeclarationScope): string[] | undefin
   const unboxedEdges = (name: string): string[] => {
     const declaration = declarations.get(name);
     if (!declaration) return [];
-    if (declaration.kind !== "object") return byValueEdges(declaration);
-    return declaration.fields
+    const fields = inlineFields(declaration);
+    if (fields === undefined) return byValueEdges(declaration);
+    return fields
       .filter((field) => !isBoxedField(name, field, declarations))
       .flatMap((field) => byValueDependency(field.type) ?? []);
   };

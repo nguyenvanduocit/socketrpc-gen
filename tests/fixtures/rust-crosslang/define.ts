@@ -31,9 +31,33 @@ export type Task = {
   type: string;
 };
 
+/**
+ * A discriminated union: a Rust enum tagged by `kind`. Its variants cover a
+ * named and camelCase field, the three absence states, a recursive optional
+ * hop (boxed in Rust), a variant with no fields, and one whose JSON values make
+ * it over 200 bytes larger than the rest once serde_json's `preserve_order` is on.
+ */
+export type Outcome =
+  | { kind: "ready"; priority: Priority; stepCount: number; note?: string }
+  | { kind: "needPhoto"; spoken: string; due?: string | null }
+  | { kind: "wrapped"; inner?: Outcome; owner: string | null }
+  | { kind: "empty" }
+  | { kind: "raw"; first: unknown; second: unknown; third: unknown };
+
+/**
+ * A whole number: `i64` in Rust, still `number` in TypeScript.
+ * @int
+ */
+export type Count = number;
+
 /** Functions the server provides; the client calls these. */
 export interface ServerFunctions {
   echoTask: (task: Task) => Task;
+  /** The fixed sample of the variant `kind` names; any other kind fails with INVALID_ARGUMENT. */
+  outcome: (kind: string) => Outcome;
+  echoOutcome: (outcome: Outcome) => Outcome;
+  /** Twice `n`; a fractional `n` never reaches the handler. */
+  double: (n: Count) => Count;
   add: (a: number, b: number) => number;
   /** Fails with `code`, message `refused: <code>` and data `{ code }`. */
   fail: (code: string) => string;

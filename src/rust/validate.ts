@@ -5,6 +5,7 @@
  * The accepted subset is the Go backend's portable subset: named objects and
  * string enums, scalars, arrays, string-keyed records, `T | null`, optional
  * fields, `unknown` and `void`. A contract that generates Go generates Rust.
+ * Rust also accepts named discriminated unions, which Go refuses.
  */
 
 import type { ObjectField, RpcMethod, RpcSchema, TypeDeclaration, TypeRef } from "../schema";
@@ -72,7 +73,7 @@ function validateTypeRef(ref: TypeRef, path: string, declarations: DeclarationSc
     case "json":
       return;
     case "scalar":
-      if (!["string", "number", "boolean"].includes(core.name)) {
+      if (!["string", "number", "integer", "boolean"].includes(core.name)) {
         fail(path, `unsupported scalar ${JSON.stringify(core.name)}`);
       }
       return;
@@ -97,6 +98,8 @@ function validateTypeRef(ref: TypeRef, path: string, declarations: DeclarationSc
         path,
         "inline string-literal unions have no Rust name. Extract the union into a named type alias so it can become a Rust enum. If the contract already has one, TypeScript dropped its name: an alias that includes null or undefined is merged into any union it joins, so for `type Maybe = Status | null` a field written `n?: Maybe` reaches Rust as an inline union. Write the alias's own members instead: `n?: Status | null`.",
       );
+    case "union":
+      fail(path, "inline discriminated unions have no Rust name. Extract the union into a named type alias so it can become a Rust enum.");
     case "null":
       fail(path, "a bare null carries no value type. Use `T | null` so Rust can emit an Option<T>.");
     case "void":
@@ -133,12 +136,12 @@ function validateObjectFields(fields: readonly ObjectField[], path: string, decl
   });
 }
 
-function validateEnum(declaration: Extract<TypeDeclaration, { kind: "enum" }>, path: string): void {
-  if (declaration.values.length === 0) fail(`${path}.values`, "enum must not be empty");
+/** Each literal must be distinct and derive its own Rust variant name. */
+function validateVariantLiterals(values: readonly string[], valuePathOf: (index: number) => string): void {
   const literals = new Set<string>();
   const variants = new Map<string, string>();
-  declaration.values.forEach((value, index) => {
-    const valuePath = `${path}.values[${index}]`;
+  values.forEach((value, index) => {
+    const valuePath = valuePathOf(index);
     if (literals.has(value)) fail(valuePath, `duplicate literal ${value}`);
     literals.add(value);
     const variant = enumVariantName(value);
@@ -153,6 +156,31 @@ function validateEnum(declaration: Extract<TypeDeclaration, { kind: "enum" }>, p
       );
     }
     variants.set(variant, value);
+  });
+}
+
+function validateEnum(declaration: Extract<TypeDeclaration, { kind: "enum" }>, path: string): void {
+  if (declaration.values.length === 0) fail(`${path}.values`, "enum must not be empty");
+  validateVariantLiterals(declaration.values, (index) => `${path}.values[${index}]`);
+}
+
+function validateUnion(
+  declaration: Extract<TypeDeclaration, { kind: "union" }>,
+  path: string,
+  declarations: DeclarationScope,
+): void {
+  if (declaration.variants.length === 0) fail(`${path}.variants`, "discriminated union must not be empty");
+  if (!WIRE_IDENTIFIER.test(declaration.tag)) fail(`${path}.tag`, "the tag must be an unquoted JavaScript identifier");
+  validateVariantLiterals(
+    declaration.variants.map((variant) => variant.tag),
+    (index) => `${path}.variants[${index}].tag`,
+  );
+  declaration.variants.forEach((variant, index) => {
+    const variantPath = `${path}.variants[${index}]`;
+    if (variant.fields.some((field) => field.name === declaration.tag)) {
+      fail(`${variantPath}.fields`, `a field may not repeat the tag ${JSON.stringify(declaration.tag)}`);
+    }
+    validateObjectFields(variant.fields, variantPath, declarations);
   });
 }
 
@@ -264,6 +292,9 @@ export function validateRustSchema(schema: RpcSchema, options: RustBackendOption
         return;
       case "enum":
         validateEnum(declaration, path);
+        return;
+      case "union":
+        validateUnion(declaration, path, declarations);
         return;
       case "alias":
         validateTypeRef(declaration.target, `${path}.target`, declarations);

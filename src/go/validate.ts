@@ -140,7 +140,7 @@ function validateTypeRef(ref: TypeRef, path: string, scope: ValidationScope): vo
     case "json":
       return;
     case "scalar":
-      if (!["string", "number", "boolean"].includes(core.name)) {
+      if (!["string", "number", "integer", "boolean"].includes(core.name)) {
         fail(path, `unsupported scalar ${JSON.stringify(core.name)}`);
       }
       return;
@@ -167,6 +167,11 @@ function validateTypeRef(ref: TypeRef, path: string, scope: ValidationScope): vo
       fail(
         path,
         "inline string-literal unions have no Go name. Extract the union into a named type alias so it can become a Go string enum. If the contract already has one, TypeScript dropped its name: an alias that includes null or undefined is merged into any union it joins, so for `type Maybe = Status | null` a field written `n?: Maybe` reaches Go as an inline union. Write the alias's own members instead: `n?: Status | null`.",
+      );
+    case "union":
+      fail(
+        path,
+        "discriminated unions have no Go projection; they are supported by the TypeScript and Rust backends. For a Go side, declare one object type with the tag field and every variant's fields optional.",
       );
     case "null":
       fail(path, "a bare null carries no value type. Use `T | null` so Go can emit a *T.");
@@ -485,6 +490,11 @@ export function validateGoSchema(
       case "alias":
         validateTypeRef(declaration.target, `${path}.target`, scope);
         return;
+      case "union":
+        fail(
+          path,
+          `'${declaration.name}' is a discriminated union, which has no Go projection. Discriminated unions are supported by the TypeScript and Rust backends; for a Go side, declare one object type with the tag field and every variant's fields optional.`,
+        );
       default:
         fail(
           `${path}.kind`,

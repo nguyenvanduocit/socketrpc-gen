@@ -512,6 +512,10 @@ function writeTypesFile(schema: RpcSchema, packageName: string): string {
       continue;
     }
 
+    if (declaration.kind === "union") {
+      throw new Error(`emitTypes: unvalidated declaration kind union (${declaration.name})`);
+    }
+
     // A field can be named after the marshaller, and Go allows a type only one
     // member of a given name. Where the contract claims the struct's method
     // namespace, normalization moves down to the field's own type, which

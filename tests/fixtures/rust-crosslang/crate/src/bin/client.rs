@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use rust_crosslang::rpc::client::{dial, ClientHandler, Conn, Context, DialOptions};
 use rust_crosslang::rpc::{Priority, RpcError, RpcErrorCode, Task};
+use rust_crosslang::{sample_outcome, OUTCOME_KINDS};
 use serde_json::json;
 
 struct Handler;
@@ -81,6 +82,22 @@ async fn main() {
     let echoed = conn.call_echo_task(&task).await;
     report("echo_task", echoed.as_ref() == Ok(&task), &echoed);
 
+    // Each variant the server builds decodes to the value this side builds, and
+    // each value this side sends comes back unchanged.
+    let mut outcomes = Vec::new();
+    let mut echoes = Vec::new();
+    for kind in OUTCOME_KINDS {
+        let expected = sample_outcome(kind);
+        outcomes.push((kind, conn.call_outcome(kind).await.ok() == expected));
+        let sent = expected.expect("sample");
+        echoes.push((kind, conn.call_echo_outcome(&sent).await == Ok(sent.clone())));
+    }
+    report("outcome", outcomes.iter().all(|(_, ok)| *ok), &outcomes);
+    report("echo_outcome", echoes.iter().all(|(_, ok)| *ok), &echoes);
+
+    let doubled = conn.call_double(21).await;
+    report("double", doubled == Ok(42), &doubled);
+
     let sum = conn.call_add(2.0, 3.5).await;
     report("add", sum == Ok(5.5), &sum);
 
@@ -90,7 +107,7 @@ async fn main() {
         matches!(&failed, Err(e) if e.code == RpcErrorCode::Other("QUOTA".into())
             && e.message == "refused: QUOTA"
             && e.method.as_deref() == Some("fail")
-            && e.data == Some(json!({ "code": "QUOTA" }))),
+            && e.data.as_deref() == Some(&json!({ "code": "QUOTA" }))),
         &failed,
     );
 

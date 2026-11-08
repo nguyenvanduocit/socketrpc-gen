@@ -35,8 +35,17 @@ export type Receipt = {
 /** String-literal union — becomes a validated Go string enum. */
 export type Priority = "low" | "high";
 
+/**
+ * A whole number: `int64` in Go, still `number` in TypeScript.
+ * @int
+ */
+export type Count = number;
+
 /** Functions the Go server provides; the TypeScript client calls these. */
 export interface ServerFunctions {
+  /** Go answers with twice `n`; a fractional `n` never reaches the handler. */
+  double: (n: Count) => Count;
+
   /** Value-returning ack: Go answers with the echoed payload. */
   echo: (id: string, payload: string) => Echo;
 

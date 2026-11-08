@@ -134,7 +134,7 @@ describe("CLI target selection", () => {
         ],
         // --client is a list of distinct, known languages; --server is one language.
         [["--client", "typescript,typescript"], "--client lists 'typescript' twice", undefined],
-        [["--client", "typescript,rust"], "Unknown client language 'rust' in --client", undefined],
+        [["--client", "typescript,python"], "Unknown client language 'python' in --client", undefined],
         [["--client", "typescript,"], "Unknown client language '' in --client", undefined],
         [["--server", "typescript,go"], "--server takes one language", undefined],
         // The client imports the types package by its module path.
@@ -305,10 +305,10 @@ describe("CLI target selection", () => {
   test(
     "refuses an unknown language rather than silently defaulting",
     () => {
-      const run = generate(PORTABLE, ["--server", "rust"]);
+      const run = generate(PORTABLE, ["--server", "python"]);
       expect(run.exitCode).toBe(1);
-      expect(run.output).toContain("Unknown server language 'rust'");
-      expect(run.output).toContain("typescript, go");
+      expect(run.output).toContain("Unknown server language 'python'");
+      expect(run.output).toContain("typescript, go, rust");
       expect(run.files).toEqual(["define.ts"]);
     },
     TIMEOUT,

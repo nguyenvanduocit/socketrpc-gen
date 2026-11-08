@@ -175,20 +175,38 @@ interface ServerFunctions {
 
 ---
 
+### [07-rust](./07-rust/) - Rust Server, Rust Client
+
+**What it demonstrates:**
+- Generating a Rust server (socketioxide) and a Rust client from one `define.ts`, into one module directory
+- `ServerHandler` / `ClientHandler` implemented with `async fn`, `bind_server` and `dial`
+- The server calling the client back, fire-and-forget (`call_on_message`) and acknowledged (`call_confirm_leave`)
+- The `--rust-out` flag, and a binary you run with `cargo run`
+
+**Complexity:** ⭐⭐ Intermediate
+
+**Use when:**
+- A Rust service serves SocketRPC clients, or dials a SocketRPC server
+
+**Functions generated:** 6 total (4 server, 2 client)
+
+---
+
 ## Feature Comparison
 
-| Feature | Example 00 | Example 01 | Example 02 | Example 03 | Example 04 | Example 05 | Example 06 |
-|---------|-----------|-----------|-----------|-----------|-----------|-----------|-----------|
-| Full Implementation | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Interface Extension | ✅ Multi-level | ❌ | ✅ Single-level | ✅ Multi-level | ❌ | ❌ | ❌ |
-| Zod Schemas | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
-| Go server (`--server go`) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-| Go client (`--client go`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Multiple Files | ✅ 3 files | ❌ | ✅ 2 files | ✅ 3 files | ❌ | ❌ | ❌ |
-| Layered Architecture | ✅ 3 layers | ❌ | ✅ 2 layers | ✅ 3 layers | ❌ | ❌ | ❌ |
-| Client/Server Code | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Go |
-| Complexity | Medium | Low | Medium | High | Medium | Medium | Medium |
-| Real-world Use | Production app | Simple apps | Frameworks | Enterprise | AI Integration | Go backends | Go workers |
+| Feature | Example 00 | Example 01 | Example 02 | Example 03 | Example 04 | Example 05 | Example 06 | Example 07 |
+|---------|-----------|-----------|-----------|-----------|-----------|-----------|-----------|-----------|
+| Full Implementation | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Interface Extension | ✅ Multi-level | ❌ | ✅ Single-level | ✅ Multi-level | ❌ | ❌ | ❌ | ❌ |
+| Zod Schemas | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| Go server (`--server go`) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ |
+| Go client (`--client go`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Rust server and client (`rust`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Multiple Files | ✅ 3 files | ❌ | ✅ 2 files | ✅ 3 files | ❌ | ❌ | ❌ | ❌ |
+| Layered Architecture | ✅ 3 layers | ❌ | ✅ 2 layers | ✅ 3 layers | ❌ | ❌ | ❌ | ❌ |
+| Client/Server Code | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Go | ✅ Rust |
+| Complexity | Medium | Low | Medium | High | Medium | Medium | Medium | Medium |
+| Real-world Use | Production app | Simple apps | Frameworks | Enterprise | AI Integration | Go backends | Go workers | Rust services |
 
 ## Common Patterns
 

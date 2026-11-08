@@ -11,7 +11,7 @@
 -   **Ergonomic API:** Clean `client.handle.*` / `client.server.*` pattern with automatic cleanup.
 -   **Unopinionated:** Generates only the type-safe bindings, leaving you in full control of your `socket.io` setup.
 -   **Bidirectional Communication:** Supports both client-to-server and server-to-client RPC calls.
--   **Multi-Language:** Generate either side in TypeScript or **Go** from one contract: a Go server for a TypeScript client, a Go client for a TypeScript server, or both sides in Go sharing one set of types.
+-   **Multi-Language:** Generate either side in TypeScript, **Go** or **Rust** from one contract, in any pairing: a Go or Rust server for a TypeScript client, a Go or Rust client for a TypeScript server, or both sides in Go or in Rust sharing one set of types.
 -   **Simple to Use:** Get started with a single command.
 -   **Robust Error Handling:** Branded `RpcError` (no shape collisions), standard error codes (`TIMEOUT`, `DISCONNECTED`, `ABORTED`, …), and a per-call `return`-or-`throw` error mode.
 -   **Connection-Aware:** `connected` state plus `onConnect` / `onDisconnect` / `onReconnect` hooks for re-syncing after reconnects.
@@ -33,6 +33,7 @@ Check out the [`examples/`](./examples) directory for comprehensive examples:
 - **[04-zod-integration](./examples/04-zod-integration/)** - Runtime validation with Zod schemas
 - **[05-go-server](./examples/05-go-server/)** - TypeScript client with a Go server
 - **[06-go-client](./examples/06-go-client/)** - Go client and Go server in one Go module
+- **[07-rust](./examples/07-rust/)** - Rust server and Rust client in one crate
 
 See the [examples README](./examples/README.md) for detailed comparisons and use cases.
 
@@ -256,14 +257,15 @@ socketrpc-gen <path> [options]
 -   `-t, --timeout <ms>`: Default timeout in milliseconds for RPC calls that expect a response. This can be overridden per-call. (Default: "5000")
 -   `-l, --error-logger <path>`: Custom error logger import path (e.g., '@/lib/logger'). The module must default-export `(message: string, ...args: unknown[]) => void`. By default uses `console.error`.
 -   `-e, --error-mode <mode>`: How call methods surface failures — `return` the `RpcError` (default, check with `isRpcError`) or `throw` it (use `try/catch`).
--   `-c, --client <languages>`: Language of the generated client — `typescript` or `go` — or a comma-separated list of distinct languages, such as `typescript,go`, to generate a client in each from one run. An unknown language or one listed twice is refused. (Default: "typescript")
--   `-s, --server <language>`: Language of the generated server — `typescript` or `go`. Takes one language. (Default: "typescript")
+-   `-c, --client <languages>`: Language of the generated client — `typescript`, `go` or `rust` — or a comma-separated list of distinct languages, such as `typescript,go`, to generate a client in each from one run. An unknown language or one listed twice is refused. (Default: "typescript")
+-   `-s, --server <language>`: Language of the generated server — `typescript`, `go` or `rust`. Takes one language. (Default: "typescript")
 -   `--go-package <name>`: Go package clause of the Go types package and the Go server. (Default: "rpc")
 -   `--go-out <dir>`: Directory of the Go types package and the Go server. A Go client without `--go-client-out` is written here too. (Default: the input file's directory)
 -   `--go-socket-import <path>`: Go Socket.IO server import path the Go server is written against. (Default: "github.com/nguyenvanduocit/socketrpc-gen/go/socketio/servers/socket")
 -   `--go-client-out <dir>`: Directory of a Go client in its own package, importing the types in `--go-out`. Required when `--client` includes `go` and `--server` is `go`, refused otherwise. Must be a different directory from `--go-out`, compared after resolving symlinks and ignoring case, since Go refuses two import paths that differ only in case.
 -   `--go-client-package <name>`: Go package clause of the client in `--go-client-out`. Required with `--go-client-out`, and must differ from `--go-package`.
 -   `--go-client-socket-import <path>`: Go Socket.IO client import path the Go client is written against. (Default: "github.com/nguyenvanduocit/socketrpc-gen/go/socketio/clients/socket")
+-   `--rust-out <dir>`: Directory of the generated Rust module (`mod.rs`, `types.rs`, and `server.rs` / `client.rs` for each Rust side). (Default: the input file's directory)
 -   `-w, --watch`: Watch for changes in the definition file and regenerate every output automatically. (Default: false)
 -   `-h, --help`: Display help for command.
 
@@ -982,6 +984,130 @@ that shares the types package also reserves the declaration names
 but `--go-package` must not be a name its file already uses (`context`, `errors`,
 `fmt`, `json`, `reflect`, `sync`, `time`, `url`, `sioclient`, a predeclared Go
 identifier, or a name starting with `rpc_`). `--error-mode` applies to the TypeScript client only.
+
+## Rust
+
+Either side, or both, can be Rust. `--server rust` generates a server on
+[socketioxide](https://github.com/totodore/socketioxide); `--client rust` generates
+a client on `socketrpc-socketio-client`, the Socket.IO client this repository
+carries under [`rust/socketio-client`](./rust/socketio-client). Each pairs with
+any other language on the other side.
+
+```bash
+# Rust server and Rust client, plus the TypeScript client for a web app
+bunx socketrpc-gen ./define.ts --client typescript,rust --server rust --rust-out ./src/rpc
+```
+
+`--rust-out` is one module directory, mounted with `mod rpc;`:
+
+| File | Contents |
+| --- | --- |
+| `mod.rs` | declares the modules below, re-exports the contract types, lists the Cargo dependencies |
+| `types.rs` | the contract's structs and enums, `RpcError`, `RpcErrorCode`, `Unsubscribe` |
+| `server.rs` | with `--server rust`: `ServerHandler`, `bind_server`, `ServerBinding`, `Context`, `Client` |
+| `client.rs` | with `--client rust`: `ClientHandler`, `dial`, `DialOptions`, `Conn`, `Context` |
+
+Both sides share `types.rs`, so a server and a client in one crate share one set of types.
+The Rust backend accepts the same portable subset as the [Go backend](#what-the-go-backend-accepts).
+A contract method `createRoom` is answered by `handle_create_room` and called as
+`call_create_room`. Wire names are unchanged.
+
+### Types
+
+| TypeScript | Rust |
+| --- | --- |
+| `string` / `number` / `boolean` | `String` / `f64` / `bool` |
+| `T[]` / `Record<string, T>` | `Vec<T>` / `HashMap<String, T>` |
+| `"a" \| "b"` (named) | an enum, `Copy`, each variant renamed to its literal |
+| `x?: T` | `Option<T>`, left out of the JSON when `None` |
+| `x: T \| null` | `Option<T>`, written as `null` when `None` |
+| `x?: T \| null` | `Option<Option<T>>`: `None` omitted, `Some(None)` null |
+| `unknown` | `serde_json::Value` |
+
+Fields are snake_case and renamed back to their wire names (`roomId` → `room_id`,
+`type` → `r#type`). A struct that reaches itself through optional fields is
+boxed there (`parent?: Task` → `Option<Box<Task>>`); a cycle with no optional,
+nullable, array or record hop has no finite size and is refused.
+
+### Server
+
+```rust
+use std::sync::Arc;
+use socketioxide::{extract::SocketRef, SocketIo};
+use rpc::server::{bind_server, Context, ServerHandler};
+use rpc::{ChatRoom, RpcError, Visibility};
+
+struct Chat;
+
+impl ServerHandler for Chat {
+    async fn handle_create_room(&self, ctx: Context, topic: String, visibility: Visibility) -> Result<ChatRoom, RpcError> {
+        let _ = ctx.client().call_confirm_leave("lobby").await; // call the client back
+        Ok(ChatRoom { id: "r1".into(), topic, member_count: 1.0, visibility })
+    }
+    // …one handle_* per ServerFunctions method
+}
+
+let chat = Arc::new(Chat);
+let (layer, io) = SocketIo::new_layer();
+io.ns("/", move |socket: SocketRef| {
+    // Bind before the first `.await`: no event can arrive before the listeners.
+    let binding = bind_server(&socket, Arc::clone(&chat));
+    let _ = binding.on_rpc_error(|error| eprintln!("client reported {error}"));
+    async {}
+});
+```
+
+A handler fails a call by returning `Err(RpcError::new("NOT_FOUND", "no such room"))`;
+a panic answers `INTERNAL_ERROR`. The binding owns the socket's disconnect handler
+(socketioxide keeps one per socket), observes it through `binding.on_disconnect`,
+and disposes itself when the socket goes. `Context::cancelled()` resolves at that point.
+
+### Client
+
+```rust
+use rpc::client::{dial, ClientHandler, Context, DialOptions};
+
+struct Member;
+
+impl ClientHandler for Member {
+    async fn handle_confirm_leave(&self, _ctx: Context, room_id: String) -> Result<bool, RpcError> {
+        Ok(true)
+    }
+    // …one handle_* per ClientFunctions method
+}
+
+let mut options = DialOptions::new("https://chat.example.com");
+options.auth = Some(serde_json::json!({ "token": token }));
+let conn = dial(options, Arc::new(Member)).await?;
+let room = conn.call_create_room("rust", Visibility::Public).await?;
+conn.call_typing(&room.id)?; // fire-and-forget: no await
+let quick = conn.with_timeout(Duration::from_millis(200));
+```
+
+The client speaks Socket.IO over WebSocket only (every Socket.IO v4 server accepts
+that unless configured for polling only). For `wss://`, enable the
+`rustls` or `native-tls` feature of `socketrpc-socketio-client`. It behaves like the
+[Go client](#go-client):
+
+- `dial` returns once the namespace accepted the socket. A refusal returns at once as
+  `DISCONNECTED` with the server's message; an unreachable server is retried until
+  you drop the future (wrap it in `tokio::time::timeout` to bound it).
+- A call made while disconnected fails at once with `DISCONNECTED` and is never sent
+  later; a call in flight fails the moment its connection drops. Reconnects follow
+  `reconnect` / `reconnect_delay` / `reconnect_delay_max`, except after a server-side
+  disconnect or a refusal.
+- `on_connect` observes reconnects (not the first connection), `on_disconnect` drops
+  with socket.io-client's reasons, `on_rpc_error` the server's fire-and-forget failures.
+  A handler's `Context` is cancelled when the connection its call arrived on drops.
+- A call larger than the server's advertised `maxPayload` fails with `INVALID_ARGUMENT`
+  and nothing sent, instead of making the server close the connection.
+- The connection is disposed when the last `Conn` that `dial` returned is dropped, or on
+  `conn.dispose()`; later calls fail with `DISPOSED`.
+
+On both sides, same-method calls are handled one at a time in arrival order, and a slow
+handler stalls only its own method. `examples/07-rust` runs both sides in one binary;
+`tests/rust-crosslang.integration.test.ts` drives the Rust client and server against
+each other and against the TypeScript client and server.
 
 ## How It Works
 

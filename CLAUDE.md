@@ -15,10 +15,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `bun run index.ts ./examples/00-full-app/pkg/rpc/define.ts --package-name "my-rpc" --timeout 3000`
 - `bun run index.ts ./examples/05-go-server/define.ts --client typescript --server go --go-out ./examples/05-go-server/rpc` - TypeScript client + Go server
 - `bun run generate:go-client-example` - Go client + Go server into `examples/06-go-client/{wire,wireclient}`
+- `bun run generate:rust-example` - Rust client + Rust server into `examples/07-rust/src/rpc`
 
 ### Verification Commands
 - `bun run check` - typecheck then run the full suite
-- `bun test` - full suite (includes Go compile, `go test -race`, and cross-language integration; requires the `go` toolchain)
+- `bun test` - full suite (includes Go compile, `go test -race`, `cargo build`/`clippy`, and cross-language integration; requires the `go` and `cargo` toolchains)
+- `cargo test` and `cargo clippy --all-targets -- -D warnings` in `rust/socketio-client` - the Rust client transport's own suite
 - `bun run generate:examples` - regenerate every example, then diff to spot drift
 
 ### Package boundary
@@ -107,7 +109,7 @@ This is a TypeScript code generator for Socket.IO RPC packages. The tool generat
 
 ### Multi-Language Generation
 
-`--client <lang>` and `--server <lang>` select the backends; both default to `typescript`,
+`--client <lang>` and `--server <lang>` select the backends (`typescript`, `go`, `rust`); both default to `typescript`,
 so existing invocations are unchanged. `--client` also takes a comma-separated list of distinct
 languages (`--client typescript,go`) and writes a client in each from one run, every file byte for
 byte what the single-client run writes (`tests/cli-targets.test.ts`); `--server` takes one.
@@ -242,6 +244,55 @@ Behaviour parity worth knowing:
   (`go build`, `go vet` with no exclusions, `gofmt`) or is refused by name. It also pins the Go
   1.26 `stdmethods` family as a corpus, driving every canonical name through both method
   channels and asserting the generated shape is disjoint from it.
+
+### Rust Backend (`src/rust/`)
+
+`--server rust` / `--client rust` write one module directory, `--rust-out` (default the input
+file's directory): `mod.rs`, `types.rs`, and `server.rs` / `client.rs` per Rust side. Each side is
+its own module, so both live in one directory and share `types.rs`; there is no layout rule like
+Go's. `src/emit-rust.ts` is the imperative shell; everything under `src/rust/` is pure.
+
+- `names.ts` - UpperCamelCase types/variants (acronyms folded), snake_case fields/params/methods,
+  `r#` for keywords, `_` suffix for `self`/`super`/`crate`/`Self`. A derivation never yields `__`
+  or a leading `_`.
+- `project.ts` - the single projection of `TypeRef` onto Rust: owned types for structs and
+  handlers, borrowed (`&str`, `&[T]`, `&T`, `Copy` by value) for `call_*` parameters. Optional
+  → `Option<T>` + `skip_serializing_if`, nullable → `Option<T>`, both → `Option<Option<T>>`
+  through `rpc_double_option`. `Option` is no indirection in Rust, so an optional/nullable field
+  whose object type leads back to its owner by value is `Option<Box<T>>` (`isBoxedField`); a
+  cycle with no such hop is refused (`unboxedCycle`).
+- `validate.ts` - the Go backend's portable subset, refused by path with the fix named. Contract
+  type names may not collide with the generated API or the prelude names the generated code
+  spells unqualified (`RESERVED_TYPE_NAMES`); `ctx` is the only refused parameter name.
+- `emit-types.ts` / `emit-server.ts` / `emit-client.ts` - generated bodies declare only fixed
+  words and reach helpers by path (`rpc_runtime::`, `super::types::`, `::serde_json::`) or as
+  methods on `self`, so no contract name can shadow them. Private runtime lives in a nested
+  `mod rpc_runtime` per file. Contract methods are `handle_<name>` / `call_<name>`.
+
+Server (`server.rs`, socketioxide 0.18): `bind_server(&socket, Arc<H>)` registers one listener
+per method whose synchronous body only enqueues (socketioxide calls it in arrival order), with one
+worker task per method — per-method ordering, like Go. A custom `FromMessageParts` extractor reads
+the raw argument list and the ack id, because socketioxide's `Data` reads only the first argument
+and `AckSender` hides whether an ack was requested. Outbound arguments are serialized as a tuple,
+which socketioxide spreads into separate arguments. The binding owns the socket's one disconnect
+handler and fans it out through `on_disconnect`; it disposes itself on disconnect, which ends the
+workers and breaks the socket → listener → worker → binding → socket cycle.
+
+Client (`client.rs`): written against `rust/socketio-client` (crate `socketrpc-socketio-client`),
+the Socket.IO client this repository owns, as it owns `go/socketio`. `rust_socketio` cannot
+answer a server's ack, and it and its fork `tf-rust-socketio` draw ack ids at random from 0..999
+and spawn a task per packet. The transport delivers events in order on one channel, numbers acks
+per socket, refuses sends while disconnected (never buffers), binds an inbound ack to its
+session, refuses frames over the server's `maxPayload`, and reconnects except after a server
+disconnect or a refusal. A transport bug is fixed there, with a test, never in generated code.
+`dial` → `Conn`; the last owning `Conn` dropped disposes the connection, and the `Conn` a handler
+receives through `Context` is non-owning.
+
+Coverage: `tests/rust-emitter.test.ts` (spelling and refusals, no cargo);
+`tests/rust-crosslang.integration.test.ts` generates `tests/fixtures/rust-crosslang` through the
+CLI into a copy of its crate, builds it `--locked`, runs clippy with `-D warnings`, and drives the
+Rust client against the Rust and TypeScript servers and the TypeScript client against the Rust
+server. Cargo builds share `.test-tmp/cargo-target`.
 
 ### Interface Requirements
 - Must define `ClientFunctions` and `ServerFunctions` interfaces

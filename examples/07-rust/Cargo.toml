@@ -1,0 +1,14 @@
+[package]
+name = "socketrpc-example-rust"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socketioxide = "0.18"
+# Outside this repository: { git = "https://github.com/nguyenvanduocit/socketrpc-gen" }
+socketrpc-socketio-client = { path = "../../rust/socketio-client" }
+tokio = { version = "1", features = ["full"] }

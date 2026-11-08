@@ -1,5 +1,12 @@
 # Changelog
 
+## [9.1.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v9.0.0...v9.1.0) (2026-11-08)
+
+
+### Features
+
+* generate a Rust server and a Rust client ([#50](https://github.com/nguyenvanduocit/socketrpc-gen/issues/50)) ([7406180](https://github.com/nguyenvanduocit/socketrpc-gen/commit/7406180dbaccfb0260a53096ab034a08cb6748fd))
+
 ## [9.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v8.1.0...v9.0.0) (2026-11-04)
 
 

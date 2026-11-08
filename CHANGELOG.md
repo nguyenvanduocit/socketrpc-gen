@@ -9,7 +9,7 @@
 
 ### Features
 
-* tagged unions, [@int](https://github.com/int) integers, and a boxed RpcError.data in Rust ([#52](https://github.com/nguyenvanduocit/socketrpc-gen/issues/52)) ([c2cd078](https://github.com/nguyenvanduocit/socketrpc-gen/commit/c2cd078bbaafeef31d38d6634512a1780f5ad6bb))
+* tagged unions, `@int` integers, and a boxed RpcError.data in Rust ([#52](https://github.com/nguyenvanduocit/socketrpc-gen/issues/52)) ([c2cd078](https://github.com/nguyenvanduocit/socketrpc-gen/commit/c2cd078bbaafeef31d38d6634512a1780f5ad6bb))
 
 ## [9.1.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v9.0.0...v9.1.0) (2026-11-08)
 

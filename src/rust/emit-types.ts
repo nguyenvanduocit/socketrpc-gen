@@ -3,7 +3,13 @@
  * conversions both Rust sides share.
  */
 
-import type { ObjectTypeDeclaration, RpcSchema, StringEnumTypeDeclaration } from "../schema";
+import type {
+  DiscriminatedUnionTypeDeclaration,
+  ObjectField,
+  ObjectTypeDeclaration,
+  RpcSchema,
+  StringEnumTypeDeclaration,
+} from "../schema";
 import { RPC_ERROR_EVENT } from "../types";
 import { rustTypeName, rustValueIdentifier } from "./names";
 import { enumVariantName, isBoxedField, renderRustType, unwrapOptionality, type DeclarationScope } from "./project";
@@ -96,8 +102,11 @@ pub struct RpcError {
     pub message: String,
     /// The RPC method the error originated in.
     pub method: Option<String>,
-    /// Optional error-specific payload.
-    pub data: Option<::serde_json::Value>,
+    /// Optional error-specific payload. Boxed so ${"`"}RpcError${"`"} stays small in every
+    /// ${"`"}Err${"`"} whatever serde_json's features make a ${"`"}Value${"`"} weigh
+    /// (${"`"}preserve_order${"`"} more than doubles it), keeping callers clear of
+    /// ${"`"}clippy::result_large_err${"`"}.
+    pub data: Option<Box<::serde_json::Value>>,
 }
 
 impl RpcError {
@@ -115,7 +124,7 @@ impl RpcError {
     }
 
     pub fn with_data(mut self, data: ::serde_json::Value) -> Self {
-        self.data = Some(data);
+        self.data = Some(Box::new(data));
         self
     }
 
@@ -157,7 +166,7 @@ struct RpcErrorWire {
 
 impl From<RpcError> for RpcErrorWire {
     fn from(error: RpcError) -> Self {
-        Self { brand: true, code: error.code, message: error.message, method: error.method, data: error.data }
+        Self { brand: true, code: error.code, message: error.message, method: error.method, data: error.data.map(|data| *data) }
     }
 }
 
@@ -168,7 +177,7 @@ impl TryFrom<RpcErrorWire> for RpcError {
         if !wire.brand {
             return Err("not an RpcError: __rpcError is not true");
         }
-        Ok(Self { code: wire.code, message: wire.message, method: wire.method, data: wire.data })
+        Ok(Self { code: wire.code, message: wire.message, method: wire.method, data: wire.data.map(Box::new) })
     }
 }
 
@@ -303,9 +312,19 @@ function emitEnum(declaration: StringEnumTypeDeclaration): string[] {
   ];
 }
 
-function emitObject(declaration: ObjectTypeDeclaration, declarations: DeclarationScope): string[] {
-  const name = rustTypeName(declaration.name);
-  const fields = declaration.fields.flatMap((field) => {
+/**
+ * The field lines of a struct (`pub`), or of a struct-like enum variant (whose
+ * fields Rust gives no visibility of their own), owned by the declaration `owner`.
+ */
+function emitFields(
+  owner: string,
+  fields: readonly ObjectField[],
+  declarations: DeclarationScope,
+  layout: { indent: string; pub: boolean },
+): string[] {
+  const { indent } = layout;
+  const visibility = layout.pub ? "pub " : "";
+  return fields.flatMap((field) => {
     const rustName = rustValueIdentifier(field.name);
     const { core, optional, nullable } = unwrapOptionality(field.type);
     const attributes: string[] = [];
@@ -319,13 +338,48 @@ function emitObject(declaration: ObjectTypeDeclaration, declarations: Declaratio
       attributes.push(`default, skip_serializing_if = "Option::is_none"`);
     }
     return [
-      ...(attributes.length > 0 ? [`    #[serde(${attributes.join(", ")})]`] : []),
-      `    pub ${rustName}: ${renderRustType(field.type, isBoxedField(declaration.name, field, declarations))},`,
+      ...(attributes.length > 0 ? [`${indent}#[serde(${attributes.join(", ")})]`] : []),
+      `${indent}${visibility}${rustName}: ${renderRustType(field.type, isBoxedField(owner, field, declarations))},`,
     ];
   });
+}
+
+function emitObject(declaration: ObjectTypeDeclaration, declarations: DeclarationScope): string[] {
+  const name = rustTypeName(declaration.name);
+  const fields = emitFields(declaration.name, declaration.fields, declarations, { indent: "    ", pub: true });
   return [
     "#[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]",
     ...(fields.length === 0 ? [`pub struct ${name} {}`] : [`pub struct ${name} {`, ...fields, "}"]),
+  ];
+}
+
+/**
+ * An internally tagged enum: on the wire, the variant's fields beside the tag
+ * property, exactly as TypeScript writes a member of the union.
+ */
+function emitUnion(declaration: DiscriminatedUnionTypeDeclaration, declarations: DeclarationScope): string[] {
+  const name = rustTypeName(declaration.name);
+  const variants = declaration.variants.flatMap((variant) => {
+    const variantName = enumVariantName(variant.tag);
+    const fields = emitFields(declaration.name, variant.fields, declarations, { indent: "        ", pub: false });
+    return [
+      `    #[serde(rename = ${JSON.stringify(variant.tag)})]`,
+      ...(fields.length === 0 ? [`    ${variantName},`] : [`    ${variantName} {`, ...fields, "    },"]),
+    ];
+  });
+  return [
+    docLine(
+      `Tagged by ${JSON.stringify(declaration.tag)}: one of ${declaration.variants.map((variant) => JSON.stringify(variant.tag)).join(", ")}.`,
+    ),
+    "#[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]",
+    // The contract fixes each variant's fields, and their size depends on serde_json's
+    // features (`preserve_order` more than doubles a Value), so the user has no layout
+    // to change. The allowance sits on the type alone; it reaches none of the user's code.
+    "#[allow(clippy::large_enum_variant)]",
+    `#[serde(tag = ${JSON.stringify(declaration.tag)})]`,
+    `pub enum ${name} {`,
+    ...variants,
+    "}",
   ];
 }
 
@@ -336,6 +390,8 @@ export function emitTypesFile(schema: RpcSchema, declarations: DeclarationScope)
         return emitEnum(declaration);
       case "object":
         return emitObject(declaration, declarations);
+      case "union":
+        return emitUnion(declaration, declarations);
       case "alias":
         return [`pub type ${rustTypeName(declaration.name)} = ${renderRustType(declaration.target)};`];
     }

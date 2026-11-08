@@ -575,6 +575,7 @@ when it refuses one:
 | Accepted | Becomes in Go |
 | --- | --- |
 | `string` / `number` / `boolean` | `string` / `float64` / `bool` |
+| a `/** @int */` number alias | `int64`; see [Integers](#integers) |
 | named `type`/`interface` object | an exported struct with JSON tags |
 | named string-literal union | a string enum with `Valid`/`MarshalJSON`/`UnmarshalJSON` |
 | `T[]`, `Record<string, T>` | `[]T`, `map[string]T` |
@@ -588,7 +589,7 @@ named string union included: `verified?: boolean` becomes `*bool`, and
 on the wire; only a nil pointer is absent.
 
 Refused, with the fix named in the error: inline object literals, inline string
-unions, ambient host types (`Error`, `Date`, `Map`), tuples, intersections,
+unions, discriminated unions (Rust and TypeScript only; see [Rust types](#types)), ambient host types (`Error`, `Date`, `Map`), tuples, intersections,
 generics, `any`, and optional *positional* parameters — an omitted trailing
 argument is indistinguishable from a Socket.IO ack callback.
 
@@ -605,6 +606,30 @@ the value until the receiver narrows it.
 
 Identifiers are derived idiomatically, so no per-field overrides are needed:
 `id` → `ID`, `roomId` → `RoomID`, `apiUrl` → `APIURL`.
+
+### Integers
+
+A JSON number is a `float64` in Go and an `f64` in Rust. Mark a `number` alias
+`@int` and every use of it is a 64-bit integer instead: `int64` in Go, `i64` in Rust.
+TypeScript still sees `number`.
+
+```typescript
+/** @int */
+export type Money = number;
+
+export type Order = { total: Money; tip?: Money; lines: Money[]; ratio: number };
+```
+
+`total` becomes `int64` / `i64`, `tip` `*int64` / `Option<i64>`, `lines` `[]int64` /
+`Vec<i64>`, and `ratio` stays a float. The alias works inside arrays, records,
+`| null`, optional fields, through an import, and through a plain alias of it
+(`type Cents = Money`). A fractional argument such as `1.5` never reaches a Go or
+Rust handler: the call fails with `INVALID_ARGUMENT`.
+
+The marker goes on the alias only. `@int` on a field or an interface, on an alias that
+is not exactly `number` (write `Money | null` at the use site instead), or an
+integer-like misspelling such as `@int64` or `@integer`, is refused as
+`UNSUPPORTED_INT_TAG` instead of being ignored. Other JSDoc tags are left alone.
 
 ### JSON values
 
@@ -1008,7 +1033,8 @@ bunx socketrpc-gen ./define.ts --client typescript,rust --server rust --rust-out
 | `client.rs` | with `--client rust`: `ClientHandler`, `dial`, `DialOptions`, `Conn`, `Context` |
 
 Both sides share `types.rs`, so a server and a client in one crate share one set of types.
-The Rust backend accepts the same portable subset as the [Go backend](#what-the-go-backend-accepts).
+The Rust backend accepts the same portable subset as the [Go backend](#what-the-go-backend-accepts),
+plus named discriminated unions.
 A contract method `createRoom` is answered by `handle_create_room` and called as
 `call_create_room`. Wire names are unchanged.
 
@@ -1017,17 +1043,47 @@ A contract method `createRoom` is answered by `handle_create_room` and called as
 | TypeScript | Rust |
 | --- | --- |
 | `string` / `number` / `boolean` | `String` / `f64` / `bool` |
+| a `/** @int */` number alias | `i64`; see [Integers](#integers) |
 | `T[]` / `Record<string, T>` | `Vec<T>` / `HashMap<String, T>` |
 | `"a" \| "b"` (named) | an enum, `Copy`, each variant renamed to its literal |
 | `x?: T` | `Option<T>`, left out of the JSON when `None` |
 | `x: T \| null` | `Option<T>`, written as `null` when `None` |
 | `x?: T \| null` | `Option<Option<T>>`: `None` omitted, `Some(None)` null |
 | `unknown` | `serde_json::Value` |
+| `{ kind: "a"; x: T } \| { kind: "b" }` (named) | an enum tagged by `kind`: `A { x: T }`, `B` |
 
 Fields are snake_case and renamed back to their wire names (`roomId` → `room_id`,
 `type` → `r#type`). A struct that reaches itself through optional fields is
 boxed there (`parent?: Task` → `Option<Box<Task>>`); a cycle with no optional,
 nullable, array or record hop has no finite size and is refused.
+
+A named union of object types is a discriminated union when every member has one
+required property whose type is a string literal no other member uses. Members may
+be object literals or named interfaces and aliases. It becomes an internally tagged
+enum, so the JSON is exactly what TypeScript writes:
+
+```typescript
+export type DraftResult =
+  | { kind: "ready"; item: Item }
+  | { kind: "needPhoto"; spoken: string };
+```
+
+```rust
+#[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
+#[serde(tag = "kind")]
+pub enum DraftResult {
+    #[serde(rename = "ready")]
+    Ready { item: Item },
+    #[serde(rename = "needPhoto")]
+    NeedPhoto { spoken: String },
+}
+```
+
+Variant fields follow the struct rules above. A variant with no field besides the tag
+is a unit variant. When several properties qualify as the tag, the first in the
+first member wins. A union with no such property, or with two members sharing a tag
+value, is refused as `UNSUPPORTED_UNION_TYPE` with the reason. The Go backend
+refuses discriminated unions by name.
 
 ### Server
 
@@ -1058,7 +1114,10 @@ io.ns("/", move |socket: SocketRef| {
 ```
 
 A handler fails a call by returning `Err(RpcError::new("NOT_FOUND", "no such room"))`;
-a panic answers `INTERNAL_ERROR`. The binding owns the socket's disconnect handler
+a panic answers `INTERNAL_ERROR`. `.with_data(json!({ ... }))` attaches a payload, which
+a caller reads as `error.data.as_deref()`: the field is an `Option<Box<Value>>`, so
+`RpcError` stays 80 bytes whatever serde_json's features make a `Value` weigh, and a
+function returning `Result<_, RpcError>` never trips `clippy::result_large_err`. The binding owns the socket's disconnect handler
 (socketioxide keeps one per socket), observes it through `binding.on_disconnect`,
 and disposes itself when the socket goes. `Context::cancelled()` resolves at that point.
 

@@ -51,6 +51,11 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[features]
+# serde_json's preserve_order makes a Value an IndexMap, more than doubling its
+# size: the generated code must stay clippy-clean either way.
+preserve_order = ["serde_json/preserve_order"]
+
 [dependencies]
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -88,6 +93,10 @@ const build = cargo(["build", "--locked", "--bins"], "cargo build");
 if (!build.ok) throw new Error(`cargo build failed:\n${build.output}`);
 // -D warnings over the generated module and the program consuming it.
 const clippy = cargo(["clippy", "--locked", "--bins", "--", "-D", "warnings"], "cargo clippy");
+const clippyPreserveOrder = cargo(
+  ["clippy", "--locked", "--bins", "--features", "preserve_order", "--", "-D", "warnings"],
+  "cargo clippy --features preserve_order",
+);
 
 const binDir = join(CARGO_TARGET_DIR, "debug");
 const rustServer = Bun.spawn([join(binDir, "server")], { stdout: "pipe", stderr: "inherit" });
@@ -110,8 +119,21 @@ async function runRustClient(url: string): Promise<Map<string, { ok: boolean; de
   return checks;
 }
 
+/**
+ * The wire form of every `Outcome` variant, as TypeScript writes it. The Rust
+ * server answers `outcome(kind)` with `sample_outcome` in the crate's lib.rs,
+ * which must serialize to exactly these objects.
+ */
+const OUTCOMES: Record<string, unknown> = {
+  ready: { kind: "ready", priority: "in-progress", stepCount: 3, note: "n" },
+  needPhoto: { kind: "needPhoto", spoken: "one more angle", due: null },
+  wrapped: { kind: "wrapped", inner: { kind: "empty" }, owner: null },
+  empty: { kind: "empty" },
+  raw: { kind: "raw", first: { x: 1 }, second: [1, "two"], third: null },
+};
+
 const RUST_CLIENT_CHECKS = [
-  "echo_task", "add", "fail", "crash", "timeout", "ordering", "concurrent", "explode",
+  "echo_task", "outcome", "echo_outcome", "double", "add", "fail", "crash", "timeout", "ordering", "concurrent", "explode",
   "relay", "relay_refused", "push_notify", "server_disconnect", "dispose",
 ];
 
@@ -128,6 +150,12 @@ ioServer.on("connection", (socket) => {
   let lastClientError: string | null = null;
 
   rpc.handle.echoTask(async (task: unknown) => task);
+  rpc.handle.outcome(async (kind: string) => {
+    if (!(kind in OUTCOMES)) throw rpcError("INVALID_ARGUMENT", `unknown kind ${kind}`);
+    return OUTCOMES[kind];
+  });
+  rpc.handle.echoOutcome(async (outcome: unknown) => outcome);
+  rpc.handle.double(async (n: number) => n * 2);
   rpc.handle.add(async (a: number, b: number) => a + b);
   rpc.handle.fail(async (code: string) => {
     throw rpcError(code, `refused: ${code}`, { code });
@@ -223,6 +251,13 @@ describe("Rust backend generation", () => {
     expect(clippy.output).not.toContain("warning:");
     expect(clippy.ok).toBe(true);
   });
+
+  test("they still pass with serde_json's preserve_order, which more than doubles a Value", () => {
+    // A larger Value must not push RpcError past clippy::result_large_err, which
+    // would fire on every user function returning Result<_, RpcError>.
+    expect(clippyPreserveOrder.output).not.toContain("warning:");
+    expect(clippyPreserveOrder.ok).toBe(true);
+  });
 });
 
 describe("generated Rust client against the generated Rust server", () => {
@@ -264,6 +299,32 @@ describe("generated TypeScript client against the generated Rust server", () => 
   test("every Task shape survives the round trip, explicit null kept apart from omitted", async () => {
     const { rpc } = await connectTs();
     expect(await rpc.server.echoTask(task)).toEqual(task);
+  }, T);
+
+  test("every Outcome variant the Rust server builds is the JSON TypeScript writes", async () => {
+    const { rpc } = await connectTs();
+    for (const [kind, wire] of Object.entries(OUTCOMES)) {
+      // toStrictEqual: an omitted key must stay omitted, not arrive as null or undefined.
+      expect(await rpc.server.outcome(kind)).toStrictEqual(wire);
+      expect(await rpc.server.echoOutcome(wire)).toStrictEqual(wire);
+    }
+  }, T);
+
+  test("an Outcome whose tag names no variant is refused as INVALID_ARGUMENT", async () => {
+    const { rpc } = await connectTs();
+    const result = await rpc.server.echoOutcome({ kind: "unknown" });
+    expect(isRpcError(result)).toBe(true);
+    expect(result.code).toBe("INVALID_ARGUMENT");
+    expect(result.message).toContain("invalid argument outcome");
+  }, T);
+
+  test("an @int argument is an i64: a whole number is answered, a fraction refused as INVALID_ARGUMENT", async () => {
+    const { rpc } = await connectTs();
+    expect(await rpc.server.double(21)).toBe(42);
+    const fraction = await rpc.server.double(1.5);
+    expect(isRpcError(fraction)).toBe(true);
+    expect(fraction.code).toBe("INVALID_ARGUMENT");
+    expect(fraction.message).toContain("invalid argument n");
   }, T);
 
   test("a value outside the enum is refused as INVALID_ARGUMENT naming the argument", async () => {

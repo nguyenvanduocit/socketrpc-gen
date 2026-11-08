@@ -221,6 +221,18 @@ describe("generated TypeScript client against the generated Go server", () => {
   );
 
   test(
+    "an @int argument is an int64: a whole number is answered, a fraction refused as INVALID_ARGUMENT",
+    async () => {
+      const { rpc } = await connect();
+      expect(await rpc.server.double(21)).toBe(42);
+      const fraction = await rpc.server.double(1.5);
+      expect(isRpcError(fraction)).toBe(true);
+      if (isRpcError(fraction)) expect(fraction.code).toBe("INVALID_ARGUMENT");
+    },
+    T,
+  );
+
+  test(
     "a Go handler error arrives as a branded RpcError with its code, method and data",
     async () => {
       const { rpc } = await connect();

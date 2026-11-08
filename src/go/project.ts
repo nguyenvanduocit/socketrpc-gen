@@ -72,6 +72,8 @@ function renderCoreGoType(ref: TypeRef, qualifier: string): string {
           return "string";
         case "number":
           return "float64";
+        case "integer":
+          return "int64";
         case "boolean":
           return "bool";
       }

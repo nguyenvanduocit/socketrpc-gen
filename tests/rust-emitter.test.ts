@@ -96,9 +96,118 @@ describe("Rust spelling", () => {
     expect(client).toContain("    fn handle_ping(\n        &self,\n        ctx: Context,\n        text: String,\n    ) -> impl Future<Output = Result<(), RpcError>> + Send;");
   });
 
+  test("a client with nothing to handle declares its route table immutable", () => {
+    const outboundOnly = generateRust(schemaOf([], [{ name: "ping", direction: "client-to-server", params: [], returnType: VOID }]), {
+      client: true,
+    });
+    expect(outboundOnly["client.rs"]).toContain("    let routes = rpc_runtime::Routes::new();");
+    expect(files["client.rs"]).toContain("    let mut routes = rpc_runtime::Routes::new();");
+  });
+
   test("the default timeout reaches both callers", () => {
     expect(files["server.rs"]).toContain("Duration::from_millis(1234)");
     expect(files["client.rs"]).toContain("timeout: Duration::from_millis(1234),");
+  });
+});
+
+describe("discriminated unions", () => {
+  const union: TypeDeclaration = {
+    kind: "union",
+    name: "DraftResult",
+    tag: "kind",
+    variants: [
+      {
+        tag: "ready",
+        fields: [
+          { name: "stepCount", type: scalar("number") },
+          { name: "next", type: { kind: "optional", type: named("DraftResult") } },
+        ],
+      },
+      {
+        tag: "need-photo",
+        fields: [{ name: "due", type: { kind: "optional", type: { kind: "nullable", type: scalar("string") } } }],
+      },
+      { tag: "empty", fields: [] },
+    ],
+  };
+  const files = generateRust(
+    schemaOf([union], [{ name: "draft", direction: "client-to-server", params: [{ name: "result", type: named("DraftResult") }], returnType: named("DraftResult") }]),
+    { server: true, client: true },
+  );
+
+  test("an internally tagged enum: variants renamed to their literal, fields to their wire name", () => {
+    expect(files["types.rs"]).toContain(
+      [
+        '/// Tagged by "kind": one of "ready", "need-photo", "empty".',
+        "#[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]",
+        "#[allow(clippy::large_enum_variant)]",
+        '#[serde(tag = "kind")]',
+        "pub enum DraftResult {",
+        '    #[serde(rename = "ready")]',
+        "    Ready {",
+        '        #[serde(rename = "stepCount")]',
+        "        step_count: f64,",
+        '        #[serde(default, skip_serializing_if = "Option::is_none")]',
+        "        next: Option<Box<DraftResult>>,",
+        "    },",
+        '    #[serde(rename = "need-photo")]',
+        "    NeedPhoto {",
+        '        #[serde(default, skip_serializing_if = "Option::is_none", with = "rpc_double_option")]',
+        "        due: Option<Option<String>>,",
+        "    },",
+        '    #[serde(rename = "empty")]',
+        "    Empty,",
+        "}",
+      ].join("\n"),
+    );
+  });
+
+  test("handlers take the enum owned, callers lend it", () => {
+    expect(files["client.rs"]).toContain("pub async fn call_draft(&self, result: &DraftResult) -> Result<DraftResult, RpcError> {");
+    expect(files["server.rs"]).toContain("        result: DraftResult,\n    ) -> impl Future<Output = Result<DraftResult, RpcError>> + Send;");
+  });
+
+  test("a variant reaching its union through required fields alone is refused", () => {
+    expect(
+      refusal(
+        schemaOf([
+          { kind: "union", name: "U", tag: "kind", variants: [{ tag: "a", fields: [{ name: "o", type: named("O") }] }] },
+          { kind: "object", name: "O", fields: [{ name: "u", type: named("U") }] },
+        ]),
+      ),
+    ).toContain("U -> O -> U");
+  });
+
+  test("tags that derive one variant name, and an inline union", () => {
+    expect(
+      refusal(
+        schemaOf([{ kind: "union", name: "U", tag: "kind", variants: [{ tag: "a-b", fields: [] }, { tag: "a_b", fields: [] }] }]),
+      ),
+    ).toContain("both map to the Rust variant AB");
+    expect(
+      refusal(
+        schemaOf(
+          [],
+          [{ name: "go", direction: "client-to-server", params: [{ name: "a", type: { kind: "union", tag: "kind", variants: [] } }], returnType: VOID }],
+        ),
+      ),
+    ).toContain("inline discriminated unions");
+  });
+});
+
+describe("integers", () => {
+  test("an integer is an i64, owned and lent by value; a number stays f64", () => {
+    const integer = { kind: "scalar", name: "integer" } as const;
+    const files = generateRust(
+      schemaOf(
+        [{ kind: "object", name: "Order", fields: [{ name: "total", type: integer }, { name: "ratio", type: scalar("number") }] }],
+        [{ name: "double", direction: "client-to-server", params: [{ name: "n", type: integer }], returnType: integer }],
+      ),
+      { server: true, client: true },
+    );
+    expect(files["types.rs"]).toContain("    pub total: i64,\n    pub ratio: f64,");
+    expect(files["client.rs"]).toContain("pub async fn call_double(&self, n: i64) -> Result<i64, RpcError> {");
+    expect(files["server.rs"]).toContain("        n: i64,\n    ) -> impl Future<Output = Result<i64, RpcError>> + Send;");
   });
 });
 

@@ -81,8 +81,11 @@ pub struct RpcError {
     pub message: String,
     /// The RPC method the error originated in.
     pub method: Option<String>,
-    /// Optional error-specific payload.
-    pub data: Option<::serde_json::Value>,
+    /// Optional error-specific payload. Boxed so `RpcError` stays small in every
+    /// `Err` whatever serde_json's features make a `Value` weigh
+    /// (`preserve_order` more than doubles it), keeping callers clear of
+    /// `clippy::result_large_err`.
+    pub data: Option<Box<::serde_json::Value>>,
 }
 
 impl RpcError {
@@ -100,7 +103,7 @@ impl RpcError {
     }
 
     pub fn with_data(mut self, data: ::serde_json::Value) -> Self {
-        self.data = Some(data);
+        self.data = Some(Box::new(data));
         self
     }
 
@@ -142,7 +145,7 @@ struct RpcErrorWire {
 
 impl From<RpcError> for RpcErrorWire {
     fn from(error: RpcError) -> Self {
-        Self { brand: true, code: error.code, message: error.message, method: error.method, data: error.data }
+        Self { brand: true, code: error.code, message: error.message, method: error.method, data: error.data.map(|data| *data) }
     }
 }
 
@@ -153,7 +156,7 @@ impl TryFrom<RpcErrorWire> for RpcError {
         if !wire.brand {
             return Err("not an RpcError: __rpcError is not true");
         }
-        Ok(Self { code: wire.code, message: wire.message, method: wire.method, data: wire.data })
+        Ok(Self { code: wire.code, message: wire.message, method: wire.method, data: wire.data.map(Box::new) })
     }
 }
 

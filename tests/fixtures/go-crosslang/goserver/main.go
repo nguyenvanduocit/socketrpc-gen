@@ -125,6 +125,10 @@ func (h *handler) HandleDropWhileInFlight(ctx context.Context, _ string) (rpc.Ec
 
 // HandleReceipt returns a success that is shaped like an error. Without the
 // `__rpcError` brand the TypeScript side must still read it as a value.
+func (h *handler) HandleDouble(_ context.Context, n int64) (int64, error) {
+	return n * 2, nil
+}
+
 func (h *handler) HandleReceipt(_ context.Context, id string) (rpc.Receipt, error) {
 	return rpc.Receipt{Message: "receipt for " + id, Code: "PAID"}, nil
 }

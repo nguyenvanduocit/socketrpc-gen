@@ -466,7 +466,8 @@ export function emitClientFile(
     "/// `tokio::time::timeout` — dropping the future stops the retries.",
     "pub async fn dial<H: ClientHandler>(options: DialOptions, handler: Arc<H>) -> Result<Conn, RpcError> {",
     "    let (inner, events) = rpc_runtime::connect(&options).await?;",
-    "    let mut routes = rpc_runtime::Routes::new();",
+    // Only a registered handler writes to the table; `mut` on an empty one is an unused_mut warning.
+    `    let ${handled.length === 0 ? "" : "mut "}routes = rpc_runtime::Routes::new();`,
     ...(handled.length === 0 ? ["    drop(handler);"] : handled.flatMap((method) => emitListen(method, "&mut routes, &inner"))),
     "    rpc_runtime::start(Arc::clone(&inner), events, routes);",
     "    let owner = Arc::new(rpc_runtime::Owner(Arc::clone(&inner)));",

@@ -212,11 +212,141 @@ function unsupportedType(
   return { kind: "named", name: `__unsupported_${context.diagnostics.length}` };
 }
 
+/** The JSDoc tag marking a `number` alias whose values are integers on the wire. */
+const INT_TAG = "int";
+/** Tag names that read as an integer marker but are not `@int`: refused rather than silently ignored. */
+const INT_LIKE_TAG = /^(u?int(eger)?\d*|[iu]\d+)$/i;
+
+function jsDocTagNames(node: Node): string[] {
+  return Node.isJSDocable(node)
+    ? node.getJsDocs().flatMap((doc) => doc.getTags().map((tag) => tag.getTagName()))
+    : [];
+}
+
+function stripParentheses(node: Node | undefined): Node | undefined {
+  let current = node;
+  while (current && Node.isParenthesizedTypeNode(current)) current = current.getTypeNode();
+  return current;
+}
+
+/** The type alias a type reference names, following an import to its declaration. */
+function referencedTypeAlias(node: Node | undefined) {
+  const reference = stripParentheses(node);
+  if (!reference || !Node.isTypeReference(reference)) return undefined;
+  const symbol = reference.getTypeName().getSymbol();
+  const target = symbol?.isAlias() ? symbol.getAliasedSymbol() : symbol;
+  return target?.getDeclarations().find((declaration) => Node.isTypeAliasDeclaration(declaration));
+}
+
+/**
+ * Whether the author wrote an `@int` alias here, directly or through a plain
+ * alias of one (`type Cents = Money`). Misplaced or misspelt markers are
+ * reported by `reportIntTagMisuse`, not here.
+ */
+function namesIntAlias(typeNode: Node | undefined, seen: ReadonlySet<Node> = new Set()): boolean {
+  const alias = referencedTypeAlias(typeNode);
+  if (!alias || seen.has(alias) || alias.getTypeParameters().length > 0) return false;
+  if (jsDocTagNames(alias).includes(INT_TAG)) return alias.getType().isNumber();
+  return namesIntAlias(alias.getTypeNode(), new Set([...seen, alias]));
+}
+
+/**
+ * Reports every `@int` that would otherwise be ignored: on anything but a type
+ * alias, on an alias that is not `number`, and integer-like spellings that are
+ * not `@int`. Scans the contract's own files, whether or not a method reaches
+ * the declaration, since an alias of a primitive is invisible once resolved.
+ */
+function reportIntTagMisuse(sourceFiles: SourceFile[], context: SchemaParseContext): void {
+  for (const sourceFile of sourceFiles) {
+    sourceFile.forEachDescendant((node) => {
+      const tags = jsDocTagNames(node);
+      if (tags.length === 0) return;
+      const name = Node.hasName(node) ? node.getName() : node.getKindName();
+      const owner = node.getFirstAncestor(
+        (ancestor) => Node.isTypeAliasDeclaration(ancestor) || Node.isInterfaceDeclaration(ancestor),
+      );
+      const diagnosticPath =
+        owner && Node.hasName(owner) ? `declarations.${owner.getName()}.fields.${name}` : `declarations.${name}`;
+      for (const tag of tags) {
+        if (tag !== INT_TAG && INT_LIKE_TAG.test(tag)) {
+          addDiagnostic(
+            context,
+            "UNSUPPORTED_INT_TAG",
+            `Unknown tag '@${tag}' on '${name}'. The integer marker is '@${INT_TAG}', on a number alias: /** @${INT_TAG} */ type ${name} = number.`,
+            `@${tag}`,
+            node,
+            diagnosticPath,
+          );
+        }
+        if (tag !== INT_TAG) continue;
+        if (!Node.isTypeAliasDeclaration(node)) {
+          addDiagnostic(
+            context,
+            "UNSUPPORTED_INT_TAG",
+            `'@${INT_TAG}' marks a type alias only, not '${name}'. Declare /** @${INT_TAG} */ type Int = number and use Int here.`,
+            `@${tag}`,
+            node,
+            diagnosticPath,
+          );
+        } else if (node.getTypeParameters().length > 0 || !node.getType().isNumber()) {
+          addDiagnostic(
+            context,
+            "UNSUPPORTED_INT_TAG",
+            `'@${INT_TAG}' marks a number alias, but '${name}' is '${typeText(node.getType(), node)}'. Declare /** @${INT_TAG} */ type ${name} = number; write null or optional where the alias is used.`,
+            `@${tag}`,
+            node,
+            diagnosticPath,
+          );
+        }
+      }
+    });
+  }
+}
+
+/** The element node of `T[]`, `readonly T[]`, `Array<T>` or `ReadonlyArray<T>`. */
+function arrayElementNode(typeNode: Node | undefined): Node | undefined {
+  const node = stripParentheses(typeNode);
+  if (!node) return undefined;
+  if (Node.isArrayTypeNode(node)) return node.getElementTypeNode();
+  if (Node.isTypeOperatorTypeNode(node)) return arrayElementNode(node.getTypeNode());
+  if (Node.isTypeReference(node)) return node.getTypeArguments()[0];
+  return undefined;
+}
+
+/** The value node of `Record<string, T>` or `{ [key: string]: T }`. */
+function mapValueNode(typeNode: Node | undefined): Node | undefined {
+  const node = stripParentheses(typeNode);
+  if (!node) return undefined;
+  if (Node.isTypeReference(node)) return node.getTypeArguments()[1];
+  if (Node.isTypeLiteral(node)) return node.getIndexSignatures()[0]?.getReturnTypeNode();
+  return undefined;
+}
+
+/** The one member of `T | null | undefined` that is not null or undefined; the node itself when it is no union. */
+function soleValueNode(typeNode: Node | undefined): Node | undefined {
+  const node = stripParentheses(typeNode);
+  if (!node || !Node.isUnionTypeNode(node)) return node;
+  const values = node.getTypeNodes().filter((member) => {
+    const inner = stripParentheses(member);
+    if (inner?.getKind() === SyntaxKind.UndefinedKeyword) return false;
+    return !(inner && Node.isLiteralTypeNode(inner) && inner.getLiteral().getKind() === SyntaxKind.NullKeyword);
+  });
+  return values.length === 1 ? values[0] : undefined;
+}
+
+/** The return type node of `name: (...) => R` or `name(...): R`. */
+function returnTypeNode(member: MethodMember): Node | undefined {
+  if (Node.isMethodSignature(member)) return member.getReturnTypeNode();
+  const typeNode = member.getTypeNode();
+  return typeNode && Node.isFunctionTypeNode(typeNode) ? typeNode.getReturnTypeNode() : undefined;
+}
+
 function parseUnionType(
   type: Type,
   location: Node,
   context: SchemaParseContext,
   diagnosticPath: string,
+  typeNode: Node | undefined,
 ): TypeRef {
   const members = type.getUnionTypes();
   const hasUndefined = members.some((member) => member.isUndefined());
@@ -244,7 +374,7 @@ function parseUnionType(
   if (hasUndefined || hasNull) {
     const base = type.getNonNullableType();
     if (base.isBoolean() || getPortableNamedSymbol(base)) {
-      ref = parseTypeRef(base, location, context, diagnosticPath);
+      ref = parseTypeRef(base, location, context, diagnosticPath, typeNode);
       if (hasNull) ref = nullableType(ref);
       if (hasUndefined) ref = optionalType(ref);
       return ref;
@@ -255,21 +385,97 @@ function parseUnionType(
   if (enumValues) {
     ref = { kind: "enum", values: enumValues };
   } else if (valueMembers.length === 1) {
-    ref = parseTypeRef(valueMembers[0]!, location, context, diagnosticPath);
+    ref = parseTypeRef(valueMembers[0]!, location, context, diagnosticPath, soleValueNode(typeNode));
   } else {
-    return unsupportedType(
-      context,
-      "UNSUPPORTED_UNION_TYPE",
-      "Only unions of string literals, plus optional undefined and nullable null modifiers, are portable.",
-      type,
-      location,
-      diagnosticPath,
-    );
+    const union = discriminatedUnion(valueMembers, location, context, diagnosticPath);
+    if (typeof union === "string") {
+      return unsupportedType(
+        context,
+        "UNSUPPORTED_UNION_TYPE",
+        `Only unions of string literals, discriminated unions of object types (every member has one required property whose type is a string literal no other member uses), plus optional undefined and nullable null modifiers, are portable.${union}`,
+        type,
+        location,
+        diagnosticPath,
+      );
+    }
+    ref = union;
   }
 
   if (hasNull) ref = nullableType(ref);
   if (hasUndefined) ref = optionalType(ref);
   return ref;
+}
+
+/** An object type a discriminated union can hold as a member: named fields, nothing else. */
+function isPlainObjectMember(member: Type): boolean {
+  return (
+    member.isObject() &&
+    !member.isArray() &&
+    !member.isTuple() &&
+    member.getCallSignatures().length === 0 &&
+    !member.getStringIndexType() &&
+    !member.getNumberIndexType() &&
+    member.getTypeArguments().length === 0 &&
+    member.getAliasTypeArguments().length === 0
+  );
+}
+
+/** The string literal a member's required property `name` is typed as, if it is one. */
+function tagLiteral(member: Type, name: string): string | undefined {
+  const property = member.getProperty(name);
+  if (!property || property.isOptional()) return undefined;
+  const declaration = property.getDeclarations()[0];
+  const propertyType = declaration ? property.getTypeAtLocation(declaration) : property.getDeclaredType();
+  if (!propertyType.isStringLiteral()) return undefined;
+  const value = propertyType.getLiteralValue();
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * Reads `A | B | ...` as a discriminated union: every member a plain object
+ * type, all sharing one required property whose string literal differs in each.
+ * When several properties qualify, the first in the first member's order is the
+ * tag. Returns the reason, appended to the refusal, when the members cannot be
+ * told apart that way.
+ */
+function discriminatedUnion(
+  members: Type[],
+  location: Node,
+  context: SchemaParseContext,
+  diagnosticPath: string,
+): TypeRef | string {
+  if (!members.every(isPlainObjectMember)) return "";
+
+  const candidates = members[0]!
+    .getProperties()
+    .map((property) => property.getName())
+    .map((name) => ({ name, values: members.map((member) => tagLiteral(member, name)) }))
+    .filter((candidate): candidate is { name: string; values: string[] } =>
+      candidate.values.every((value) => value !== undefined),
+    );
+  if (candidates.length === 0) {
+    return " No property is required in every member with a string literal type, so the members cannot be told apart on the wire.";
+  }
+  const tag = candidates.find((candidate) => new Set(candidate.values).size === candidate.values.length);
+  if (!tag) {
+    const { name, values } = candidates[0]!;
+    const repeated = values.find((value, index) => values.indexOf(value) !== index);
+    return ` Two members share ${JSON.stringify(repeated)} as their '${name}', so the members cannot be told apart on the wire.`;
+  }
+
+  return {
+    kind: "union",
+    tag: tag.name,
+    variants: members.map((member, index) => {
+      const value = tag.values[index]!;
+      return {
+        tag: value,
+        fields: parseObjectFields(member, location, context, `${diagnosticPath}.variants.${value}`).filter(
+          (field) => field.name !== tag.name,
+        ),
+      };
+    }),
+  };
 }
 
 function stringEnumValuesFromMembers(members: Type[]): string[] | undefined {
@@ -295,17 +501,24 @@ function parseObjectFields(
       declaration,
       context,
       `${diagnosticPath}.fields.${property.getName()}`,
+      Node.isPropertySignature(declaration) ? declaration.getTypeNode() : undefined,
     );
     if (property.isOptional()) propertyType = optionalType(propertyType);
     return { name: property.getName(), type: propertyType };
   });
 }
 
+/**
+ * `typeNode` is what the author wrote for `type`, when the caller has it. It is
+ * the only place an `@int` alias is visible: TypeScript keeps no alias on a
+ * primitive, so `price: Money` reaches here as plain `number`.
+ */
 function parseTypeRef(
   type: Type,
   location: Node,
   context: SchemaParseContext,
   diagnosticPath: string,
+  typeNode: Node | undefined,
   ignoredSymbolKey?: string,
 ): TypeRef {
   if (type.isAny()) {
@@ -333,7 +546,7 @@ function parseTypeRef(
   }
   if (type.isVoid()) return { kind: "void" };
   if (type.isString()) return { kind: "scalar", name: "string" };
-  if (type.isNumber()) return { kind: "scalar", name: "number" };
+  if (type.isNumber()) return { kind: "scalar", name: namesIntAlias(typeNode) ? "integer" : "number" };
   if (type.isBoolean()) return { kind: "scalar", name: "boolean" };
   if (type.isNull()) return { kind: "null" };
   if (type.isUndefined()) {
@@ -363,6 +576,7 @@ function parseTypeRef(
           location,
           context,
           `${diagnosticPath}.element`,
+          arrayElementNode(typeNode),
         ),
       };
     }
@@ -407,6 +621,7 @@ function parseTypeRef(
         location,
         context,
         `${diagnosticPath}.element`,
+        arrayElementNode(typeNode),
       ),
     };
   }
@@ -429,6 +644,7 @@ function parseTypeRef(
         location,
         context,
         `${diagnosticPath}.value`,
+        mapValueNode(typeNode),
       ),
     };
   }
@@ -454,7 +670,7 @@ function parseTypeRef(
   }
 
   if (type.isUnion()) {
-    return parseUnionType(type, location, context, diagnosticPath);
+    return parseUnionType(type, location, context, diagnosticPath, typeNode);
   }
 
   if (type.getCallSignatures().length > 0) {
@@ -491,6 +707,7 @@ function parseTypeRef(
           location,
           context,
           `${diagnosticPath}.value`,
+          mapValueNode(typeNode),
         ),
       };
     }
@@ -702,6 +919,7 @@ function extractMethodFromMember(
       parameterDeclaration,
       context,
       `${direction}.${name}.params.${param.getName()}`,
+      Node.isParameterDeclaration(parameterDeclaration) ? parameterDeclaration.getTypeNode() : undefined,
     );
     if (param.isOptional()) structuredType = optionalType(structuredType);
     methodParams.push({ name: param.getName(), type: structuredType });
@@ -719,6 +937,7 @@ function extractMethodFromMember(
     member,
     context,
     `${direction}.${name}.returnType`,
+    returnTypeNode(member),
   );
 
   return {
@@ -813,6 +1032,7 @@ function parseNamedDeclaration(
     declaration,
     context,
     `declarations.${pending.name}`,
+    Node.isTypeAliasDeclaration(declaration) ? declaration.getTypeNode() : undefined,
     pending.key,
   );
 
@@ -821,6 +1041,9 @@ function parseNamedDeclaration(
   }
   if (target.kind === "enum") {
     return { kind: "enum", name: pending.name, values: target.values };
+  }
+  if (target.kind === "union") {
+    return { kind: "union", name: pending.name, tag: target.tag, variants: target.variants };
   }
   return { kind: "alias", name: pending.name, target };
 }
@@ -986,6 +1209,12 @@ export async function extractInterfacesFromFile(
     namedTypes: new Map(),
     namedTypeQueue: [],
   };
+  reportIntTagMisuse(
+    [sourceFile, ...sourceFile.getReferencedSourceFiles()].filter(
+      (file) => !file.isInNodeModules() && !file.isDeclarationFile(),
+    ),
+    schemaContext,
+  );
 
   // Interface names describe the side that implements each method. The schema
   // direction describes the side that initiates the call.

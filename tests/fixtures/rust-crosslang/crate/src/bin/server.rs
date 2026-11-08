@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rust_crosslang::rpc::server::{bind_server, Context, ServerHandler};
-use rust_crosslang::rpc::{RpcError, RpcErrorCode, Task};
+use rust_crosslang::rpc::{Outcome, RpcError, RpcErrorCode, Task};
+use rust_crosslang::sample_outcome;
 use serde_json::json;
 use socketioxide::extract::SocketRef;
 use socketioxide::SocketIo;
@@ -23,6 +24,18 @@ struct Handler {
 impl ServerHandler for Handler {
     async fn handle_echo_task(&self, _ctx: Context, task: Task) -> Result<Task, RpcError> {
         Ok(task)
+    }
+
+    async fn handle_outcome(&self, _ctx: Context, kind: String) -> Result<Outcome, RpcError> {
+        sample_outcome(&kind).ok_or_else(|| RpcError::invalid_argument(format!("unknown kind {kind}")))
+    }
+
+    async fn handle_echo_outcome(&self, _ctx: Context, outcome: Outcome) -> Result<Outcome, RpcError> {
+        Ok(outcome)
+    }
+
+    async fn handle_double(&self, _ctx: Context, n: i64) -> Result<i64, RpcError> {
+        Ok(n * 2)
     }
 
     async fn handle_add(&self, _ctx: Context, a: f64, b: f64) -> Result<f64, RpcError> {

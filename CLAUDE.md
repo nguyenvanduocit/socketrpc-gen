@@ -68,7 +68,12 @@ This is a TypeScript code generator for Socket.IO RPC packages. The tool generat
 
 **Canonical IR (`src/schema.ts`)**
 - `RpcSchema` is the single language-neutral representation of a contract: methods with a
-  direction, plus the named object/enum/alias declarations they reference.
+  direction, plus the named object/enum/union/alias declarations they reference. A `union` is
+  a discriminated union: object members told apart by one required string-literal property
+  (`discriminatedUnion` in `src/extract.ts`). The `integer` scalar is a `number` alias marked
+  `/** @int */`; TypeScript keeps no alias on a primitive, so `parseTypeRef` threads the type
+  node the author wrote beside the `Type` and `namesIntAlias` reads the marker from it.
+  `reportIntTagMisuse` refuses a misplaced or misspelt marker rather than ignoring it.
 - `src/extract.ts` produces it alongside the string signatures the TypeScript emitters use.
   TypeScript emission stays permissive (it reads only the strings, so it accepts anything
   TypeScript accepts); a contract the IR cannot model is reported through `diagnostics`
@@ -261,7 +266,9 @@ Go's. `src/emit-rust.ts` is the imperative shell; everything under `src/rust/` i
   through `rpc_double_option`. `Option` is no indirection in Rust, so an optional/nullable field
   whose object type leads back to its owner by value is `Option<Box<T>>` (`isBoxedField`); a
   cycle with no such hop is refused (`unboxedCycle`).
-- `validate.ts` - the Go backend's portable subset, refused by path with the fix named. Contract
+- `validate.ts` - the Go backend's portable subset plus named discriminated unions (an
+  internally tagged enum, `#[serde(tag = "...")]`; Go refuses them by name), refused by path
+  with the fix named. Contract
   type names may not collide with the generated API or the prelude names the generated code
   spells unqualified (`RESERVED_TYPE_NAMES`); `ctx` is the only refused parameter name.
 - `emit-types.ts` / `emit-server.ts` / `emit-client.ts` - generated bodies declare only fixed

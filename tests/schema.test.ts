@@ -732,3 +732,268 @@ describe("members of ClientFunctions and ServerFunctions", () => {
     TEST_TIMEOUT_MS,
   );
 });
+
+describe("discriminated unions", () => {
+  async function refusedUnion(source: string): Promise<SchemaExtractionError> {
+    const inputPath = createFixture({
+      "define.ts": `${source}
+        export interface ServerFunctions { get: () => Shape }
+        export interface ClientFunctions {}
+      `,
+    });
+    let caught: unknown;
+    try {
+      await extractRpcSchemaFromFile(inputPath);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(SchemaExtractionError);
+    const error = caught as SchemaExtractionError;
+    expect(error.diagnostics.map(({ code, location }) => [code, location.path])).toEqual([
+      ["UNSUPPORTED_UNION_TYPE", "declarations.Shape"],
+    ]);
+    return error;
+  }
+
+  test(
+    "a named union of object types sharing a string-literal tag becomes one declaration",
+    async () => {
+      const inputPath = createFixture({
+        "define.ts": `
+          export interface Item { id: string }
+          export interface Waiting { kind: "needPhoto"; spoken: string; due?: string | null }
+          export type DraftResult =
+            | { kind: "ready"; item: Item; next?: DraftResult }
+            | Waiting
+            | { kind: "empty" };
+          export interface ServerFunctions {
+            draft: (photo: string) => DraftResult;
+            maybe: () => DraftResult | null;
+          }
+          export interface ClientFunctions {}
+        `,
+      });
+      const extracted = await extractInterfacesFromFile(inputPath);
+      expect(extracted.diagnostics).toEqual([]);
+      const schema = extracted.schema!;
+      expect(schema.declarations).toEqual([
+        {
+          kind: "union",
+          name: "DraftResult",
+          tag: "kind",
+          variants: [
+            {
+              tag: "ready",
+              fields: [
+                { name: "item", type: { kind: "named", name: "Item" } },
+                { name: "next", type: { kind: "optional", type: { kind: "named", name: "DraftResult" } } },
+              ],
+            },
+            {
+              tag: "needPhoto",
+              fields: [
+                { name: "spoken", type: { kind: "scalar", name: "string" } },
+                {
+                  name: "due",
+                  type: { kind: "optional", type: { kind: "nullable", type: { kind: "scalar", name: "string" } } },
+                },
+              ],
+            },
+            { tag: "empty", fields: [] },
+          ],
+        },
+        { kind: "object", name: "Item", fields: [{ name: "id", type: { kind: "scalar", name: "string" } }] },
+      ]);
+      expect(schema.methods.map(({ returnType }) => returnType)).toEqual([
+        { kind: "named", name: "DraftResult" },
+        { kind: "nullable", type: { kind: "named", name: "DraftResult" } },
+      ]);
+      // TypeScript emission spells the union by its own name, as written.
+      expect(extracted.clientToServerFunctions.map(({ returnType }) => returnType)).toEqual([
+        "DraftResult",
+        "DraftResult | null",
+      ]);
+      expect([...extracted.usedTypes.keys()]).toContain("DraftResult");
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "the first property every member types as a distinct literal is the tag",
+    async () => {
+      const inputPath = createFixture({
+        "define.ts": `
+          export type Shape =
+            | { version: "v1"; type: "circle"; radius: number }
+            | { version: "v1"; type: "square"; side: number };
+          export interface ServerFunctions { get: () => Shape }
+          export interface ClientFunctions {}
+        `,
+      });
+      const schema = await extractRpcSchemaFromFile(inputPath);
+      expect(schema.declarations[0]).toMatchObject({ kind: "union", tag: "type" });
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "members that cannot be told apart on the wire are refused with the reason",
+    async () => {
+      expect(
+        (await refusedUnion(`export type Shape = { radius: number } | { side: number };`)).message,
+      ).toContain("No property is required in every member with a string literal type");
+      expect(
+        (await refusedUnion(`export type Shape = { kind: "a"; radius: number } | { kind: "a"; side: number };`)).message,
+      ).toContain(`Two members share "a" as their 'kind'`);
+      expect(
+        (await refusedUnion(`export type Shape = { kind: string; radius: number } | { kind: "b"; side: number };`)).message,
+      ).toContain("No property is required in every member");
+      expect(
+        (await refusedUnion(`export type Shape = { kind?: "a" } | { kind: "b" };`)).message,
+      ).toContain("No property is required in every member");
+      expect(
+        (await refusedUnion(`export type Shape = { kind: "a" } | string[];`)).message,
+      ).toContain("discriminated unions of object types");
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "the Go backend refuses a discriminated union by name, pointing at the backends that take it",
+    async () => {
+      const inputPath = createFixture({
+        "define.ts": `
+          export type Shape = { kind: "circle"; radius: number } | { kind: "square"; side: number };
+          export interface ServerFunctions { get: () => Shape }
+          export interface ClientFunctions {}
+        `,
+      });
+      const schema = await extractRpcSchemaFromFile(inputPath);
+      expect(() => generateGo(schema)).toThrow(
+        "'Shape' is a discriminated union, which has no Go projection. Discriminated unions are supported by the TypeScript and Rust backends",
+      );
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+describe("@int number aliases", () => {
+  const integer = { kind: "scalar", name: "integer" } as const;
+
+  test(
+    "an @int alias is an integer wherever it is written; a bare number stays a number",
+    async () => {
+      const inputPath = createFixture({
+        "money.ts": `
+          /** @int */
+          export type Money = number;
+        `,
+        "define.ts": `
+          import type { Money } from "./money";
+          /**
+           * Whole items.
+           * @int
+           */
+          export type Count = number;
+          export type Cents = Money;
+          export type Order = {
+            total: Money;
+            tip?: Money;
+            refund: Money | null;
+            lines: readonly Money[];
+            byItem: Record<string, Count>;
+            bySku: { [sku: string]: Cents };
+            ratio: number;
+          };
+          export type Res = { kind: "ok"; count: Count } | { kind: "no" };
+          export interface ServerFunctions {
+            pay: (amount: Money, order: Order) => Count;
+            maybe(n: Count | null): Res;
+          }
+          export interface ClientFunctions {}
+        `,
+      });
+      const extracted = await extractInterfacesFromFile(inputPath);
+      expect(extracted.diagnostics).toEqual([]);
+      const schema = extracted.schema!;
+      expect(schema.methods.map(({ params, returnType }) => [params.map(({ type }) => type), returnType])).toEqual([
+        [[integer, { kind: "named", name: "Order" }], integer],
+        [[{ kind: "nullable", type: integer }], { kind: "named", name: "Res" }],
+      ]);
+      expect(schema.declarations).toEqual([
+        {
+          kind: "object",
+          name: "Order",
+          fields: [
+            { name: "total", type: integer },
+            { name: "tip", type: { kind: "optional", type: integer } },
+            { name: "refund", type: { kind: "nullable", type: integer } },
+            { name: "lines", type: { kind: "array", element: integer } },
+            { name: "byItem", type: { kind: "map", value: integer } },
+            { name: "bySku", type: { kind: "map", value: integer } },
+            { name: "ratio", type: { kind: "scalar", name: "number" } },
+          ],
+        },
+        {
+          kind: "union",
+          name: "Res",
+          tag: "kind",
+          variants: [
+            { tag: "ok", fields: [{ name: "count", type: integer }] },
+            { tag: "no", fields: [] },
+          ],
+        },
+      ]);
+      // TypeScript emission is unchanged: the checker keeps no alias on a primitive, so it spells `number`.
+      expect(extracted.clientToServerFunctions[0]!.params.map(({ type }) => type)).toEqual(["number", "Order"]);
+
+      const goTypes = generateGo({ ...schema, declarations: schema.declarations.filter(({ kind }) => kind !== "union"), methods: schema.methods.slice(0, 1) })["types.generated.go"]!;
+      expect(goTypes).toMatch(/Total\s+int64\s+`json:"total"`/);
+      expect(goTypes).toMatch(/Tip\s+\*int64\s+`json:"tip,omitempty"`/);
+      expect(goTypes).toMatch(/Ratio\s+float64\s+`json:"ratio"`/);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "a misplaced or misspelt integer marker is refused instead of ignored; other tags are left alone",
+    async () => {
+      const inputPath = createFixture({
+        "define.ts": `
+          /** @int */
+          export type Id = string;
+          /** @int64 */
+          export type Big = number;
+          /** @int */
+          export type MaybeInt = number | null;
+          export type Row = {
+            /** @int */
+            qty: number;
+            /** @deprecated use qty */
+            old?: number;
+          };
+          export interface ServerFunctions { get: (row: Row) => Big }
+          export interface ClientFunctions {}
+        `,
+      });
+      let caught: unknown;
+      try {
+        await extractRpcSchemaFromFile(inputPath);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(SchemaExtractionError);
+      const { diagnostics } = caught as SchemaExtractionError;
+      expect(diagnostics.map(({ code, location }) => [code, location.path])).toEqual([
+        ["UNSUPPORTED_INT_TAG", "declarations.Id"],
+        ["UNSUPPORTED_INT_TAG", "declarations.Big"],
+        ["UNSUPPORTED_INT_TAG", "declarations.MaybeInt"],
+        ["UNSUPPORTED_INT_TAG", "declarations.Row.fields.qty"],
+      ]);
+      expect(diagnostics[0]!.message).toContain("'@int' marks a number alias, but 'Id' is 'string'");
+      expect(diagnostics[1]!.message).toContain("Unknown tag '@int64'");
+      expect(diagnostics[3]!.message).toContain("'@int' marks a type alias only");
+    },
+    TEST_TIMEOUT_MS,
+  );
+});

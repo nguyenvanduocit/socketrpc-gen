@@ -7,7 +7,12 @@
 
 export const RPC_SCHEMA_VERSION = 1 as const;
 
-export type ScalarTypeName = "string" | "number" | "boolean";
+/**
+ * `integer` is a JSON number that is always whole: a `number` alias marked
+ * `/** @int *\/`. TypeScript still spells it `number`; typed backends spell it
+ * as a 64-bit integer and refuse a fractional value.
+ */
+export type ScalarTypeName = "string" | "number" | "integer" | "boolean";
 
 export interface ScalarTypeRef {
   kind: "scalar";
@@ -81,6 +86,25 @@ export interface ObjectTypeRef {
   fields: ObjectField[];
 }
 
+/** One member of a discriminated union: the tag literal it carries, and its other fields. */
+export interface UnionVariant {
+  /** The tag property's string literal in this member. */
+  tag: string;
+  /** Every property except the tag. */
+  fields: ObjectField[];
+}
+
+/**
+ * A union of object types told apart by one shared property (`tag`) whose type
+ * in every member is a distinct string literal: on the wire, an object carrying
+ * `tag` beside the fields of the member it names.
+ */
+export interface DiscriminatedUnionTypeRef {
+  kind: "union";
+  tag: string;
+  variants: UnionVariant[];
+}
+
 export type TypeRef =
   | ScalarTypeRef
   | VoidTypeRef
@@ -92,7 +116,8 @@ export type TypeRef =
   | OptionalTypeRef
   | NullableTypeRef
   | StringEnumTypeRef
-  | ObjectTypeRef;
+  | ObjectTypeRef
+  | DiscriminatedUnionTypeRef;
 
 export interface ObjectTypeDeclaration {
   kind: "object";
@@ -106,7 +131,14 @@ export interface StringEnumTypeDeclaration {
   values: string[];
 }
 
-/** A named alias whose target is not itself an object or string enum. */
+export interface DiscriminatedUnionTypeDeclaration {
+  kind: "union";
+  name: string;
+  tag: string;
+  variants: UnionVariant[];
+}
+
+/** A named alias whose target is not itself an object, string enum, or discriminated union. */
 export interface AliasTypeDeclaration {
   kind: "alias";
   name: string;
@@ -116,6 +148,7 @@ export interface AliasTypeDeclaration {
 export type TypeDeclaration =
   | ObjectTypeDeclaration
   | StringEnumTypeDeclaration
+  | DiscriminatedUnionTypeDeclaration
   | AliasTypeDeclaration;
 
 /** The side that initiates a method call. */

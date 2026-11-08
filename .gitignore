@@ -40,3 +40,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # agent session state, local to one machine
 .omc/
+
+# cargo build output
+target/

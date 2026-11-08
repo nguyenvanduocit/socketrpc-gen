@@ -100,6 +100,10 @@ export function runCli(argv: string[]): void {
       "Go Socket.IO client import path the Go client is written against",
       DEFAULT_GO_CLIENT_SOCKET_IMPORT,
     )
+    .option(
+      "--rust-out <dir>",
+      "Directory of the generated Rust module: mod.rs, types.rs and server.rs / client.rs (defaults to the input file's directory)",
+    )
     .option("-w, --watch", "Watch for changes and regenerate automatically", false)
     .action((filePath, options) => {
       const inputPath = path.resolve(process.cwd(), filePath);
@@ -128,6 +132,7 @@ export function runCli(argv: string[]): void {
         goClientOutputDir: options.goClientOut ? path.resolve(process.cwd(), options.goClientOut) : undefined,
         goClientPackageName: options.goClientPackage,
         goClientSocketImport: options.goClientSocketImport,
+        rustOutputDir: options.rustOut ? path.resolve(process.cwd(), options.rustOut) : outputDir,
       };
 
       const run = options.watch ? watchMode(config) : generateRpcPackage(config);

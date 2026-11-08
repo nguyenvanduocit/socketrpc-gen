@@ -27,9 +27,9 @@ export const RPC_ERROR_EVENT = "__rpc:error__";
 export type ErrorMode = "return" | "throw";
 
 /** A language a side of the contract can be generated in. */
-export type TargetLanguage = "typescript" | "go";
+export type TargetLanguage = "typescript" | "go" | "rust";
 
-export const TARGET_LANGUAGES: readonly TargetLanguage[] = ["typescript", "go"];
+export const TARGET_LANGUAGES: readonly TargetLanguage[] = ["typescript", "go", "rust"];
 
 export interface GeneratorConfig {
   /** Path to the input TypeScript file containing interface definitions */
@@ -67,6 +67,11 @@ export interface GeneratorConfig {
   goClientPackageName?: string;
   /** Import path of the Go Socket.IO client package the client is written against. */
   goClientSocketImport?: string;
+  /**
+   * Directory of the generated Rust module (`mod.rs`, `types.rs`, and
+   * `server.rs` / `client.rs` for each Rust side). Defaults to `outputDir`.
+   */
+  rustOutputDir?: string;
 }
 
 /** The config keys that stay optional once defaults are applied. */
@@ -233,6 +238,7 @@ export function resolveConfig(userConfig: GeneratorConfig): ResolvedConfig {
     ...rest,
     clientLanguages: resolveClientLanguages(clientLanguage),
     goOutputDir: userConfig.goOutputDir ?? userConfig.outputDir,
+    rustOutputDir: userConfig.rustOutputDir ?? userConfig.outputDir,
   };
 
   assertServerLanguage(resolved.serverLanguage);

@@ -1,0 +1,555 @@
+/**
+ * Writes `client.rs`: a client that dials the server through
+ * `socketrpc-socketio-client`, answers the server's calls through a
+ * `ClientHandler` and calls the server through `Conn`.
+ *
+ * The same naming discipline as `emit-server.ts` applies: generated bodies
+ * declare only fixed words and reach helpers through paths.
+ */
+
+import type { RpcSchema } from "../schema";
+import { header } from "./emit-types";
+import { emitCallMethod, emitHandlerTrait, emitListen, typesImport } from "./emit-server";
+import { RUST_CLIENT_CRATE } from "./options";
+import { inboundMethods, outboundMethods, type DeclarationScope } from "./project";
+
+const CLIENT_RUNTIME = String.raw`
+mod rpc_runtime {
+    use ::std::collections::HashMap;
+    use ::std::future::Future;
+    use ::std::panic::AssertUnwindSafe;
+    use ::std::pin::Pin;
+    use ::std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+    use ::std::time::Duration;
+
+    use ::serde_json::Value;
+    use ::${RUST_CLIENT_CRATE} as sio;
+    use ::tokio::sync::{mpsc, watch};
+
+    use super::super::types::{
+        rpc_decode_result, rpc_encode_args, rpc_panic_message, RpcError, RpcErrorCode, Unsubscribe, RPC_ERROR_EVENT,
+    };
+
+    pub(super) type BoxedCall = Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send>>;
+
+    type Observer<T> = Arc<dyn Fn(&T) + Send + Sync>;
+
+    struct Observers<T: ?Sized> {
+        next: u64,
+        list: Vec<(u64, Observer<T>)>,
+    }
+
+    impl<T: ?Sized> Observers<T> {
+        fn new() -> Self {
+            Self { next: 0, list: Vec::new() }
+        }
+
+        fn snapshot(&self) -> Vec<Observer<T>> {
+            self.list.iter().map(|(_, observer)| Arc::clone(observer)).collect()
+        }
+    }
+
+    struct State {
+        disposed: bool,
+        connects: Observers<()>,
+        disconnects: Observers<str>,
+        errors: Observers<RpcError>,
+    }
+
+    pub(super) struct Inner {
+        pub(super) socket: sio::Socket,
+        pub(super) timeout: Duration,
+        state: Mutex<State>,
+    }
+
+    impl Inner {
+        fn lock(&self) -> MutexGuard<'_, State> {
+            // No critical section can panic halfway, so a poisoned lock still guards valid data.
+            self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        pub(super) fn disposed(&self) -> bool {
+            self.lock().disposed
+        }
+
+        pub(super) fn dispose(&self) {
+            {
+                let mut state = self.lock();
+                if state.disposed {
+                    return;
+                }
+                state.disposed = true;
+                // Release every closure the caller handed over.
+                state.connects.list.clear();
+                state.disconnects.list.clear();
+                state.errors.list.clear();
+            }
+            self.socket.close();
+        }
+
+        pub(super) fn subscribe_connects(self: &Arc<Self>, observer: Observer<()>) -> Unsubscribe {
+            subscribe(self, observer, |state| &mut state.connects)
+        }
+
+        pub(super) fn subscribe_disconnects(self: &Arc<Self>, observer: Observer<str>) -> Unsubscribe {
+            subscribe(self, observer, |state| &mut state.disconnects)
+        }
+
+        pub(super) fn subscribe_errors(self: &Arc<Self>, observer: Observer<RpcError>) -> Unsubscribe {
+            subscribe(self, observer, |state| &mut state.errors)
+        }
+
+        fn emit_error(&self, error: &RpcError) {
+            if self.disposed() {
+                return;
+            }
+            if let Ok(value) = ::serde_json::to_value(error) {
+                let _ = self.socket.emit(RPC_ERROR_EVENT, &[value]);
+            }
+        }
+
+        fn transport_error(&self, error: sio::Error, method: &str) -> RpcError {
+            if self.disposed() {
+                return RpcError::new(RpcErrorCode::Disposed, "client is disposed").in_method(method);
+            }
+            match error {
+                sio::Error::Disconnected | sio::Error::Closed => {
+                    RpcError::new(RpcErrorCode::Disconnected, "socket is disconnected")
+                }
+                sio::Error::Timeout => RpcError::new(RpcErrorCode::Timeout, "operation has timed out"),
+                too_large @ sio::Error::PayloadTooLarge { .. } => RpcError::invalid_argument(too_large.to_string()),
+                other => RpcError::internal(other),
+            }
+            .in_method(method)
+        }
+    }
+
+    fn subscribe<T: ?Sized + 'static>(
+        inner: &Arc<Inner>,
+        observer: Observer<T>,
+        select: fn(&mut State) -> &mut Observers<T>,
+    ) -> Unsubscribe {
+        let id = {
+            let mut state = inner.lock();
+            if state.disposed {
+                return Unsubscribe::new(|| {});
+            }
+            let observers = select(&mut state);
+            observers.next += 1;
+            let id = observers.next;
+            observers.list.push((id, observer));
+            id
+        };
+        let inner: Weak<Inner> = Arc::downgrade(inner);
+        Unsubscribe::new(move || {
+            if let Some(inner) = inner.upgrade() {
+                select(&mut inner.lock()).list.retain(|(entry, _)| *entry != id);
+            }
+        })
+    }
+
+    /// Runs observers in registration order; one that panics stops neither the rest nor the queue.
+    fn notify<T: ?Sized>(observers: Vec<Observer<T>>, value: &T) {
+        for observer in observers {
+            let _ = ::std::panic::catch_unwind(AssertUnwindSafe(|| observer(value)));
+        }
+    }
+
+    /// Disposes the connection when the last owning ${"`"}Conn${"`"} is dropped. The
+    /// dispatcher, the queues and the ${"`"}Conn${"`"} a handler receives hold ${"`"}Inner${"`"}
+    /// directly, so none of them keeps a connection nobody can reach alive.
+    pub(super) struct Owner(pub(super) Arc<Inner>);
+
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            self.0.dispose();
+        }
+    }
+
+    /// One connection's lifetime: cancelled when it drops, so a handler for a
+    /// call that arrived on it can stop and free its method's queue.
+    pub(super) struct Session {
+        cancel: watch::Sender<bool>,
+    }
+
+    impl Session {
+        fn new() -> Arc<Self> {
+            Arc::new(Self { cancel: watch::channel(false).0 })
+        }
+
+        fn cancel(&self) {
+            self.cancel.send_replace(true);
+        }
+
+        pub(super) fn is_cancelled(&self) -> bool {
+            *self.cancel.borrow()
+        }
+
+        pub(super) async fn cancelled(&self) {
+            let mut receiver = self.cancel.subscribe();
+            let _ = receiver.wait_for(|cancelled| *cancelled).await;
+        }
+    }
+
+    pub(super) async fn connect(options: &super::DialOptions) -> Result<(Arc<Inner>, sio::Events), RpcError> {
+        let mut transport = sio::Options::new(options.url.clone());
+        transport.path = options.path.clone();
+        transport.namespace = options.namespace.clone();
+        transport.auth = options.auth.clone();
+        transport.headers = options.headers.clone();
+        transport.reconnect = options.reconnect;
+        transport.reconnect_delay = options.reconnect_delay;
+        transport.reconnect_delay_max = options.reconnect_delay_max;
+        transport.connect_timeout = options.connect_timeout;
+        let (socket, events) = sio::connect(transport).await.map_err(|error| {
+            match error {
+                sio::Error::Refused(message) => RpcError::new(RpcErrorCode::Disconnected, message),
+                sio::Error::InvalidOptions(message) => RpcError::invalid_argument(message),
+                sio::Error::Timeout => RpcError::new(RpcErrorCode::Timeout, "operation has timed out"),
+                other => RpcError::new(RpcErrorCode::Disconnected, other.to_string()),
+            }
+            .in_method("dial")
+        })?;
+        let inner = Arc::new(Inner {
+            socket,
+            timeout: options.timeout,
+            state: Mutex::new(State {
+                disposed: false,
+                connects: Observers::new(),
+                disconnects: Observers::new(),
+                errors: Observers::new(),
+            }),
+        });
+        Ok((inner, events))
+    }
+
+    pub(super) struct Call {
+        args: Vec<Value>,
+        ack: Option<sio::Ack>,
+        session: Arc<Session>,
+    }
+
+    pub(super) type Routes = HashMap<&'static str, mpsc::UnboundedSender<Call>>;
+
+    /// Registers one server-to-client method with its own queue, drained by one
+    /// task: same-method calls keep their order and a slow handler stalls only
+    /// its own method.
+    pub(super) fn listen<F>(
+        routes: &mut Routes,
+        inner: &Arc<Inner>,
+        method: &'static str,
+        arity: usize,
+        acked: bool,
+        run: F,
+    ) where
+        F: Fn(super::Context, Vec<Value>) -> BoxedCall + Send + Sync + 'static,
+    {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Call>();
+        routes.insert(method, sender);
+        let inner = Arc::clone(inner);
+        ::tokio::spawn(async move {
+            while let Some(call) = receiver.recv().await {
+                serve(&inner, method, arity, acked, &run, call).await;
+            }
+        });
+    }
+
+    async fn serve<F>(inner: &Arc<Inner>, method: &'static str, arity: usize, acked: bool, run: &F, call: Call)
+    where
+        F: Fn(super::Context, Vec<Value>) -> BoxedCall + Send + Sync + 'static,
+    {
+        if acked && call.ack.is_none() {
+            inner.emit_error(&RpcError::invalid_argument("missing acknowledgement callback").in_method(method));
+            return;
+        }
+        let result = if call.args.len() != arity {
+            Err(RpcError::invalid_argument(format!("expected {arity} arguments, got {}", call.args.len())))
+        } else if inner.disposed() {
+            Err(RpcError::new(RpcErrorCode::Disposed, "client is disposed"))
+        } else {
+            let conn = super::Conn { inner: Arc::clone(inner), timeout: inner.timeout, owner: None };
+            let ctx = super::Context { conn, session: call.session };
+            // Its own task, so a panicking handler answers INTERNAL_ERROR instead of killing the queue.
+            match ::tokio::spawn(run(ctx, call.args)).await {
+                Ok(result) => result,
+                Err(join) if join.is_panic() => Err(RpcError::internal(rpc_panic_message(join.into_panic()))),
+                Err(join) => Err(RpcError::internal(join)),
+            }
+        }
+        .map_err(|error| error.in_method(method));
+
+        match (acked, call.ack) {
+            (true, Some(ack)) => {
+                let payload = match result {
+                    Ok(value) => value,
+                    Err(error) => ::serde_json::to_value(&error).unwrap_or(Value::Null),
+                };
+                if let Err(too_large @ sio::Error::PayloadTooLarge { .. }) = ack.send(&[payload]) {
+                    // Nothing was sent: answer with why, rather than leave the server to time out.
+                    let error = RpcError::internal(format!("cannot send reply: {too_large}")).in_method(method);
+                    let _ = ack.send(&[::serde_json::to_value(&error).unwrap_or(Value::Null)]);
+                }
+            }
+            // A fire-and-forget call has no acknowledgement slot, so its failure travels out of band.
+            _ => {
+                if let Err(error) = result {
+                    inner.emit_error(&error);
+                }
+            }
+        }
+    }
+
+    enum Notice {
+        Connect,
+        Disconnect(String),
+        Error(Option<Value>),
+    }
+
+    /// Routes the connection's events, in arrival order: calls to their
+    /// method's queue, lifecycle changes and error reports to the observer
+    /// queue, which runs off the reader so an observer may make a call.
+    pub(super) fn start(inner: Arc<Inner>, mut events: sio::Events, routes: Routes) {
+        let (notices, mut notice_receiver) = mpsc::unbounded_channel::<Notice>();
+        let observer_inner = Arc::clone(&inner);
+        drop(inner);
+        ::tokio::spawn(async move {
+            while let Some(notice) = notice_receiver.recv().await {
+                let state = observer_inner.lock();
+                match notice {
+                    Notice::Connect => {
+                        let observers = state.connects.snapshot();
+                        drop(state);
+                        notify(observers, &());
+                    }
+                    Notice::Disconnect(reason) => {
+                        let observers = state.disconnects.snapshot();
+                        drop(state);
+                        notify(observers, reason.as_str());
+                    }
+                    Notice::Error(report) => {
+                        let observers = state.errors.snapshot();
+                        drop(state);
+                        let report = report.unwrap_or(Value::Null);
+                        let error = ::serde_json::from_value::<RpcError>(report.clone())
+                            .unwrap_or_else(|_| RpcError::internal(report).with_method(RPC_ERROR_EVENT));
+                        notify(observers, &error);
+                    }
+                }
+            }
+        });
+        ::tokio::spawn(async move {
+            let mut session = Session::new();
+            while let Some(event) = events.recv().await {
+                match event {
+                    sio::Event::Message { event, args, ack } => {
+                        if event == RPC_ERROR_EVENT {
+                            let _ = notices.send(Notice::Error(args.into_iter().next()));
+                        } else if let Some(route) = routes.get(event.as_str()) {
+                            let _ = route.send(Call { args, ack, session: Arc::clone(&session) });
+                        }
+                    }
+                    sio::Event::Connect => {
+                        session = Session::new();
+                        let _ = notices.send(Notice::Connect);
+                    }
+                    sio::Event::Disconnect { reason } => {
+                        session.cancel();
+                        let _ = notices.send(Notice::Disconnect(reason));
+                    }
+                }
+            }
+            session.cancel();
+        });
+    }
+
+    pub(super) fn emit(inner: &Inner, method: &str, args: Vec<::serde_json::Result<Value>>) -> Result<(), RpcError> {
+        let args = rpc_encode_args(method, args)?;
+        if inner.disposed() {
+            return Err(RpcError::new(RpcErrorCode::Disposed, "client is disposed").in_method(method));
+        }
+        inner.socket.emit(method, &args).map_err(|error| inner.transport_error(error, method))
+    }
+
+    pub(super) async fn request<T: ::serde::de::DeserializeOwned>(
+        inner: &Inner,
+        timeout: Duration,
+        method: &str,
+        args: Vec<::serde_json::Result<Value>>,
+    ) -> Result<T, RpcError> {
+        let args = rpc_encode_args(method, args)?;
+        if inner.disposed() {
+            return Err(RpcError::new(RpcErrorCode::Disposed, "client is disposed").in_method(method));
+        }
+        let mut values = inner
+            .socket
+            .emit_with_ack(method, &args, timeout)
+            .await
+            .map_err(|error| inner.transport_error(error, method))?;
+        if values.len() != 1 {
+            let message = format!("expected one acknowledgement value, got {}", values.len());
+            return Err(RpcError::invalid_argument(message).in_method(method));
+        }
+        rpc_decode_result(method, values.remove(0))
+    }
+}
+`;
+
+export function emitClientFile(
+  schema: RpcSchema,
+  declarations: DeclarationScope,
+  timeoutMs: number,
+): string {
+  const handled = outboundMethods(schema);
+  const called = inboundMethods(schema);
+  const lines = [
+    ...header(
+      `Rust client: answers the server's calls and calls the server, over ${RUST_CLIENT_CRATE}.`,
+    ),
+    "#![allow(clippy::too_many_arguments)]",
+    "",
+    ...(handled.length > 0 ? ["use ::std::future::Future;"] : []),
+    "use ::std::sync::Arc;",
+    "use ::std::time::Duration;",
+    "",
+    typesImport(schema, declarations),
+    "",
+    ...emitHandlerTrait(
+      "ClientHandler",
+      handled,
+      "/// Answers the calls the server makes.\n///\n/// Return `Err(RpcError)` to fail a call; a panic answers `INTERNAL_ERROR`.",
+    ),
+    "",
+    "/// Where the server is and how the connection behaves.",
+    "#[derive(Debug, Clone)]",
+    "pub struct DialOptions {",
+    "    /// `http(s)://` or `ws(s)://` origin of the server, with no path.",
+    "    pub url: String,",
+    "    /// Socket.IO namespace. Default `/`.",
+    "    pub namespace: String,",
+    "    /// Engine.IO path. Default `/socket.io/`.",
+    "    pub path: String,",
+    "    /// Read by the server as `socket.handshake.auth`.",
+    "    pub auth: Option<::serde_json::Value>,",
+    "    /// Extra HTTP headers on the upgrade request.",
+    "    pub headers: Vec<(String, String)>,",
+    `    /// How long an acknowledged call waits. Default ${timeoutMs} ms.`,
+    "    pub timeout: Duration,",
+    "    /// Retry an unreachable server and reconnect after a dropped connection. Default `true`.",
+    "    pub reconnect: bool,",
+    "    pub reconnect_delay: Duration,",
+    "    pub reconnect_delay_max: Duration,",
+    "    /// Bound on one connection attempt.",
+    "    pub connect_timeout: Duration,",
+    "}",
+    "",
+    "impl DialOptions {",
+    "    pub fn new(url: impl Into<String>) -> Self {",
+    "        Self {",
+    "            url: url.into(),",
+    '            namespace: "/".to_string(),',
+    '            path: "/socket.io/".to_string(),',
+    "            auth: None,",
+    "            headers: Vec::new(),",
+    `            timeout: Duration::from_millis(${timeoutMs}),`,
+    "            reconnect: true,",
+    "            reconnect_delay: Duration::from_millis(500),",
+    "            reconnect_delay_max: Duration::from_secs(5),",
+    "            connect_timeout: Duration::from_secs(20),",
+    "        }",
+    "    }",
+    "}",
+    "",
+    "/// Connects and returns once the namespace accepted the socket.",
+    "///",
+    "/// A refusal returns at once as `DISCONNECTED` with the server's message. An",
+    "/// unreachable server is retried while `reconnect` is set; bound that with",
+    "/// `tokio::time::timeout` — dropping the future stops the retries.",
+    "pub async fn dial<H: ClientHandler>(options: DialOptions, handler: Arc<H>) -> Result<Conn, RpcError> {",
+    "    let (inner, events) = rpc_runtime::connect(&options).await?;",
+    "    let mut routes = rpc_runtime::Routes::new();",
+    ...(handled.length === 0 ? ["    drop(handler);"] : handled.flatMap((method) => emitListen(method, "&mut routes, &inner"))),
+    "    rpc_runtime::start(Arc::clone(&inner), events, routes);",
+    "    let owner = Arc::new(rpc_runtime::Owner(Arc::clone(&inner)));",
+    "    Ok(Conn { timeout: inner.timeout, inner, owner: Some(owner) })",
+    "}",
+    "",
+    "/// One connection to the server. Cheap to clone; it disposes itself when the",
+    "/// last clone `dial` returned is dropped.",
+    "///",
+    "/// A call made while disconnected fails at once with `DISCONNECTED` and is",
+    "/// never sent later; a call in flight fails the moment its connection drops.",
+    "#[derive(Clone)]",
+    "pub struct Conn {",
+    "    inner: Arc<rpc_runtime::Inner>,",
+    "    timeout: Duration,",
+    "    owner: Option<Arc<rpc_runtime::Owner>>,",
+    "}",
+    "",
+    "impl Conn {",
+    "    /// A handle whose acknowledged calls wait `timeout` instead of the default.",
+    "    pub fn with_timeout(&self, timeout: Duration) -> Self {",
+    "        Self { inner: Arc::clone(&self.inner), timeout, owner: self.owner.clone() }",
+    "    }",
+    "",
+    "    pub fn connected(&self) -> bool {",
+    "        !self.inner.disposed() && self.inner.socket.connected()",
+    "    }",
+    "",
+    `    pub fn socket(&self) -> &::${RUST_CLIENT_CRATE}::Socket {`,
+    "        &self.inner.socket",
+    "    }",
+    "",
+    "    /// Observes every reconnect (not the first connection: `dial` returning is",
+    "    /// that). Register, then make the call you want on connect once yourself.",
+    "    pub fn on_connect(&self, observer: impl Fn() + Send + Sync + 'static) -> Unsubscribe {",
+    "        self.inner.subscribe_connects(Arc::new(move |_: &()| observer()))",
+    "    }",
+    "",
+    "    /// Observes the connection dropping, with socket.io-client's reason.",
+    "    pub fn on_disconnect(&self, observer: impl Fn(&str) + Send + Sync + 'static) -> Unsubscribe {",
+    "        self.inner.subscribe_disconnects(Arc::new(observer))",
+    "    }",
+    "",
+    "    /// Observes failures the server reports for fire-and-forget calls it handled.",
+    "    pub fn on_rpc_error(&self, observer: impl Fn(&RpcError) + Send + Sync + 'static) -> Unsubscribe {",
+    "        self.inner.subscribe_errors(Arc::new(observer))",
+    "    }",
+    "",
+    "    pub fn disposed(&self) -> bool {",
+    "        self.inner.disposed()",
+    "    }",
+    "",
+    "    /// Closes the connection, fails calls in flight and drops the observers. Idempotent.",
+    "    pub fn dispose(&self) {",
+    "        self.inner.dispose()",
+    "    }",
+    ...called.flatMap((method) => ["", ...emitCallMethod(method, declarations, "&self.inner")]),
+    "}",
+    "",
+    "/// What a handler receives about the call's connection.",
+    "#[derive(Clone)]",
+    "pub struct Context {",
+    "    conn: Conn,",
+    "    session: Arc<rpc_runtime::Session>,",
+    "}",
+    "",
+    "impl Context {",
+    "    /// Calls the server. This handle does not keep the connection open.",
+    "    pub fn conn(&self) -> &Conn {",
+    "        &self.conn",
+    "    }",
+    "",
+    "    /// Whether the connection the call arrived on has dropped.",
+    "    pub fn is_cancelled(&self) -> bool {",
+    "        self.session.is_cancelled()",
+    "    }",
+    "",
+    "    /// Resolves once the connection the call arrived on drops.",
+    "    pub async fn cancelled(&self) {",
+    "        self.session.cancelled().await",
+    "    }",
+    "}",
+    CLIENT_RUNTIME,
+  ];
+  return `${lines.join("\n").replace(/\n+$/, "")}\n`;
+}

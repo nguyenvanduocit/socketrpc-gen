@@ -8,7 +8,7 @@ on:
   workflow_dispatch: {}
 
 # A superseded run tells you nothing a newer one does not, and the suite spends
-# most of its wall clock compiling Go and driving real Socket.IO connections.
+# most of its wall clock compiling Go and Rust and driving real Socket.IO connections.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -52,6 +52,26 @@ jobs:
           go vet ./...
           go test -race -count=1 ./...
 
+      # The suite also generates Rust, builds it --locked, runs clippy with
+      # warnings denied, and drives it against the TypeScript peers.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            rust/socketio-client
+            examples/07-rust
+
+      # rust/socketio-client is the Socket.IO client every generated Rust client
+      # depends on, so its own suite gates a release like the generator's does.
+      - name: rust/socketio-client clippy and tests
+        working-directory: rust/socketio-client
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+
       - name: Install dependencies
         # Frozen: CI resolves exactly what bun.lock records, so a dependency
         # cannot drift into the release candidate between commit and merge.
@@ -74,6 +94,10 @@ jobs:
             git diff
             exit 1
           fi
+
+      - name: Rust example builds
+        working-directory: examples/07-rust
+        run: cargo clippy --locked -- -D warnings
 
       - name: Whitespace is clean
         env:

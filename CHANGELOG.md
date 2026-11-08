@@ -1,5 +1,16 @@
 # Changelog
 
+## [10.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v9.1.0...v10.0.0) (2026-11-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* in generated Rust, `RpcError.data` is `Option<Box<serde_json::Value>>` (was `Option<serde_json::Value>`), so `RpcError` stays at 80 bytes and passes `clippy::result_large_err` even with `serde_json/preserve_order`. Compare with `error.data.as_deref()`; `with_data(Value)` is unchanged.
+
+### Features
+
+* tagged unions, `@int` integers, and a boxed RpcError.data in Rust ([#52](https://github.com/nguyenvanduocit/socketrpc-gen/issues/52)) ([c2cd078](https://github.com/nguyenvanduocit/socketrpc-gen/commit/c2cd078bbaafeef31d38d6634512a1780f5ad6bb))
+
 ## [9.1.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v9.0.0...v9.1.0) (2026-11-08)
 
 

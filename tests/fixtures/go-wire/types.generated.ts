@@ -102,3 +102,760 @@ export interface ServerToClientEvents {
     ask: (question: string, ack: (result: string | RpcError) => void) => void;
     "__rpc:error__": (error: RpcError) => void;
 }
+
+// === POSTCARD BINARY CODEC ===
+const _rpcTextEncoder = new TextEncoder();
+const _rpcTextDecoder = new TextDecoder("utf-8", { fatal: true });
+
+export class RpcPostcardWriter {
+    private buf = new Uint8Array(64);
+    private view = new DataView(this.buf.buffer);
+    private pos = 0;
+
+    private ensure(extra: number): void {
+        if (this.pos + extra <= this.buf.length) return;
+        let next = this.buf.length * 2;
+        while (next < this.pos + extra) next *= 2;
+        const grown = new Uint8Array(next);
+        grown.set(this.buf.subarray(0, this.pos));
+        this.buf = grown;
+        this.view = new DataView(this.buf.buffer);
+    }
+
+    u8(v: number): void {
+        this.ensure(1);
+        this.buf[this.pos++] = v & 0xff;
+    }
+
+    bool(v: boolean): void {
+        if (typeof v !== "boolean") throw new TypeError("expected boolean");
+        this.u8(v ? 1 : 0);
+    }
+
+    u32(v: number): void {
+        if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > 0xffffffff) {
+            throw new TypeError("expected u32");
+        }
+        let n = v >>> 0;
+        while (n >= 0x80) {
+            this.u8((n & 0x7f) | 0x80);
+            n >>>= 7;
+        }
+        this.u8(n);
+    }
+
+    i64(v: number): void {
+        if (typeof v !== "number" || !Number.isInteger(v)) {
+            throw new TypeError("expected integer");
+        }
+        const big = BigInt(v);
+        if (big < -9223372036854775808n || big > 9223372036854775807n) {
+            throw new TypeError("integer out of i64 range");
+        }
+        let u = BigInt.asUintN(64, (big << 1n) ^ (big >> 63n));
+        while (u >= 0x80n) {
+            this.u8(Number(u & 0x7fn) | 0x80);
+            u >>= 7n;
+        }
+        this.u8(Number(u));
+    }
+
+    f64(v: number): void {
+        if (typeof v !== "number" || !Number.isFinite(v)) {
+            throw new TypeError("expected finite number");
+        }
+        this.ensure(8);
+        this.view.setFloat64(this.pos, v, true);
+        this.pos += 8;
+    }
+
+    string(v: string): void {
+        if (typeof v !== "string") throw new TypeError("expected string");
+        const bytes = _rpcTextEncoder.encode(v);
+        this.u32(bytes.length);
+        this.ensure(bytes.length);
+        this.buf.set(bytes, this.pos);
+        this.pos += bytes.length;
+    }
+
+    json(v: unknown): void {
+        const encoded = v === undefined ? "null" : JSON.stringify(v);
+        if (encoded === undefined) throw new TypeError("value is not JSON-encodable");
+        this.string(encoded);
+    }
+
+    finish(): Uint8Array {
+        return this.buf.slice(0, this.pos);
+    }
+}
+
+export class RpcPostcardReader {
+    private readonly buf: Uint8Array;
+    private readonly view: DataView;
+    private pos = 0;
+
+    constructor(input: unknown) {
+        if (input instanceof Uint8Array) {
+            this.buf = input;
+        } else if (input instanceof ArrayBuffer) {
+            this.buf = new Uint8Array(input);
+        } else if (ArrayBuffer.isView(input)) {
+            this.buf = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+        } else {
+            throw new TypeError("expected binary postcard payload");
+        }
+        this.view = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength);
+    }
+
+    u8(): number {
+        if (this.pos >= this.buf.length) throw new RangeError("unexpected end of postcard buffer");
+        return this.buf[this.pos++]!;
+    }
+
+    bool(): boolean {
+        const b = this.u8();
+        if (b === 0) return false;
+        if (b === 1) return true;
+        throw new TypeError("invalid postcard bool discriminant: " + String(b));
+    }
+
+    u32(): number {
+        let result = 0;
+        let shift = 0;
+        while (true) {
+            if (shift >= 35) throw new RangeError("postcard u32 varint overflow");
+            const b = this.u8();
+            const low = b & 0x7f;
+            if (shift === 28 && low > 0x0f) throw new RangeError("postcard u32 varint overflow");
+            result = (result | (low << shift)) >>> 0;
+            if ((b & 0x80) === 0) return result;
+            shift += 7;
+        }
+    }
+
+    i64(): number {
+        let u = 0n;
+        let shift = 0n;
+        while (true) {
+            if (shift >= 70n) throw new RangeError("postcard i64 varint overflow");
+            const b = this.u8();
+            const low = BigInt(b & 0x7f);
+            if (shift === 63n && low > 1n) throw new RangeError("postcard i64 varint overflow");
+            u |= low << shift;
+            if ((b & 0x80) === 0) break;
+            shift += 7n;
+        }
+        const signed = BigInt.asIntN(64, (u >> 1n) ^ (-(u & 1n)));
+        return Number(signed);
+    }
+
+    f64(): number {
+        if (this.pos + 8 > this.buf.length) throw new RangeError("unexpected end of postcard buffer");
+        const v = this.view.getFloat64(this.pos, true);
+        this.pos += 8;
+        if (!Number.isFinite(v)) throw new TypeError("non-finite float64 in postcard buffer");
+        return v;
+    }
+
+    string(): string {
+        const len = this.u32();
+        if (this.pos + len > this.buf.length) throw new RangeError("unexpected end of postcard buffer");
+        const sub = this.buf.subarray(this.pos, this.pos + len);
+        this.pos += len;
+        return _rpcTextDecoder.decode(sub);
+    }
+
+    json(): unknown {
+        return JSON.parse(this.string());
+    }
+
+    done(): void {
+        if (this.pos !== this.buf.length) {
+            throw new RangeError("trailing bytes in postcard buffer: " + String(this.buf.length - this.pos));
+        }
+    }
+}
+
+export function rpcEncodeError(w: RpcPostcardWriter, err: RpcError): void {
+    w.string(err.code);
+    w.string(err.message);
+    if (err.method === undefined || err.method === "") {
+        w.u8(0);
+    } else {
+        w.u8(1);
+        w.string(err.method);
+    }
+    if (err.data === undefined) {
+        w.u8(0);
+    } else {
+        w.u8(1);
+        w.json(err.data);
+    }
+}
+
+export function rpcDecodeError(r: RpcPostcardReader): RpcError {
+    const code = r.string();
+    const message = r.string();
+    const method = r.bool() ? r.string() : undefined;
+    const data = r.bool() ? r.json() : undefined;
+    const out: RpcError = { __rpcError: true, code, message };
+    if (method !== undefined) out.method = method;
+    if (data !== undefined) out.data = data;
+    return out;
+}
+
+export function rpcEncodeErrorFrame(err: RpcError): Uint8Array {
+    const w = new RpcPostcardWriter();
+    rpcEncodeError(w, err);
+    return w.finish();
+}
+
+export function rpcDecodeErrorFrame(raw: unknown, fallbackMethod?: string): RpcError {
+    if (isRpcError(raw)) return raw;
+    try {
+        const r = new RpcPostcardReader(raw);
+        const err = rpcDecodeError(r);
+        r.done();
+        if (fallbackMethod !== undefined && err.method === undefined) err.method = fallbackMethod;
+        return err;
+    } catch (err) {
+        return toRpcError(err, { code: RpcErrorCodes.INTERNAL_ERROR, method: fallbackMethod });
+    }
+}
+
+export function rpcEncodeErrorResult(err: RpcError): Uint8Array {
+    const w = new RpcPostcardWriter();
+    w.u32(1);
+    rpcEncodeError(w, err);
+    return w.finish();
+}
+
+
+function _rpcEncode_Echo(w: RpcPostcardWriter, v: any): void {
+    if (typeof v !== "object" || v === null || Array.isArray(v)) throw new TypeError("expected object");
+    const _obj0 = v as Record<string, any>;
+    w.string(_obj0["id"]);
+    w.string(_obj0["payload"]);
+}
+function _rpcDecode_Echo(r: RpcPostcardReader): any {
+    return (() => {
+        const _out0: Record<string, any> = {};
+        const _f0_0 = r.string();
+        if (_f0_0 !== undefined) _out0["id"] = _f0_0;
+        const _f0_1 = r.string();
+        if (_f0_1 !== undefined) _out0["payload"] = _f0_1;
+        return _out0;
+    })();
+}
+
+function _rpcEncode_Receipt(w: RpcPostcardWriter, v: any): void {
+    if (typeof v !== "object" || v === null || Array.isArray(v)) throw new TypeError("expected object");
+    const _obj0 = v as Record<string, any>;
+    w.string(_obj0["message"]);
+    w.string(_obj0["code"]);
+}
+function _rpcDecode_Receipt(r: RpcPostcardReader): any {
+    return (() => {
+        const _out0: Record<string, any> = {};
+        const _f0_0 = r.string();
+        if (_f0_0 !== undefined) _out0["message"] = _f0_0;
+        const _f0_1 = r.string();
+        if (_f0_1 !== undefined) _out0["code"] = _f0_1;
+        return _out0;
+    })();
+}
+
+export function rpcEncodeArgs_c2s_echo(_p0: any, _p1: any): Uint8Array[] {
+    let _b0: Uint8Array;
+    try {
+        const w = new RpcPostcardWriter();
+        w.string(_p0);
+        _b0 = w.finish();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument id: " + (err instanceof Error ? err.message : String(err)), method: "echo" } as RpcError;
+    }
+    let _b1: Uint8Array;
+    try {
+        const w = new RpcPostcardWriter();
+        w.string(_p1);
+        _b1 = w.finish();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument payload: " + (err instanceof Error ? err.message : String(err)), method: "echo" } as RpcError;
+    }
+    return [_b0, _b1];
+}
+export function rpcDecodeArgs_c2s_echo(rawArgs: unknown[]): any[] {
+    if (rawArgs.length !== 2) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "expected 2 arguments, got " + String(rawArgs.length), method: "echo" } as RpcError;
+    }
+    let _a0: any;
+    try {
+        const r = new RpcPostcardReader(rawArgs[0]);
+        _a0 = r.string();
+        r.done();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument id: " + (err instanceof Error ? err.message : String(err)), method: "echo" } as RpcError;
+    }
+    let _a1: any;
+    try {
+        const r = new RpcPostcardReader(rawArgs[1]);
+        _a1 = r.string();
+        r.done();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument payload: " + (err instanceof Error ? err.message : String(err)), method: "echo" } as RpcError;
+    }
+    return [_a0, _a1];
+}
+
+export function rpcEncodeResult_c2s_echo(value: any): Uint8Array {
+    const w = new RpcPostcardWriter();
+    w.u32(0);
+    _rpcEncode_Echo(w, value);
+    return w.finish();
+}
+export function rpcDecodeResult_c2s_echo(raw: unknown): any {
+    if (isRpcError(raw)) return raw;
+    try {
+        const r = new RpcPostcardReader(raw);
+        const tag = r.u32();
+        if (tag === 0) {
+            const val = _rpcDecode_Echo(r);
+            r.done();
+            return val;
+        }
+        if (tag === 1) {
+            const err = rpcDecodeError(r);
+            r.done();
+            if (err.method === undefined) err.method = "echo";
+            return err;
+        }
+        throw new TypeError("invalid result discriminant: " + String(tag));
+    } catch (err) {
+        return { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid acknowledgement payload: " + (err instanceof Error ? err.message : String(err)), method: "echo" } as RpcError;
+    }
+}
+
+export function rpcEncodeArgs_c2s_failTyped(_p0: any): Uint8Array[] {
+    let _b0: Uint8Array;
+    try {
+        const w = new RpcPostcardWriter();
+        w.string(_p0);
+        _b0 = w.finish();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument reason: " + (err instanceof Error ? err.message : String(err)), method: "failTyped" } as RpcError;
+    }
+    return [_b0];
+}
+export function rpcDecodeArgs_c2s_failTyped(rawArgs: unknown[]): any[] {
+    if (rawArgs.length !== 1) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "expected 1 arguments, got " + String(rawArgs.length), method: "failTyped" } as RpcError;
+    }
+    let _a0: any;
+    try {
+        const r = new RpcPostcardReader(rawArgs[0]);
+        _a0 = r.string();
+        r.done();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument reason: " + (err instanceof Error ? err.message : String(err)), method: "failTyped" } as RpcError;
+    }
+    return [_a0];
+}
+
+export function rpcEncodeResult_c2s_failTyped(value: any): Uint8Array {
+    const w = new RpcPostcardWriter();
+    w.u32(0);
+    _rpcEncode_Echo(w, value);
+    return w.finish();
+}
+export function rpcDecodeResult_c2s_failTyped(raw: unknown): any {
+    if (isRpcError(raw)) return raw;
+    try {
+        const r = new RpcPostcardReader(raw);
+        const tag = r.u32();
+        if (tag === 0) {
+            const val = _rpcDecode_Echo(r);
+            r.done();
+            return val;
+        }
+        if (tag === 1) {
+            const err = rpcDecodeError(r);
+            r.done();
+            if (err.method === undefined) err.method = "failTyped";
+            return err;
+        }
+        throw new TypeError("invalid result discriminant: " + String(tag));
+    } catch (err) {
+        return { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid acknowledgement payload: " + (err instanceof Error ? err.message : String(err)), method: "failTyped" } as RpcError;
+    }
+}
+
+export function rpcEncodeArgs_c2s_note(_p0: any): Uint8Array[] {
+    let _b0: Uint8Array;
+    try {
+        const w = new RpcPostcardWriter();
+        w.string(_p0);
+        _b0 = w.finish();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument text: " + (err instanceof Error ? err.message : String(err)), method: "note" } as RpcError;
+    }
+    return [_b0];
+}
+export function rpcDecodeArgs_c2s_note(rawArgs: unknown[]): any[] {
+    if (rawArgs.length !== 1) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "expected 1 arguments, got " + String(rawArgs.length), method: "note" } as RpcError;
+    }
+    let _a0: any;
+    try {
+        const r = new RpcPostcardReader(rawArgs[0]);
+        _a0 = r.string();
+        r.done();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument text: " + (err instanceof Error ? err.message : String(err)), method: "note" } as RpcError;
+    }
+    return [_a0];
+}
+
+export function rpcEncodeArgs_c2s_readNotes(): Uint8Array[] {
+    return [];
+}
+export function rpcDecodeArgs_c2s_readNotes(rawArgs: unknown[]): any[] {
+    if (rawArgs.length !== 0) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "expected 0 arguments, got " + String(rawArgs.length), method: "readNotes" } as RpcError;
+    }
+    return [];
+}
+
+export function rpcEncodeResult_c2s_readNotes(value: any): Uint8Array {
+    const w = new RpcPostcardWriter();
+    w.u32(0);
+    if (!Array.isArray(value)) throw new TypeError("expected array");
+    w.u32(value.length);
+    for (const _item0 of value) {
+        w.string(_item0);
+    }
+    return w.finish();
+}
+export function rpcDecodeResult_c2s_readNotes(raw: unknown): any {
+    if (isRpcError(raw)) return raw;
+    try {
+        const r = new RpcPostcardReader(raw);
+        const tag = r.u32();
+        if (tag === 0) {
+            const val = (() => {
+                const _len0 = r.u32();
+                const _arr0: any[] = [];
+                for (let _i0 = 0; _i0 < _len0; _i0++) {
+                    _arr0.push(r.string());
+                }
+                return _arr0;
+            })();
+            r.done();
+            return val;
+        }
+        if (tag === 1) {
+            const err = rpcDecodeError(r);
+            r.done();
+            if (err.method === undefined) err.method = "readNotes";
+            return err;
+        }
+        throw new TypeError("invalid result discriminant: " + String(tag));
+    } catch (err) {
+        return { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid acknowledgement payload: " + (err instanceof Error ? err.message : String(err)), method: "readNotes" } as RpcError;
+    }
+}
+
+export function rpcEncodeArgs_c2s_neverAck(_p0: any): Uint8Array[] {
+    let _b0: Uint8Array;
+    try {
+        const w = new RpcPostcardWriter();
+        w.string(_p0);
+        _b0 = w.finish();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument id: " + (err instanceof Error ? err.message : String(err)), method: "neverAck" } as RpcError;
+    }
+    return [_b0];
+}
+export function rpcDecodeArgs_c2s_neverAck(rawArgs: unknown[]): any[] {
+    if (rawArgs.length !== 1) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "expected 1 arguments, got " + String(rawArgs.length), method: "neverAck" } as RpcError;
+    }
+    let _a0: any;
+    try {
+        const r = new RpcPostcardReader(rawArgs[0]);
+        _a0 = r.string();
+        r.done();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument id: " + (err instanceof Error ? err.message : String(err)), method: "neverAck" } as RpcError;
+    }
+    return [_a0];
+}
+
+export function rpcEncodeResult_c2s_neverAck(value: any): Uint8Array {
+    const w = new RpcPostcardWriter();
+    w.u32(0);
+    _rpcEncode_Echo(w, value);
+    return w.finish();
+}
+export function rpcDecodeResult_c2s_neverAck(raw: unknown): any {
+    if (isRpcError(raw)) return raw;
+    try {
+        const r = new RpcPostcardReader(raw);
+        const tag = r.u32();
+        if (tag === 0) {
+            const val = _rpcDecode_Echo(r);
+            r.done();
+            return val;
+        }
+        if (tag === 1) {
+            const err = rpcDecodeError(r);
+            r.done();
+            if (err.method === undefined) err.method = "neverAck";
+            return err;
+        }
+        throw new TypeError("invalid result discriminant: " + String(tag));
+    } catch (err) {
+        return { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid acknowledgement payload: " + (err instanceof Error ? err.message : String(err)), method: "neverAck" } as RpcError;
+    }
+}
+
+export function rpcEncodeArgs_c2s_dropWhileInFlight(_p0: any): Uint8Array[] {
+    let _b0: Uint8Array;
+    try {
+        const w = new RpcPostcardWriter();
+        w.string(_p0);
+        _b0 = w.finish();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument id: " + (err instanceof Error ? err.message : String(err)), method: "dropWhileInFlight" } as RpcError;
+    }
+    return [_b0];
+}
+export function rpcDecodeArgs_c2s_dropWhileInFlight(rawArgs: unknown[]): any[] {
+    if (rawArgs.length !== 1) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "expected 1 arguments, got " + String(rawArgs.length), method: "dropWhileInFlight" } as RpcError;
+    }
+    let _a0: any;
+    try {
+        const r = new RpcPostcardReader(rawArgs[0]);
+        _a0 = r.string();
+        r.done();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument id: " + (err instanceof Error ? err.message : String(err)), method: "dropWhileInFlight" } as RpcError;
+    }
+    return [_a0];
+}
+
+export function rpcEncodeResult_c2s_dropWhileInFlight(value: any): Uint8Array {
+    const w = new RpcPostcardWriter();
+    w.u32(0);
+    _rpcEncode_Echo(w, value);
+    return w.finish();
+}
+export function rpcDecodeResult_c2s_dropWhileInFlight(raw: unknown): any {
+    if (isRpcError(raw)) return raw;
+    try {
+        const r = new RpcPostcardReader(raw);
+        const tag = r.u32();
+        if (tag === 0) {
+            const val = _rpcDecode_Echo(r);
+            r.done();
+            return val;
+        }
+        if (tag === 1) {
+            const err = rpcDecodeError(r);
+            r.done();
+            if (err.method === undefined) err.method = "dropWhileInFlight";
+            return err;
+        }
+        throw new TypeError("invalid result discriminant: " + String(tag));
+    } catch (err) {
+        return { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid acknowledgement payload: " + (err instanceof Error ? err.message : String(err)), method: "dropWhileInFlight" } as RpcError;
+    }
+}
+
+export function rpcEncodeArgs_c2s_receipt(_p0: any): Uint8Array[] {
+    let _b0: Uint8Array;
+    try {
+        const w = new RpcPostcardWriter();
+        w.string(_p0);
+        _b0 = w.finish();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument id: " + (err instanceof Error ? err.message : String(err)), method: "receipt" } as RpcError;
+    }
+    return [_b0];
+}
+export function rpcDecodeArgs_c2s_receipt(rawArgs: unknown[]): any[] {
+    if (rawArgs.length !== 1) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "expected 1 arguments, got " + String(rawArgs.length), method: "receipt" } as RpcError;
+    }
+    let _a0: any;
+    try {
+        const r = new RpcPostcardReader(rawArgs[0]);
+        _a0 = r.string();
+        r.done();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument id: " + (err instanceof Error ? err.message : String(err)), method: "receipt" } as RpcError;
+    }
+    return [_a0];
+}
+
+export function rpcEncodeResult_c2s_receipt(value: any): Uint8Array {
+    const w = new RpcPostcardWriter();
+    w.u32(0);
+    _rpcEncode_Receipt(w, value);
+    return w.finish();
+}
+export function rpcDecodeResult_c2s_receipt(raw: unknown): any {
+    if (isRpcError(raw)) return raw;
+    try {
+        const r = new RpcPostcardReader(raw);
+        const tag = r.u32();
+        if (tag === 0) {
+            const val = _rpcDecode_Receipt(r);
+            r.done();
+            return val;
+        }
+        if (tag === 1) {
+            const err = rpcDecodeError(r);
+            r.done();
+            if (err.method === undefined) err.method = "receipt";
+            return err;
+        }
+        throw new TypeError("invalid result discriminant: " + String(tag));
+    } catch (err) {
+        return { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid acknowledgement payload: " + (err instanceof Error ? err.message : String(err)), method: "receipt" } as RpcError;
+    }
+}
+
+export function rpcEncodeArgs_c2s_roundTrip(_p0: any): Uint8Array[] {
+    let _b0: Uint8Array;
+    try {
+        const w = new RpcPostcardWriter();
+        w.string(_p0);
+        _b0 = w.finish();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument question: " + (err instanceof Error ? err.message : String(err)), method: "roundTrip" } as RpcError;
+    }
+    return [_b0];
+}
+export function rpcDecodeArgs_c2s_roundTrip(rawArgs: unknown[]): any[] {
+    if (rawArgs.length !== 1) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "expected 1 arguments, got " + String(rawArgs.length), method: "roundTrip" } as RpcError;
+    }
+    let _a0: any;
+    try {
+        const r = new RpcPostcardReader(rawArgs[0]);
+        _a0 = r.string();
+        r.done();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument question: " + (err instanceof Error ? err.message : String(err)), method: "roundTrip" } as RpcError;
+    }
+    return [_a0];
+}
+
+export function rpcEncodeResult_c2s_roundTrip(value: any): Uint8Array {
+    const w = new RpcPostcardWriter();
+    w.u32(0);
+    w.string(value);
+    return w.finish();
+}
+export function rpcDecodeResult_c2s_roundTrip(raw: unknown): any {
+    if (isRpcError(raw)) return raw;
+    try {
+        const r = new RpcPostcardReader(raw);
+        const tag = r.u32();
+        if (tag === 0) {
+            const val = r.string();
+            r.done();
+            return val;
+        }
+        if (tag === 1) {
+            const err = rpcDecodeError(r);
+            r.done();
+            if (err.method === undefined) err.method = "roundTrip";
+            return err;
+        }
+        throw new TypeError("invalid result discriminant: " + String(tag));
+    } catch (err) {
+        return { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid acknowledgement payload: " + (err instanceof Error ? err.message : String(err)), method: "roundTrip" } as RpcError;
+    }
+}
+
+export function rpcEncodeArgs_s2c_notify(_p0: any): Uint8Array[] {
+    let _b0: Uint8Array;
+    try {
+        const w = new RpcPostcardWriter();
+        w.string(_p0);
+        _b0 = w.finish();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument text: " + (err instanceof Error ? err.message : String(err)), method: "notify" } as RpcError;
+    }
+    return [_b0];
+}
+export function rpcDecodeArgs_s2c_notify(rawArgs: unknown[]): any[] {
+    if (rawArgs.length !== 1) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "expected 1 arguments, got " + String(rawArgs.length), method: "notify" } as RpcError;
+    }
+    let _a0: any;
+    try {
+        const r = new RpcPostcardReader(rawArgs[0]);
+        _a0 = r.string();
+        r.done();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument text: " + (err instanceof Error ? err.message : String(err)), method: "notify" } as RpcError;
+    }
+    return [_a0];
+}
+
+export function rpcEncodeArgs_s2c_ask(_p0: any): Uint8Array[] {
+    let _b0: Uint8Array;
+    try {
+        const w = new RpcPostcardWriter();
+        w.string(_p0);
+        _b0 = w.finish();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument question: " + (err instanceof Error ? err.message : String(err)), method: "ask" } as RpcError;
+    }
+    return [_b0];
+}
+export function rpcDecodeArgs_s2c_ask(rawArgs: unknown[]): any[] {
+    if (rawArgs.length !== 1) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "expected 1 arguments, got " + String(rawArgs.length), method: "ask" } as RpcError;
+    }
+    let _a0: any;
+    try {
+        const r = new RpcPostcardReader(rawArgs[0]);
+        _a0 = r.string();
+        r.done();
+    } catch (err) {
+        throw { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid argument question: " + (err instanceof Error ? err.message : String(err)), method: "ask" } as RpcError;
+    }
+    return [_a0];
+}
+
+export function rpcEncodeResult_s2c_ask(value: any): Uint8Array {
+    const w = new RpcPostcardWriter();
+    w.u32(0);
+    w.string(value);
+    return w.finish();
+}
+export function rpcDecodeResult_s2c_ask(raw: unknown): any {
+    if (isRpcError(raw)) return raw;
+    try {
+        const r = new RpcPostcardReader(raw);
+        const tag = r.u32();
+        if (tag === 0) {
+            const val = r.string();
+            r.done();
+            return val;
+        }
+        if (tag === 1) {
+            const err = rpcDecodeError(r);
+            r.done();
+            if (err.method === undefined) err.method = "ask";
+            return err;
+        }
+        throw new TypeError("invalid result discriminant: " + String(tag));
+    } catch (err) {
+        return { __rpcError: true, code: RpcErrorCodes.INVALID_ARGUMENT, message: "invalid acknowledgement payload: " + (err instanceof Error ? err.message : String(err)), method: "ask" } as RpcError;
+    }
+}

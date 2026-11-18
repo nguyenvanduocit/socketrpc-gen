@@ -21,6 +21,7 @@ import {
   emptyCompositeLiteral,
   goTypeName,
   inboundMethods,
+  isJsonValueType,
   outboundMethods,
   renderGoType,
   resultGoType,
@@ -46,6 +47,13 @@ export class GoWriter {
     body();
     this.#indent -= 1;
     this.line(lastLine);
+  }
+
+  caseBlock(label: string, body: () => void): void {
+    this.line(label);
+    this.#indent += 1;
+    body();
+    this.#indent -= 1;
   }
 
   toString(): string {
@@ -238,8 +246,10 @@ function handlerCallArguments(method: RpcMethod, side: GoSide): string {
 }
 
 /** The arguments a client method forwards, using the contract's own names. */
-function outboundArguments(method: RpcMethod): string {
-  const params = method.params.map(paramName).join(", ");
+function outboundArguments(method: RpcMethod, declarations: DeclarationScope): string {
+  const params = method.params
+    .map((param) => (isJsonValueType(param.type, declarations) ? `&${paramName(param)}` : paramName(param)))
+    .join(", ");
   return params ? `, ${params}` : "";
 }
 
@@ -343,6 +353,17 @@ function writeFieldNormalizer(
  * its own, reaching the exported error type through `q`. Both copies are
  * `rpc_`-prefixed and live in different packages, so neither can collide.
  */
+function encodeUvarintBytes(value: number): string {
+  const bytes: number[] = [];
+  let n = value >>> 0;
+  while (n >= 0x80) {
+    bytes.push((n & 0x7f) | 0x80);
+    n >>>= 7;
+  }
+  bytes.push(n);
+  return `[]byte{${bytes.join(", ")}}`;
+}
+
 export function writeRuntimeHelpers(writer: GoWriter, q: string): void {
   writer.block(`func ${generated("errorFromError")}(err error, method string) *${q}RpcError`, () => {
     writer.line(`var rpcErr *${q}RpcError`);
@@ -359,13 +380,478 @@ export function writeRuntimeHelpers(writer: GoWriter, q: string): void {
     writer.line(`return ${q}NewRpcError(${q}CodeInternalError, fmt.Sprint(value), method, nil)`);
   });
   writer.line();
-  writer.line("// A payload the JSON encoder refuses would be dropped by Socket.IO's write");
+  writer.block(`func ${generated("appendUvarint")}(buf []byte, v uint64) []byte`, () => {
+    writer.block("for v >= 0x80", () => {
+      writer.line("buf = append(buf, byte(v)|0x80)");
+      writer.line("v >>= 7");
+    });
+    writer.line("return append(buf, byte(v))");
+  });
+  writer.line();
+  writer.block(`func ${generated("appendVarint")}(buf []byte, v int64) []byte`, () => {
+    writer.line("ux := uint64(v) << 1");
+    writer.block("if v < 0", () => writer.line("ux = ^ux"));
+    writer.line(`return ${generated("appendUvarint")}(buf, ux)`);
+  });
+  writer.line();
+  writer.block(`func ${generated("readUvarint")}(data []byte) (uint64, int)`, () => {
+    writer.line("var out uint64");
+    writer.block("for i := 0; i < len(data) && i < 10; i++", () => {
+      writer.line("b := data[i]");
+      writer.line("carry := uint64(b & 0x7f)");
+      writer.block("if i == 9 && carry > 1", () => writer.line("return 0, -1"));
+      writer.line("out |= carry << (7 * uint(i))");
+      writer.block("if (b & 0x80) == 0", () => writer.line("return out, i + 1"));
+    });
+    writer.line("return 0, 0");
+  });
+  writer.line();
+  writer.block(`func ${generated("readVarint")}(data []byte) (int64, int)`, () => {
+    writer.line(`ux, n := ${generated("readUvarint")}(data)`);
+    writer.block("if n <= 0", () => writer.line("return 0, n"));
+    writer.line("v := int64(ux >> 1)");
+    writer.block("if (ux & 1) != 0", () => writer.line("v = ^v"));
+    writer.line("return v, n");
+  });
+  writer.line();
+  writer.block(`func ${generated("asBytes")}(value any) ([]byte, bool)`, () => {
+    writer.line("switch v := value.(type) {");
+    writer.line("case []byte:");
+    writer.line("\treturn v, true");
+    writer.line("case interface{ Bytes() []byte }:");
+    writer.line("\treturn v.Bytes(), true");
+    writer.line("default:");
+    writer.line("\treturn nil, false");
+    writer.line("}");
+  });
+  writer.line();
+  writer.block(
+    `func ${generated("appendRpcError")}(buf []byte, err *${q}RpcError) ([]byte, error)`,
+    () => {
+      writer.block("if err == nil", () => writer.line(`err = &${q}RpcError{}`));
+      writer.line("code := string(err.Code)");
+      writer.line(`buf = ${generated("appendUvarint")}(buf, uint64(len(code)))`);
+      writer.line("buf = append(buf, code...)");
+      writer.line(`buf = ${generated("appendUvarint")}(buf, uint64(len(err.Message)))`);
+      writer.line("buf = append(buf, err.Message...)");
+      writer.block('if err.Method == ""', () => {
+        writer.line("buf = append(buf, 0)");
+      });
+      writer.block('if err.Method != ""', () => {
+        writer.line("buf = append(buf, 1)");
+        writer.line(`buf = ${generated("appendUvarint")}(buf, uint64(len(err.Method)))`);
+        writer.line("buf = append(buf, err.Method...)");
+      });
+      writer.block("if err.Data == nil", () => {
+        writer.line("buf = append(buf, 0)");
+      });
+      writer.block("if err.Data != nil", () => {
+        writer.line("raw, jerr := json.Marshal(err.Data)");
+        writer.block("if jerr != nil", () => writer.line("return nil, jerr"));
+        writer.line("buf = append(buf, 1)");
+        writer.line(`buf = ${generated("appendUvarint")}(buf, uint64(len(raw)))`);
+        writer.line("buf = append(buf, raw...)");
+      });
+      writer.line("return buf, nil");
+    },
+  );
+  writer.line();
+  writer.block(
+    `func ${generated("readRpcError")}(data []byte, target *${q}RpcError) ([]byte, error)`,
+    () => {
+      writer.line(`codeLen, n := ${generated("readUvarint")}(data)`);
+      writer.block("if n <= 0 || codeLen == 0 || uint64(len(data)-n) < codeLen", () =>
+        writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+      );
+      writer.line("code := string(data[n : n+int(codeLen)])");
+      writer.line("data = data[n+int(codeLen):]");
+      writer.line(`msgLen, n := ${generated("readUvarint")}(data)`);
+      writer.block("if n <= 0 || uint64(len(data)-n) < msgLen", () =>
+        writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+      );
+      writer.line("message := string(data[n : n+int(msgLen)])");
+      writer.line("data = data[n+int(msgLen):]");
+      writer.block("if len(data) == 0", () =>
+        writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+      );
+      writer.line("var method string");
+      writer.line("methodTag := data[0]");
+      writer.line("data = data[1:]");
+      writer.block("if methodTag == 1", () => {
+        writer.line(`mLen, mn := ${generated("readUvarint")}(data)`);
+        writer.block("if mn <= 0 || uint64(len(data)-mn) < mLen", () =>
+          writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+        );
+        writer.line("method = string(data[mn : mn+int(mLen)])");
+        writer.line("data = data[mn+int(mLen):]");
+      });
+      writer.block("if methodTag != 0 && methodTag != 1", () => {
+        writer.line('return nil, fmt.Errorf("invalid option discriminant %d", methodTag)');
+      });
+      writer.block("if len(data) == 0", () =>
+        writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+      );
+      writer.line("var errData any");
+      writer.line("dataTag := data[0]");
+      writer.line("data = data[1:]");
+      writer.block("if dataTag == 1", () => {
+        writer.line(`dLen, dn := ${generated("readUvarint")}(data)`);
+        writer.block("if dn <= 0 || uint64(len(data)-dn) < dLen", () =>
+          writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+        );
+        writer.line("raw := data[dn : dn+int(dLen)]");
+        writer.line("data = data[dn+int(dLen):]");
+        writer.block("if err := json.Unmarshal(raw, &errData); err != nil", () =>
+          writer.line("return nil, err"),
+        );
+      });
+      writer.block("if dataTag != 0 && dataTag != 1", () => {
+        writer.line('return nil, fmt.Errorf("invalid option discriminant %d", dataTag)');
+      });
+      writer.line(
+        `*target = ${q}RpcError{RPCError: true, Code: ${q}RpcErrorCode(code), Message: message, Method: method, Data: errData}`,
+      );
+      writer.line("return data, nil");
+    },
+  );
+  writer.line();
+  writer.block(
+    `func ${generated("appendPostcard")}(buf []byte, v reflect.Value, t reflect.Type, optJSON bool) ([]byte, error)`,
+    () => {
+      writer.block("if t.Kind() == reflect.Interface", () => {
+        writer.block("if optJSON", () => {
+          writer.block("if !v.IsValid() || v.IsNil()", () => writer.line("return append(buf, 0), nil"));
+          writer.line("buf = append(buf, 1)");
+        });
+        writer.block("if !v.IsValid() || v.IsNil()", () => {
+          writer.line('raw := []byte("null")');
+          writer.line(`buf = ${generated("appendUvarint")}(buf, uint64(len(raw)))`);
+          writer.line("return append(buf, raw...), nil");
+        });
+        writer.line("raw, err := json.Marshal(v.Interface())");
+        writer.block("if err != nil", () => writer.line("return nil, err"));
+        writer.line(`buf = ${generated("appendUvarint")}(buf, uint64(len(raw)))`);
+        writer.line("return append(buf, raw...), nil");
+      });
+      writer.block(`if t == reflect.TypeOf((*${q}RpcError)(nil))`, () => {
+        writer.block("if !v.IsValid() || v.IsNil()", () =>
+          writer.line(`return ${generated("appendRpcError")}(buf, &${q}RpcError{})`),
+        );
+        writer.line(`return ${generated("appendRpcError")}(buf, v.Interface().(*${q}RpcError))`);
+      });
+      writer.block(`if t == reflect.TypeOf(${q}RpcError{})`, () => {
+        writer.line(`errVal := v.Interface().(${q}RpcError)`);
+        writer.line(`return ${generated("appendRpcError")}(buf, &errVal)`);
+      });
+      writer.block("if t.Kind() == reflect.Pointer", () => {
+        writer.block("if !v.IsValid() || v.IsNil()", () => writer.line("return append(buf, 0), nil"));
+        writer.line("buf = append(buf, 1)");
+        writer.line(`return ${generated("appendPostcard")}(buf, v.Elem(), t.Elem(), false)`);
+      });
+      writer.line("switch t.Kind() {");
+      writer.caseBlock("case reflect.Bool:", () => {
+        writer.block("if v.Bool()", () => writer.line("return append(buf, 1), nil"));
+        writer.line("return append(buf, 0), nil");
+      });
+      writer.caseBlock("case reflect.Int64:", () => {
+        writer.line(`return ${generated("appendVarint")}(buf, v.Int()), nil`);
+      });
+      writer.caseBlock("case reflect.Float64:", () => {
+        writer.line("f := v.Float()");
+        writer.block("if math.IsNaN(f) || math.IsInf(f, 0)", () =>
+          writer.line('return nil, errors.New("non-finite float64")'),
+        );
+        writer.line("bits := math.Float64bits(f)");
+        writer.line(
+          "return append(buf, byte(bits), byte(bits>>8), byte(bits>>16), byte(bits>>24), byte(bits>>32), byte(bits>>40), byte(bits>>48), byte(bits>>56)), nil",
+        );
+      });
+      writer.caseBlock("case reflect.String:", () => {
+        writer.block("if v.CanInterface()", () => {
+          writer.block("if bm, ok := v.Interface().(interface{ MarshalBinary() ([]byte, error) }); ok", () => {
+            writer.line("b, err := bm.MarshalBinary()");
+            writer.block("if err != nil", () => writer.line("return nil, err"));
+            writer.line("return append(buf, b...), nil");
+          });
+        });
+        writer.line("s := v.String()");
+        writer.line(`buf = ${generated("appendUvarint")}(buf, uint64(len(s)))`);
+        writer.line("return append(buf, s...), nil");
+      });
+      writer.caseBlock("case reflect.Slice:", () => {
+        writer.line("n := v.Len()");
+        writer.line(`buf = ${generated("appendUvarint")}(buf, uint64(n))`);
+        writer.block("for i := 0; i < n; i++", () => {
+          writer.line("var err error");
+          writer.line(`buf, err = ${generated("appendPostcard")}(buf, v.Index(i), t.Elem(), false)`);
+          writer.block("if err != nil", () => writer.line("return nil, err"));
+        });
+        writer.line("return buf, nil");
+      });
+      writer.caseBlock("case reflect.Map:", () => {
+        writer.line("n := v.Len()");
+        writer.line(`buf = ${generated("appendUvarint")}(buf, uint64(n))`);
+        writer.line("iter := v.MapRange()");
+        writer.block("for iter.Next()", () => {
+          writer.line("k := iter.Key().String()");
+          writer.line(`buf = ${generated("appendUvarint")}(buf, uint64(len(k)))`);
+          writer.line("buf = append(buf, k...)");
+          writer.line("var err error");
+          writer.line(`buf, err = ${generated("appendPostcard")}(buf, iter.Value(), t.Elem(), false)`);
+          writer.block("if err != nil", () => writer.line("return nil, err"));
+        });
+        writer.line("return buf, nil");
+      });
+      writer.caseBlock("case reflect.Struct:", () => {
+        writer.block("for i := 0; i < t.NumField(); i++", () => {
+          writer.line("field := t.Field(i)");
+          writer.line('jtag := field.Tag.Get("json")');
+          writer.line('isOpt := len(jtag) >= 10 && jtag[len(jtag)-10:] == ",omitempty"');
+          writer.line("var err error");
+          writer.line(`buf, err = ${generated("appendPostcard")}(buf, v.Field(i), field.Type, isOpt)`);
+          writer.block("if err != nil", () => writer.line("return nil, err"));
+        });
+        writer.line("return buf, nil");
+      });
+      writer.caseBlock("default:", () => {
+        writer.line('return nil, fmt.Errorf("unsupported type %s", t)');
+      });
+      writer.line("}");
+    },
+  );
+  writer.line();
+  writer.block(
+    `func ${generated("readPostcard")}(data []byte, v reflect.Value, t reflect.Type, optJSON bool) ([]byte, error)`,
+    () => {
+      writer.block("if t.Kind() == reflect.Interface", () => {
+        writer.block("if optJSON", () => {
+          writer.block("if len(data) == 0", () =>
+            writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+          );
+          writer.line("tag := data[0]");
+          writer.line("data = data[1:]");
+          writer.block("if tag == 0", () => {
+            writer.line("v.Set(reflect.Zero(t))");
+            writer.line("return data, nil");
+          });
+          writer.block("if tag != 1", () =>
+            writer.line('return nil, fmt.Errorf("invalid option discriminant %d", tag)'),
+          );
+        });
+        writer.line(`strLen, n := ${generated("readUvarint")}(data)`);
+        writer.block("if n <= 0 || uint64(len(data)-n) < strLen", () =>
+          writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+        );
+        writer.line("raw := data[n : n+int(strLen)]");
+        writer.line("data = data[n+int(strLen):]");
+        writer.line("var parsed any");
+        writer.block("if err := json.Unmarshal(raw, &parsed); err != nil", () =>
+          writer.line("return nil, err"),
+        );
+        writer.block("if parsed == nil", () => {
+          writer.line("v.Set(reflect.Zero(t))");
+          writer.line("return data, nil");
+        });
+        writer.line("v.Set(reflect.ValueOf(parsed))");
+        writer.line("return data, nil");
+      });
+      writer.block(`if t == reflect.TypeOf((*${q}RpcError)(nil))`, () => {
+        writer.line(`var rpcErr ${q}RpcError`);
+        writer.line(`rest, err := ${generated("readRpcError")}(data, &rpcErr)`);
+        writer.block("if err != nil", () => writer.line("return nil, err"));
+        writer.line("v.Set(reflect.ValueOf(&rpcErr))");
+        writer.line("return rest, nil");
+      });
+      writer.block(`if t == reflect.TypeOf(${q}RpcError{})`, () => {
+        writer.line(`var rpcErr ${q}RpcError`);
+        writer.line(`rest, err := ${generated("readRpcError")}(data, &rpcErr)`);
+        writer.block("if err != nil", () => writer.line("return nil, err"));
+        writer.line("v.Set(reflect.ValueOf(rpcErr))");
+        writer.line("return rest, nil");
+      });
+      writer.block("if t.Kind() == reflect.Pointer", () => {
+        writer.block("if len(data) == 0", () =>
+          writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+        );
+        writer.line("tag := data[0]");
+        writer.line("data = data[1:]");
+        writer.block("if tag == 0 || tag == 2", () => {
+          writer.line("v.Set(reflect.Zero(t))");
+          writer.line("return data, nil");
+        });
+        writer.block("if tag != 1", () =>
+          writer.line('return nil, fmt.Errorf("invalid option discriminant %d", tag)'),
+        );
+        writer.line("elem := reflect.New(t.Elem())");
+        writer.line(`rest, err := ${generated("readPostcard")}(data, elem.Elem(), t.Elem(), false)`);
+        writer.block("if err != nil", () => writer.line("return nil, err"));
+        writer.line("v.Set(elem)");
+        writer.line("return rest, nil");
+      });
+      writer.line("switch t.Kind() {");
+      writer.caseBlock("case reflect.Bool:", () => {
+        writer.block("if len(data) == 0", () =>
+          writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+        );
+        writer.line("b := data[0]");
+        writer.line("data = data[1:]");
+        writer.block("if b == 0", () => {
+          writer.line("v.SetBool(false)");
+          writer.line("return data, nil");
+        });
+        writer.block("if b == 1", () => {
+          writer.line("v.SetBool(true)");
+          writer.line("return data, nil");
+        });
+        writer.line('return nil, fmt.Errorf("invalid bool discriminant %d", b)');
+      });
+      writer.caseBlock("case reflect.Int64:", () => {
+        writer.line(`val, n := ${generated("readVarint")}(data)`);
+        writer.block("if n <= 0", () => writer.line('return nil, errors.New("invalid int64 varint")'));
+        writer.line("v.SetInt(val)");
+        writer.line("return data[n:], nil");
+      });
+      writer.caseBlock("case reflect.Float64:", () => {
+        writer.block("if len(data) < 8", () =>
+          writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+        );
+        writer.line(
+          "bits := uint64(data[0]) | uint64(data[1])<<8 | uint64(data[2])<<16 | uint64(data[3])<<24 | uint64(data[4])<<32 | uint64(data[5])<<40 | uint64(data[6])<<48 | uint64(data[7])<<56",
+        );
+        writer.line("f := math.Float64frombits(bits)");
+        writer.block("if math.IsNaN(f) || math.IsInf(f, 0)", () =>
+          writer.line('return nil, errors.New("non-finite float64")'),
+        );
+        writer.line("v.SetFloat(f)");
+        writer.line("return data[8:], nil");
+      });
+      writer.caseBlock("case reflect.String:", () => {
+        writer.block("if v.CanAddr() && v.Addr().CanInterface()", () => {
+          writer.block("if bu, ok := v.Addr().Interface().(interface{ UnmarshalBinary([]byte) error }); ok", () => {
+            writer.line(`_, n := ${generated("readUvarint")}(data)`);
+            writer.block("if n <= 0", () => writer.line('return nil, errors.New("invalid enum varint")'));
+            writer.block("if err := bu.UnmarshalBinary(data[:n]); err != nil", () =>
+              writer.line("return nil, err"),
+            );
+            writer.line("return data[n:], nil");
+          });
+        });
+        writer.line(`strLen, n := ${generated("readUvarint")}(data)`);
+        writer.block("if n <= 0 || uint64(len(data)-n) < strLen", () =>
+          writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+        );
+        writer.line("v.SetString(string(data[n : n+int(strLen)]))");
+        writer.line("return data[n+int(strLen):], nil");
+      });
+      writer.caseBlock("case reflect.Slice:", () => {
+        writer.line(`count, n := ${generated("readUvarint")}(data)`);
+        writer.block("if n <= 0 || count > uint64(len(data))", () =>
+          writer.line('return nil, errors.New("invalid slice length")'),
+        );
+        writer.line("data = data[n:]");
+        writer.line("slice := reflect.MakeSlice(t, int(count), int(count))");
+        writer.block("for i := 0; i < int(count); i++", () => {
+          writer.line("var err error");
+          writer.line(`data, err = ${generated("readPostcard")}(data, slice.Index(i), t.Elem(), false)`);
+          writer.block("if err != nil", () => writer.line("return nil, err"));
+        });
+        writer.line("v.Set(slice)");
+        writer.line("return data, nil");
+      });
+      writer.caseBlock("case reflect.Map:", () => {
+        writer.line(`count, n := ${generated("readUvarint")}(data)`);
+        writer.block("if n <= 0 || count > uint64(len(data))", () =>
+          writer.line('return nil, errors.New("invalid map length")'),
+        );
+        writer.line("data = data[n:]");
+        writer.line("m := reflect.MakeMapWithSize(t, int(count))");
+        writer.block("for i := 0; i < int(count); i++", () => {
+          writer.line(`kLen, kn := ${generated("readUvarint")}(data)`);
+          writer.block("if kn <= 0 || uint64(len(data)-kn) < kLen", () =>
+            writer.line('return nil, errors.New("unexpected end of postcard buffer")'),
+          );
+          writer.line("k := string(data[kn : kn+int(kLen)])");
+          writer.line("data = data[kn+int(kLen):]");
+          writer.line("elem := reflect.New(t.Elem()).Elem()");
+          writer.line("var err error");
+          writer.line(`data, err = ${generated("readPostcard")}(data, elem, t.Elem(), false)`);
+          writer.block("if err != nil", () => writer.line("return nil, err"));
+          writer.line("m.SetMapIndex(reflect.ValueOf(k), elem)");
+        });
+        writer.line("v.Set(m)");
+        writer.line("return data, nil");
+      });
+      writer.caseBlock("case reflect.Struct:", () => {
+        writer.block("for i := 0; i < t.NumField(); i++", () => {
+          writer.line("field := t.Field(i)");
+          writer.line('jtag := field.Tag.Get("json")');
+          writer.line('isOpt := len(jtag) >= 10 && jtag[len(jtag)-10:] == ",omitempty"');
+          writer.line("var err error");
+          writer.line(`data, err = ${generated("readPostcard")}(data, v.Field(i), field.Type, isOpt)`);
+          writer.block("if err != nil", () => writer.line("return nil, err"));
+        });
+        writer.line("return data, nil");
+      });
+      writer.caseBlock("default:", () => {
+        writer.line('return nil, fmt.Errorf("unsupported type %s", t)');
+      });
+      writer.line("}");
+    },
+  );
+  writer.line();
+  writer.block(`func ${generated("encodeValue")}(value any) ([]byte, error)`, () => {
+    writer.block("if value == nil", () => writer.line("return []byte{4, 'n', 'u', 'l', 'l'}, nil"));
+    writer.line("rv := reflect.ValueOf(value)");
+    writer.block("if rv.Kind() == reflect.Pointer && !rv.IsNil() && rv.Elem().Kind() == reflect.Interface", () => {
+      writer.line("rv = rv.Elem()");
+    });
+    writer.line(`return ${generated("appendPostcard")}(nil, rv, rv.Type(), false)`);
+  });
+  writer.line();
+  writer.block(
+    `func ${generated("encodeArgs")}(method string, args []any) ([]any, *${q}RpcError)`,
+    () => {
+      writer.line("encoded := make([]any, len(args))");
+      writer.block("for i, arg := range args", () => {
+        writer.line(`b, err := ${generated("encodeValue")}(arg)`);
+        writer.block("if err != nil", () => {
+          writer.line(
+            `return nil, ${q}NewRpcError(${q}CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), method, nil)`,
+          );
+        });
+        writer.line("encoded[i] = b");
+      });
+      writer.line("return encoded, nil");
+    },
+  );
+  writer.line();
+  writer.block(`func ${generated("encodeReply")}(value any) []byte`, () => {
+    writer.block(`if failure, ok := value.(*${q}RpcError); ok && failure != nil`, () => {
+      writer.line(`buf, err := ${generated("appendRpcError")}([]byte{1}, failure)`);
+      writer.block("if err != nil", () => {
+        writer.line(
+          `buf, _ = ${generated("appendRpcError")}([]byte{1}, ${q}NewRpcError(failure.Code, failure.Message, failure.Method, nil))`,
+        );
+      });
+      writer.line("return buf");
+    });
+    writer.line(`encoded, err := ${generated("encodeValue")}(value)`);
+    writer.block("if err != nil", () => {
+      writer.line(
+        `buf, _ := ${generated("appendRpcError")}([]byte{1}, ${q}NewRpcError(${q}CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), "", nil))`,
+      );
+      writer.line("return buf");
+    });
+    writer.line("return append([]byte{0}, encoded...)");
+  });
+  writer.line();
+  writer.line("// A payload the encoder refuses would be dropped by Socket.IO's write");
   writer.line("// path without an error anywhere, leaving the peer to wait out its own");
   writer.line("// timeout. Checking before the value is handed over turns that silence into");
   writer.line("// an immediate answer that names the offending value — the common cause");
   writer.line("// being a required string enum left at its zero value.");
   writer.block(`func ${generated("ensureEncodable")}(value any, method string) *${q}RpcError`, () => {
-    writer.block("if _, err := json.Marshal(value); err != nil", () => {
+    writer.block(`if _, err := ${generated("encodeValue")}(value); err != nil`, () => {
       writer.line(
         `return ${q}NewRpcError(${q}CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), method, nil)`,
       );
@@ -374,9 +860,17 @@ export function writeRuntimeHelpers(writer: GoWriter, q: string): void {
   });
   writer.line();
   writer.block(`func ${generated("decodeValue")}(value any, target any) error`, () => {
-    writer.line("encoded, err := json.Marshal(value)");
+    writer.line(`data, ok := ${generated("asBytes")}(value)`);
+    writer.block("if !ok", () => writer.line('return errors.New("expected binary postcard payload")'));
+    writer.line("rv := reflect.ValueOf(target)");
+    writer.block("if rv.Kind() != reflect.Pointer || rv.IsNil()", () =>
+      writer.line('return errors.New("target must be a non-nil pointer")'),
+    );
+    writer.line(`rest, err := ${generated("readPostcard")}(data, rv.Elem(), rv.Elem().Type(), false)`);
     writer.block("if err != nil", () => writer.line("return err"));
-    writer.block("if err := json.Unmarshal(encoded, target); err != nil", () => writer.line("return err"));
+    writer.block("if len(rest) != 0", () =>
+      writer.line('return fmt.Errorf("trailing bytes in postcard buffer: %d", len(rest))'),
+    );
     writer.line("return nil");
   });
   writer.line();
@@ -384,6 +878,13 @@ export function writeRuntimeHelpers(writer: GoWriter, q: string): void {
   writer.line("// so a failed call still yields the zero result a caller expects alongside");
   writer.line("// the error rather than a half-populated one.");
   writer.block(`func ${generated("decodeInto")}(value any, target any) error`, () => {
+    writer.line(`data, ok := ${generated("asBytes")}(value)`);
+    writer.block("if ok", () => {
+      writer.line("value = nil");
+      writer.block("if len(data) > 0 && data[0] == 0", () => {
+        writer.line("value = data[1:]");
+      });
+    });
     writer.block(`if err := ${generated("decodeValue")}(value, target); err != nil`, () => {
       writer.line("pointer := reflect.ValueOf(target)");
       writer.block("if pointer.Kind() == reflect.Pointer && !pointer.IsNil()", () => {
@@ -395,13 +896,32 @@ export function writeRuntimeHelpers(writer: GoWriter, q: string): void {
   });
   writer.line();
   writer.block(`func ${generated("decodeRpcError")}(value any) (*${q}RpcError, bool)`, () => {
+    writer.line(`data, ok := ${generated("asBytes")}(value)`);
+    writer.block("if !ok || len(data) == 0", () => writer.line("return nil, false"));
     writer.line(`var rpcErr ${q}RpcError`);
-    writer.block(`if err := ${generated("decodeValue")}(value, &rpcErr); err != nil`, () =>
-      writer.line("return nil, false"),
-    );
-    writer.block("if !rpcErr.RPCError", () => writer.line("return nil, false"));
-    writer.line("return &rpcErr, true");
+    writer.block(`if rest, err := ${generated("readRpcError")}(data, &rpcErr); err == nil && len(rest) == 0`, () => {
+      writer.line("return &rpcErr, true");
+    });
+    writer.block("if data[0] == 1", () => {
+      writer.block(`if rest, err := ${generated("readRpcError")}(data[1:], &rpcErr); err == nil && len(rest) == 0`, () => {
+        writer.line("return &rpcErr, true");
+      });
+    });
+    writer.line("return nil, false");
   });
+  writer.line();
+  writer.block(
+    `func ${generated("decodeReplyError")}(value any, method string) (*${q}RpcError, bool)`,
+    () => {
+      writer.line(`data, ok := ${generated("asBytes")}(value)`);
+      writer.block("if !ok || len(data) == 0 || data[0] != 1", () => writer.line("return nil, false"));
+      writer.line(`var rpcErr ${q}RpcError`);
+      writer.line(`rest, err := ${generated("readRpcError")}(data[1:], &rpcErr)`);
+      writer.block("if err != nil || len(rest) != 0", () => writer.line("return nil, false"));
+      writer.block('if rpcErr.Method == ""', () => writer.line("rpcErr.Method = method"));
+      writer.line("return &rpcErr, true");
+    },
+  );
 }
 
 function writeTypesFile(schema: RpcSchema, packageName: string): string {
@@ -416,6 +936,7 @@ function writeTypesFile(schema: RpcSchema, packageName: string): string {
   writer.line('\t"encoding/json"');
   writer.line('\t"errors"');
   writer.line('\t"fmt"');
+  writer.line('\t"math"');
   writer.line('\t"reflect"');
   writer.line(")");
   writer.line();
@@ -508,6 +1029,36 @@ function writeTypesFile(schema: RpcSchema, packageName: string): string {
         });
         writer.line("*v = candidate");
         writer.line("return nil");
+      });
+      writer.line();
+      writer.block(`func (v ${declaredName}) MarshalBinary() ([]byte, error)`, () => {
+        writer.line("switch v {");
+        for (const [index, constant] of constants.entries()) {
+          writer.line(`case ${constant}:`);
+          writer.line(`\treturn ${encodeUvarintBytes(index)}, nil`);
+        }
+        writer.line("default:");
+        writer.line(`\treturn nil, fmt.Errorf("invalid ${declaredName} %q", v)`);
+        writer.line("}");
+      });
+      writer.line();
+      writer.block(`func (v *${declaredName}) UnmarshalBinary(data []byte) error`, () => {
+        writer.block("if v == nil", () => {
+          writer.line(`return fmt.Errorf("cannot unmarshal ${declaredName} into nil receiver")`);
+        });
+        writer.line(`idx, n := ${generated("readUvarint")}(data)`);
+        writer.block("if n <= 0 || n != len(data)", () => {
+          writer.line(`return fmt.Errorf("invalid ${declaredName} binary payload")`);
+        });
+        writer.line("switch idx {");
+        for (const [index, constant] of constants.entries()) {
+          writer.line(`case ${index}:`);
+          writer.line(`\t*v = ${constant}`);
+          writer.line("\treturn nil");
+        }
+        writer.line("default:");
+        writer.line(`\treturn fmt.Errorf("invalid ${declaredName} index %d", idx)`);
+        writer.line("}");
       });
       continue;
     }
@@ -774,7 +1325,14 @@ export function writeInboundCall(writer: GoWriter, side: GoSide): void {
       });
       writer.line("return");
     });
-    writer.block("c.once.Do(func()", () => writer.line("c.ack([]any{value}, nil)"), "})");
+    writer.line(`payload := ${generated("encodeReply")}(value)`);
+    writer.block("c.once.Do(func()", () => {
+      writer.block(`if c.binding != nil && c.binding.${BINDING.emitState} != nil`, () => {
+        writer.line(`c.binding.${BINDING.emitState}.mu.Lock()`);
+        writer.line(`defer c.binding.${BINDING.emitState}.mu.Unlock()`);
+      });
+      writer.line("c.ack([]any{payload}, nil)");
+    }, "})");
   });
   writer.line();
   writer.block(`func (c *${call}) fail(code ${q}RpcErrorCode, message string)`, () => {
@@ -1062,13 +1620,16 @@ export function writeBinding(writer: GoWriter, side: GoSide, methods: readonly R
       () => writer.line("return"),
     );
     writer.line("// Data is caller-supplied and may not encode; the report must survive it.");
-    writer.block(`if ${generated("ensureEncodable")}(err, err.Method) != nil`, () => {
-      writer.line(`err = ${q}NewRpcError(err.Code, err.Message, err.Method, nil)`);
+    writer.line(`encoded, encErr := ${generated("appendRpcError")}(nil, err)`);
+    writer.block("if encErr != nil", () => {
+      writer.line(
+        `encoded, _ = ${generated("appendRpcError")}(nil, ${q}NewRpcError(err.Code, err.Message, err.Method, nil))`,
+      );
     });
     writer.line(`b.${BINDING.emitState}.mu.Lock()`);
     writer.line(`defer b.${BINDING.emitState}.mu.Unlock()`);
     writer.block(`if !b.${BINDING.socket}.Connected() || b.Disposed()`, () => writer.line("return"));
-    writer.line(`_ = ${unbuffered(side, `b.${BINDING.socket}`)}.Emit(${q}RPCErrorEvent, err)`);
+    writer.line(`_ = ${unbuffered(side, `b.${BINDING.socket}`)}.Emit(${q}RPCErrorEvent, encoded)`);
   });
 }
 
@@ -1108,6 +1669,11 @@ export function writeInboundHandlers(
       }
 
       const empty = emptyCompositeLiteral(method.returnType, declarations, side.q);
+      if (isJsonValueType(method.returnType, declarations)) {
+        writer.line(`result, err := b.${BINDING.handler}.${handle}(${handlerCallArguments(method, side)})`);
+        writer.line("call.finish(&result, err)");
+        return;
+      }
       if (!empty) {
         writer.line(`call.finish(b.${BINDING.handler}.${handle}(${handlerCallArguments(method, side)}))`);
         return;
@@ -1258,15 +1824,18 @@ function writeServerClient(writer: GoWriter, defaultTimeoutMs: number): void {
  * was sent on drops, and `checkPayload`, which measures the packet against the
  * server's limit.
  */
-export function writeCaller(writer: GoWriter, side: GoSide, methods: readonly RpcMethod[]): void {
+export function writeCaller(
+  writer: GoWriter,
+  side: GoSide,
+  methods: readonly RpcMethod[],
+  declarations: DeclarationScope = new Map(),
+): void {
   const ackResult = generated("ackResult");
   const receiver = generated("c");
   const result = generated("result");
   const failure = generated("err");
   const caller = side.callerType;
   const { q } = side;
-  const payloadCheck = (packet: string, plain: string): string =>
-    side.payloadCheck ? `c.checkPayload(method, ${packet})` : `${generated("ensureEncodable")}(${plain}, method)`;
 
   writer.block(`func ${generated("errorFromContext")}(ctx context.Context, method string) *${q}RpcError`, () => {
     writer.block("if ctx == nil", () =>
@@ -1299,13 +1868,17 @@ export function writeCaller(writer: GoWriter, side: GoSide, methods: readonly Rp
       writer.block(`if err := ${generated("errorFromContext")}(ctx, method); err != nil`, () =>
         writer.line("return err"),
       );
-      writer.block(`if err := ${payloadCheck("append([]any{method}, args...)", "args")}; err != nil`, () =>
-        writer.line("return err"),
-      );
+      writer.line(`encoded, encErr := ${generated("encodeArgs")}(method, args)`);
+      writer.block("if encErr != nil", () => writer.line("return encErr"));
+      if (side.payloadCheck) {
+        writer.block("if err := c.checkPayload(method, encoded); err != nil", () =>
+          writer.line("return err"),
+        );
+      }
       writer.line("c.emitState.mu.Lock()");
       writer.line("defer c.emitState.mu.Unlock()");
       writer.block("if err := c.stateError(method); err != nil", () => writer.line("return err"));
-      writer.block(`if err := ${unbuffered(side, "c.socket")}.Emit(method, args...); err != nil`, () => {
+      writer.block(`if err := ${unbuffered(side, "c.socket")}.Emit(method, encoded...); err != nil`, () => {
         writer.line(`return ${generated("errorFromTransport")}(err, method)`);
       });
       writer.line("return nil");
@@ -1319,9 +1892,13 @@ export function writeCaller(writer: GoWriter, side: GoSide, methods: readonly Rp
       writer.block(`if err := ${generated("errorFromContext")}(ctx, method); err != nil`, () =>
         writer.line("return err"),
       );
-      writer.block(`if err := ${payloadCheck("append([]any{method}, args...)", "args")}; err != nil`, () =>
-        writer.line("return err"),
-      );
+      writer.line(`encoded, encErr := ${generated("encodeArgs")}(method, args)`);
+      writer.block("if encErr != nil", () => writer.line("return encErr"));
+      if (side.payloadCheck) {
+        writer.block("if err := c.checkPayload(method, encoded); err != nil", () =>
+          writer.line("return err"),
+        );
+      }
       writer.line(`response := make(chan ${ackResult}, 1)`);
       writer.line("c.emitState.mu.Lock()");
       if (side.reconnects) {
@@ -1337,7 +1914,7 @@ export function writeCaller(writer: GoWriter, side: GoSide, methods: readonly Rp
         });
       }
       writer.line(
-        `${unbuffered(side, "c.socket.Timeout(c.timeout)")}.EmitWithAck(method, args...)(func(values []any, err error) {`,
+        `${unbuffered(side, "c.socket.Timeout(c.timeout)")}.EmitWithAck(method, encoded...)(func(values []any, err error) {`,
       );
       writer.line("\tselect {");
       writer.line(`\tcase response <- ${ackResult}{args: values, err: err}:`);
@@ -1376,8 +1953,9 @@ export function writeCaller(writer: GoWriter, side: GoSide, methods: readonly Rp
         );
         writer.line(`return ${q}NewRpcError(${q}CodeInvalidArgument, message, method, nil)`);
       });
-      writer.block(`if failure, ok := ${generated("decodeRpcError")}(acknowledged.args[0]); ok`, () =>
-        writer.line("return failure"),
+      writer.block(
+        `if failure, ok := ${generated("decodeReplyError")}(acknowledged.args[0], method); ok`,
+        () => writer.line("return failure"),
       );
       writer.block(`if err := ${generated("decodeInto")}(acknowledged.args[0], target); err != nil`, () => {
         writer.line('message := fmt.Sprintf("invalid acknowledgement payload: %v", err)');
@@ -1400,7 +1978,9 @@ export function writeCaller(writer: GoWriter, side: GoSide, methods: readonly Rp
 
     if (!resultType) {
       writer.block(`func (${receiver} *${caller}) ${name}(${signatureParams}) error`, () => {
-        writer.line(`return ${generated("emit")}(${receiver}, ctx, ${wireName}${outboundArguments(method)})`);
+        writer.line(
+          `return ${generated("emit")}(${receiver}, ctx, ${wireName}${outboundArguments(method, declarations)})`,
+        );
       });
       continue;
     }
@@ -1411,7 +1991,7 @@ export function writeCaller(writer: GoWriter, side: GoSide, methods: readonly Rp
       `func (${receiver} *${caller}) ${name}(${signatureParams}) (${result} ${resultType}, ${failure} error)`,
       () => {
         writer.line(
-          `${failure} = ${generated("request")}(${receiver}, ctx, ${wireName}, &${result}${outboundArguments(method)})`,
+          `${failure} = ${generated("request")}(${receiver}, ctx, ${wireName}, &${result}${outboundArguments(method, declarations)})`,
         );
         writer.line("return");
       },
@@ -1461,7 +2041,7 @@ function writeServerFile(schema: RpcSchema, options: ResolvedGoBackendOptions): 
   writer.line();
   writeServerClient(writer, options.defaultTimeoutMs);
   writer.line();
-  writeCaller(writer, SERVER_SIDE, outboundMethods(schema));
+  writeCaller(writer, SERVER_SIDE, outboundMethods(schema), declarations);
   return writer.toString();
 }
 

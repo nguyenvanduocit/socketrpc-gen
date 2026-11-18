@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"reflect"
 	"sync"
@@ -56,25 +57,503 @@ func rpc_errorFromPanic(value any, method string) *rpc_RpcError {
 	return rpc_NewRpcError(rpc_CodeInternalError, fmt.Sprint(value), method, nil)
 }
 
-// A payload the JSON encoder refuses would be dropped by Socket.IO's write
+func rpc_appendUvarint(buf []byte, v uint64) []byte {
+	for v >= 0x80 {
+		buf = append(buf, byte(v)|0x80)
+		v >>= 7
+	}
+	return append(buf, byte(v))
+}
+
+func rpc_appendVarint(buf []byte, v int64) []byte {
+	ux := uint64(v) << 1
+	if v < 0 {
+		ux = ^ux
+	}
+	return rpc_appendUvarint(buf, ux)
+}
+
+func rpc_readUvarint(data []byte) (uint64, int) {
+	var out uint64
+	for i := 0; i < len(data) && i < 10; i++ {
+		b := data[i]
+		carry := uint64(b & 0x7f)
+		if i == 9 && carry > 1 {
+			return 0, -1
+		}
+		out |= carry << (7 * uint(i))
+		if (b & 0x80) == 0 {
+			return out, i + 1
+		}
+	}
+	return 0, 0
+}
+
+func rpc_readVarint(data []byte) (int64, int) {
+	ux, n := rpc_readUvarint(data)
+	if n <= 0 {
+		return 0, n
+	}
+	v := int64(ux >> 1)
+	if (ux & 1) != 0 {
+		v = ^v
+	}
+	return v, n
+}
+
+func rpc_asBytes(value any) ([]byte, bool) {
+	switch v := value.(type) {
+	case []byte:
+		return v, true
+	case interface{ Bytes() []byte }:
+		return v.Bytes(), true
+	default:
+		return nil, false
+	}
+}
+
+func rpc_appendRpcError(buf []byte, err *rpc_RpcError) ([]byte, error) {
+	if err == nil {
+		err = &rpc_RpcError{}
+	}
+	code := string(err.Code)
+	buf = rpc_appendUvarint(buf, uint64(len(code)))
+	buf = append(buf, code...)
+	buf = rpc_appendUvarint(buf, uint64(len(err.Message)))
+	buf = append(buf, err.Message...)
+	if err.Method == "" {
+		buf = append(buf, 0)
+	}
+	if err.Method != "" {
+		buf = append(buf, 1)
+		buf = rpc_appendUvarint(buf, uint64(len(err.Method)))
+		buf = append(buf, err.Method...)
+	}
+	if err.Data == nil {
+		buf = append(buf, 0)
+	}
+	if err.Data != nil {
+		raw, jerr := json.Marshal(err.Data)
+		if jerr != nil {
+			return nil, jerr
+		}
+		buf = append(buf, 1)
+		buf = rpc_appendUvarint(buf, uint64(len(raw)))
+		buf = append(buf, raw...)
+	}
+	return buf, nil
+}
+
+func rpc_readRpcError(data []byte, target *rpc_RpcError) ([]byte, error) {
+	codeLen, n := rpc_readUvarint(data)
+	if n <= 0 || codeLen == 0 || uint64(len(data)-n) < codeLen {
+		return nil, errors.New("unexpected end of postcard buffer")
+	}
+	code := string(data[n : n+int(codeLen)])
+	data = data[n+int(codeLen):]
+	msgLen, n := rpc_readUvarint(data)
+	if n <= 0 || uint64(len(data)-n) < msgLen {
+		return nil, errors.New("unexpected end of postcard buffer")
+	}
+	message := string(data[n : n+int(msgLen)])
+	data = data[n+int(msgLen):]
+	if len(data) == 0 {
+		return nil, errors.New("unexpected end of postcard buffer")
+	}
+	var method string
+	methodTag := data[0]
+	data = data[1:]
+	if methodTag == 1 {
+		mLen, mn := rpc_readUvarint(data)
+		if mn <= 0 || uint64(len(data)-mn) < mLen {
+			return nil, errors.New("unexpected end of postcard buffer")
+		}
+		method = string(data[mn : mn+int(mLen)])
+		data = data[mn+int(mLen):]
+	}
+	if methodTag != 0 && methodTag != 1 {
+		return nil, fmt.Errorf("invalid option discriminant %d", methodTag)
+	}
+	if len(data) == 0 {
+		return nil, errors.New("unexpected end of postcard buffer")
+	}
+	var errData any
+	dataTag := data[0]
+	data = data[1:]
+	if dataTag == 1 {
+		dLen, dn := rpc_readUvarint(data)
+		if dn <= 0 || uint64(len(data)-dn) < dLen {
+			return nil, errors.New("unexpected end of postcard buffer")
+		}
+		raw := data[dn : dn+int(dLen)]
+		data = data[dn+int(dLen):]
+		if err := json.Unmarshal(raw, &errData); err != nil {
+			return nil, err
+		}
+	}
+	if dataTag != 0 && dataTag != 1 {
+		return nil, fmt.Errorf("invalid option discriminant %d", dataTag)
+	}
+	*target = rpc_RpcError{RPCError: true, Code: rpc_RpcErrorCode(code), Message: message, Method: method, Data: errData}
+	return data, nil
+}
+
+func rpc_appendPostcard(buf []byte, v reflect.Value, t reflect.Type, optJSON bool) ([]byte, error) {
+	if t.Kind() == reflect.Interface {
+		if optJSON {
+			if !v.IsValid() || v.IsNil() {
+				return append(buf, 0), nil
+			}
+			buf = append(buf, 1)
+		}
+		if !v.IsValid() || v.IsNil() {
+			raw := []byte("null")
+			buf = rpc_appendUvarint(buf, uint64(len(raw)))
+			return append(buf, raw...), nil
+		}
+		raw, err := json.Marshal(v.Interface())
+		if err != nil {
+			return nil, err
+		}
+		buf = rpc_appendUvarint(buf, uint64(len(raw)))
+		return append(buf, raw...), nil
+	}
+	if t == reflect.TypeOf((*rpc_RpcError)(nil)) {
+		if !v.IsValid() || v.IsNil() {
+			return rpc_appendRpcError(buf, &rpc_RpcError{})
+		}
+		return rpc_appendRpcError(buf, v.Interface().(*rpc_RpcError))
+	}
+	if t == reflect.TypeOf(rpc_RpcError{}) {
+		errVal := v.Interface().(rpc_RpcError)
+		return rpc_appendRpcError(buf, &errVal)
+	}
+	if t.Kind() == reflect.Pointer {
+		if !v.IsValid() || v.IsNil() {
+			return append(buf, 0), nil
+		}
+		buf = append(buf, 1)
+		return rpc_appendPostcard(buf, v.Elem(), t.Elem(), false)
+	}
+	switch t.Kind() {
+	case reflect.Bool:
+		if v.Bool() {
+			return append(buf, 1), nil
+		}
+		return append(buf, 0), nil
+	case reflect.Int64:
+		return rpc_appendVarint(buf, v.Int()), nil
+	case reflect.Float64:
+		f := v.Float()
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, errors.New("non-finite float64")
+		}
+		bits := math.Float64bits(f)
+		return append(buf, byte(bits), byte(bits>>8), byte(bits>>16), byte(bits>>24), byte(bits>>32), byte(bits>>40), byte(bits>>48), byte(bits>>56)), nil
+	case reflect.String:
+		if v.CanInterface() {
+			if bm, ok := v.Interface().(interface{ MarshalBinary() ([]byte, error) }); ok {
+				b, err := bm.MarshalBinary()
+				if err != nil {
+					return nil, err
+				}
+				return append(buf, b...), nil
+			}
+		}
+		s := v.String()
+		buf = rpc_appendUvarint(buf, uint64(len(s)))
+		return append(buf, s...), nil
+	case reflect.Slice:
+		n := v.Len()
+		buf = rpc_appendUvarint(buf, uint64(n))
+		for i := 0; i < n; i++ {
+			var err error
+			buf, err = rpc_appendPostcard(buf, v.Index(i), t.Elem(), false)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return buf, nil
+	case reflect.Map:
+		n := v.Len()
+		buf = rpc_appendUvarint(buf, uint64(n))
+		iter := v.MapRange()
+		for iter.Next() {
+			k := iter.Key().String()
+			buf = rpc_appendUvarint(buf, uint64(len(k)))
+			buf = append(buf, k...)
+			var err error
+			buf, err = rpc_appendPostcard(buf, iter.Value(), t.Elem(), false)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return buf, nil
+	case reflect.Struct:
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			jtag := field.Tag.Get("json")
+			isOpt := len(jtag) >= 10 && jtag[len(jtag)-10:] == ",omitempty"
+			var err error
+			buf, err = rpc_appendPostcard(buf, v.Field(i), field.Type, isOpt)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return buf, nil
+	default:
+		return nil, fmt.Errorf("unsupported type %s", t)
+	}
+}
+
+func rpc_readPostcard(data []byte, v reflect.Value, t reflect.Type, optJSON bool) ([]byte, error) {
+	if t.Kind() == reflect.Interface {
+		if optJSON {
+			if len(data) == 0 {
+				return nil, errors.New("unexpected end of postcard buffer")
+			}
+			tag := data[0]
+			data = data[1:]
+			if tag == 0 {
+				v.Set(reflect.Zero(t))
+				return data, nil
+			}
+			if tag != 1 {
+				return nil, fmt.Errorf("invalid option discriminant %d", tag)
+			}
+		}
+		strLen, n := rpc_readUvarint(data)
+		if n <= 0 || uint64(len(data)-n) < strLen {
+			return nil, errors.New("unexpected end of postcard buffer")
+		}
+		raw := data[n : n+int(strLen)]
+		data = data[n+int(strLen):]
+		var parsed any
+		if err := json.Unmarshal(raw, &parsed); err != nil {
+			return nil, err
+		}
+		if parsed == nil {
+			v.Set(reflect.Zero(t))
+			return data, nil
+		}
+		v.Set(reflect.ValueOf(parsed))
+		return data, nil
+	}
+	if t == reflect.TypeOf((*rpc_RpcError)(nil)) {
+		var rpcErr rpc_RpcError
+		rest, err := rpc_readRpcError(data, &rpcErr)
+		if err != nil {
+			return nil, err
+		}
+		v.Set(reflect.ValueOf(&rpcErr))
+		return rest, nil
+	}
+	if t == reflect.TypeOf(rpc_RpcError{}) {
+		var rpcErr rpc_RpcError
+		rest, err := rpc_readRpcError(data, &rpcErr)
+		if err != nil {
+			return nil, err
+		}
+		v.Set(reflect.ValueOf(rpcErr))
+		return rest, nil
+	}
+	if t.Kind() == reflect.Pointer {
+		if len(data) == 0 {
+			return nil, errors.New("unexpected end of postcard buffer")
+		}
+		tag := data[0]
+		data = data[1:]
+		if tag == 0 || tag == 2 {
+			v.Set(reflect.Zero(t))
+			return data, nil
+		}
+		if tag != 1 {
+			return nil, fmt.Errorf("invalid option discriminant %d", tag)
+		}
+		elem := reflect.New(t.Elem())
+		rest, err := rpc_readPostcard(data, elem.Elem(), t.Elem(), false)
+		if err != nil {
+			return nil, err
+		}
+		v.Set(elem)
+		return rest, nil
+	}
+	switch t.Kind() {
+	case reflect.Bool:
+		if len(data) == 0 {
+			return nil, errors.New("unexpected end of postcard buffer")
+		}
+		b := data[0]
+		data = data[1:]
+		if b == 0 {
+			v.SetBool(false)
+			return data, nil
+		}
+		if b == 1 {
+			v.SetBool(true)
+			return data, nil
+		}
+		return nil, fmt.Errorf("invalid bool discriminant %d", b)
+	case reflect.Int64:
+		val, n := rpc_readVarint(data)
+		if n <= 0 {
+			return nil, errors.New("invalid int64 varint")
+		}
+		v.SetInt(val)
+		return data[n:], nil
+	case reflect.Float64:
+		if len(data) < 8 {
+			return nil, errors.New("unexpected end of postcard buffer")
+		}
+		bits := uint64(data[0]) | uint64(data[1])<<8 | uint64(data[2])<<16 | uint64(data[3])<<24 | uint64(data[4])<<32 | uint64(data[5])<<40 | uint64(data[6])<<48 | uint64(data[7])<<56
+		f := math.Float64frombits(bits)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, errors.New("non-finite float64")
+		}
+		v.SetFloat(f)
+		return data[8:], nil
+	case reflect.String:
+		if v.CanAddr() && v.Addr().CanInterface() {
+			if bu, ok := v.Addr().Interface().(interface{ UnmarshalBinary([]byte) error }); ok {
+				_, n := rpc_readUvarint(data)
+				if n <= 0 {
+					return nil, errors.New("invalid enum varint")
+				}
+				if err := bu.UnmarshalBinary(data[:n]); err != nil {
+					return nil, err
+				}
+				return data[n:], nil
+			}
+		}
+		strLen, n := rpc_readUvarint(data)
+		if n <= 0 || uint64(len(data)-n) < strLen {
+			return nil, errors.New("unexpected end of postcard buffer")
+		}
+		v.SetString(string(data[n : n+int(strLen)]))
+		return data[n+int(strLen):], nil
+	case reflect.Slice:
+		count, n := rpc_readUvarint(data)
+		if n <= 0 || count > uint64(len(data)) {
+			return nil, errors.New("invalid slice length")
+		}
+		data = data[n:]
+		slice := reflect.MakeSlice(t, int(count), int(count))
+		for i := 0; i < int(count); i++ {
+			var err error
+			data, err = rpc_readPostcard(data, slice.Index(i), t.Elem(), false)
+			if err != nil {
+				return nil, err
+			}
+		}
+		v.Set(slice)
+		return data, nil
+	case reflect.Map:
+		count, n := rpc_readUvarint(data)
+		if n <= 0 || count > uint64(len(data)) {
+			return nil, errors.New("invalid map length")
+		}
+		data = data[n:]
+		m := reflect.MakeMapWithSize(t, int(count))
+		for i := 0; i < int(count); i++ {
+			kLen, kn := rpc_readUvarint(data)
+			if kn <= 0 || uint64(len(data)-kn) < kLen {
+				return nil, errors.New("unexpected end of postcard buffer")
+			}
+			k := string(data[kn : kn+int(kLen)])
+			data = data[kn+int(kLen):]
+			elem := reflect.New(t.Elem()).Elem()
+			var err error
+			data, err = rpc_readPostcard(data, elem, t.Elem(), false)
+			if err != nil {
+				return nil, err
+			}
+			m.SetMapIndex(reflect.ValueOf(k), elem)
+		}
+		v.Set(m)
+		return data, nil
+	case reflect.Struct:
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			jtag := field.Tag.Get("json")
+			isOpt := len(jtag) >= 10 && jtag[len(jtag)-10:] == ",omitempty"
+			var err error
+			data, err = rpc_readPostcard(data, v.Field(i), field.Type, isOpt)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return data, nil
+	default:
+		return nil, fmt.Errorf("unsupported type %s", t)
+	}
+}
+
+func rpc_encodeValue(value any) ([]byte, error) {
+	if value == nil {
+		return []byte{4, 'n', 'u', 'l', 'l'}, nil
+	}
+	rv := reflect.ValueOf(value)
+	if rv.Kind() == reflect.Pointer && !rv.IsNil() && rv.Elem().Kind() == reflect.Interface {
+		rv = rv.Elem()
+	}
+	return rpc_appendPostcard(nil, rv, rv.Type(), false)
+}
+
+func rpc_encodeArgs(method string, args []any) ([]any, *rpc_RpcError) {
+	encoded := make([]any, len(args))
+	for i, arg := range args {
+		b, err := rpc_encodeValue(arg)
+		if err != nil {
+			return nil, rpc_NewRpcError(rpc_CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), method, nil)
+		}
+		encoded[i] = b
+	}
+	return encoded, nil
+}
+
+func rpc_encodeReply(value any) []byte {
+	if failure, ok := value.(*rpc_RpcError); ok && failure != nil {
+		buf, err := rpc_appendRpcError([]byte{1}, failure)
+		if err != nil {
+			buf, _ = rpc_appendRpcError([]byte{1}, rpc_NewRpcError(failure.Code, failure.Message, failure.Method, nil))
+		}
+		return buf
+	}
+	encoded, err := rpc_encodeValue(value)
+	if err != nil {
+		buf, _ := rpc_appendRpcError([]byte{1}, rpc_NewRpcError(rpc_CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), "", nil))
+		return buf
+	}
+	return append([]byte{0}, encoded...)
+}
+
+// A payload the encoder refuses would be dropped by Socket.IO's write
 // path without an error anywhere, leaving the peer to wait out its own
 // timeout. Checking before the value is handed over turns that silence into
 // an immediate answer that names the offending value — the common cause
 // being a required string enum left at its zero value.
 func rpc_ensureEncodable(value any, method string) *rpc_RpcError {
-	if _, err := json.Marshal(value); err != nil {
+	if _, err := rpc_encodeValue(value); err != nil {
 		return rpc_NewRpcError(rpc_CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), method, nil)
 	}
 	return nil
 }
 
 func rpc_decodeValue(value any, target any) error {
-	encoded, err := json.Marshal(value)
+	data, ok := rpc_asBytes(value)
+	if !ok {
+		return errors.New("expected binary postcard payload")
+	}
+	rv := reflect.ValueOf(target)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return errors.New("target must be a non-nil pointer")
+	}
+	rest, err := rpc_readPostcard(data, rv.Elem(), rv.Elem().Type(), false)
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal(encoded, target); err != nil {
-		return err
+	if len(rest) != 0 {
+		return fmt.Errorf("trailing bytes in postcard buffer: %d", len(rest))
 	}
 	return nil
 }
@@ -83,6 +562,13 @@ func rpc_decodeValue(value any, target any) error {
 // so a failed call still yields the zero result a caller expects alongside
 // the error rather than a half-populated one.
 func rpc_decodeInto(value any, target any) error {
+	data, ok := rpc_asBytes(value)
+	if ok {
+		value = nil
+		if len(data) > 0 && data[0] == 0 {
+			value = data[1:]
+		}
+	}
 	if err := rpc_decodeValue(value, target); err != nil {
 		pointer := reflect.ValueOf(target)
 		if pointer.Kind() == reflect.Pointer && !pointer.IsNil() {
@@ -94,12 +580,34 @@ func rpc_decodeInto(value any, target any) error {
 }
 
 func rpc_decodeRpcError(value any) (*rpc_RpcError, bool) {
-	var rpcErr rpc_RpcError
-	if err := rpc_decodeValue(value, &rpcErr); err != nil {
+	data, ok := rpc_asBytes(value)
+	if !ok || len(data) == 0 {
 		return nil, false
 	}
-	if !rpcErr.RPCError {
+	var rpcErr rpc_RpcError
+	if rest, err := rpc_readRpcError(data, &rpcErr); err == nil && len(rest) == 0 {
+		return &rpcErr, true
+	}
+	if data[0] == 1 {
+		if rest, err := rpc_readRpcError(data[1:], &rpcErr); err == nil && len(rest) == 0 {
+			return &rpcErr, true
+		}
+	}
+	return nil, false
+}
+
+func rpc_decodeReplyError(value any, method string) (*rpc_RpcError, bool) {
+	data, ok := rpc_asBytes(value)
+	if !ok || len(data) == 0 || data[0] != 1 {
 		return nil, false
+	}
+	var rpcErr rpc_RpcError
+	rest, err := rpc_readRpcError(data[1:], &rpcErr)
+	if err != nil || len(rest) != 0 {
+		return nil, false
+	}
+	if rpcErr.Method == "" {
+		rpcErr.Method = method
 	}
 	return &rpcErr, true
 }
@@ -370,15 +878,16 @@ func (b *rpc_clientBinding) rpc_emitError(err *rpc_RpcError) {
 		return
 	}
 	// Data is caller-supplied and may not encode; the report must survive it.
-	if rpc_ensureEncodable(err, err.Method) != nil {
-		err = rpc_NewRpcError(err.Code, err.Message, err.Method, nil)
+	encoded, encErr := rpc_appendRpcError(nil, err)
+	if encErr != nil {
+		encoded, _ = rpc_appendRpcError(nil, rpc_NewRpcError(err.Code, err.Message, err.Method, nil))
 	}
 	b.rpc_emitState.mu.Lock()
 	defer b.rpc_emitState.mu.Unlock()
 	if !b.rpc_socket.Connected() || b.Disposed() {
 		return
 	}
-	_ = b.rpc_socket.NoBuffer().Emit(rpc_RPCErrorEvent, err)
+	_ = b.rpc_socket.NoBuffer().Emit(rpc_RPCErrorEvent, encoded)
 }
 
 type rpc_errorSubscription struct {
@@ -430,8 +939,13 @@ func (c *rpc_inboundCall) reply(value any) {
 		}
 		return
 	}
+	payload := rpc_encodeReply(value)
 	c.once.Do(func() {
-		c.ack([]any{value}, nil)
+		if c.binding != nil && c.binding.rpc_emitState != nil {
+			c.binding.rpc_emitState.mu.Lock()
+			defer c.binding.rpc_emitState.mu.Unlock()
+		}
+		c.ack([]any{payload}, nil)
 	})
 }
 
@@ -1006,15 +1520,23 @@ const rpc_packetOverhead = 24
 // packet, failing every call in flight, so the one that is too large fails
 // here on its own and nothing is sent.
 func (c *Conn) checkPayload(method string, packet []any) *rpc_RpcError {
-	encoded, err := json.Marshal(packet)
-	if err != nil {
-		return rpc_NewRpcError(rpc_CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), method, nil)
+	payloadBytes := len(method)
+	for _, item := range packet {
+		if raw, ok := item.([]byte); ok {
+			payloadBytes += len(raw)
+			continue
+		}
+		encoded, err := rpc_encodeValue(item)
+		if err != nil {
+			return rpc_NewRpcError(rpc_CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), method, nil)
+		}
+		payloadBytes += len(encoded)
 	}
 	limit := int64(rpc_defaultMaxPayload)
 	if engine, ok := c.socket.Io().Engine().(interface{ MaxPayload() int64 }); ok && engine.MaxPayload() > 0 {
 		limit = engine.MaxPayload()
 	}
-	if size := int64(len(encoded)+len(c.namespace)) + rpc_packetOverhead; size > limit {
+	if size := int64(payloadBytes+len(c.namespace)) + rpc_packetOverhead; size > limit {
 		message := fmt.Sprintf("payload of about %d bytes exceeds the %d bytes the server accepts", size, limit)
 		return rpc_NewRpcError(rpc_CodeInvalidArgument, message, method, nil)
 	}
@@ -1057,7 +1579,11 @@ func rpc_emit(c *Conn, ctx context.Context, method string, args ...any) error {
 	if err := rpc_errorFromContext(ctx, method); err != nil {
 		return err
 	}
-	if err := c.checkPayload(method, append([]any{method}, args...)); err != nil {
+	encoded, encErr := rpc_encodeArgs(method, args)
+	if encErr != nil {
+		return encErr
+	}
+	if err := c.checkPayload(method, encoded); err != nil {
 		return err
 	}
 	c.emitState.mu.Lock()
@@ -1065,7 +1591,7 @@ func rpc_emit(c *Conn, ctx context.Context, method string, args ...any) error {
 	if err := c.stateError(method); err != nil {
 		return err
 	}
-	if err := c.socket.NoBuffer().Emit(method, args...); err != nil {
+	if err := c.socket.NoBuffer().Emit(method, encoded...); err != nil {
 		return rpc_errorFromTransport(err, method)
 	}
 	return nil
@@ -1076,7 +1602,11 @@ func rpc_request(c *Conn, ctx context.Context, method string, target any, args .
 	if err := rpc_errorFromContext(ctx, method); err != nil {
 		return err
 	}
-	if err := c.checkPayload(method, append([]any{method}, args...)); err != nil {
+	encoded, encErr := rpc_encodeArgs(method, args)
+	if encErr != nil {
+		return encErr
+	}
+	if err := c.checkPayload(method, encoded); err != nil {
 		return err
 	}
 	response := make(chan rpc_ackResult, 1)
@@ -1086,7 +1616,7 @@ func rpc_request(c *Conn, ctx context.Context, method string, target any, args .
 		c.emitState.mu.Unlock()
 		return err
 	}
-	c.socket.Timeout(c.timeout).NoBuffer().EmitWithAck(method, args...)(func(values []any, err error) {
+	c.socket.Timeout(c.timeout).NoBuffer().EmitWithAck(method, encoded...)(func(values []any, err error) {
 		select {
 		case response <- rpc_ackResult{args: values, err: err}:
 		default:
@@ -1118,7 +1648,7 @@ func rpc_request(c *Conn, ctx context.Context, method string, target any, args .
 		message := fmt.Sprintf("expected one acknowledgement value, got %d", len(acknowledged.args))
 		return rpc_NewRpcError(rpc_CodeInvalidArgument, message, method, nil)
 	}
-	if failure, ok := rpc_decodeRpcError(acknowledged.args[0]); ok {
+	if failure, ok := rpc_decodeReplyError(acknowledged.args[0], method); ok {
 		return failure
 	}
 	if err := rpc_decodeInto(acknowledged.args[0], target); err != nil {

@@ -104,6 +104,10 @@ export function runCli(argv: string[]): void {
       "--rust-out <dir>",
       "Directory of the generated Rust module: mod.rs, types.rs and server.rs / client.rs (defaults to the input file's directory)",
     )
+    .option(
+      "--schema-out <file>",
+      "Write the contract's language-neutral schema (RpcSchema) to <file> as JSON; refuses a contract it cannot model",
+    )
     .option("-w, --watch", "Watch for changes and regenerate automatically", false)
     .action((filePath, options) => {
       const inputPath = path.resolve(process.cwd(), filePath);
@@ -133,6 +137,7 @@ export function runCli(argv: string[]): void {
         goClientPackageName: options.goClientPackage,
         goClientSocketImport: options.goClientSocketImport,
         rustOutputDir: options.rustOut ? path.resolve(process.cwd(), options.rustOut) : outputDir,
+        schemaOutputPath: options.schemaOut ? path.resolve(process.cwd(), options.schemaOut) : undefined,
       };
 
       const run = options.watch ? watchMode(config) : generateRpcPackage(config);

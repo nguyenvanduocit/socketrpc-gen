@@ -24,6 +24,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -42,33 +43,92 @@ import (
 // test's own timeouts so a hung client surfaces as a Go-side error, not a hang.
 const askTimeout = 2 * time.Second
 
-// rpcError mirrors the branded RpcError in the generated types.generated.ts.
-// The `__rpcError` brand is the whole contract: isRpcError() checks that field
-// and nothing else, so a payload without it reads as a successful result on the
-// TypeScript side no matter how error-shaped it looks.
-type rpcError struct {
-	Brand   bool   `json:"__rpcError"`
-	Message string `json:"message"`
-	Code    string `json:"code"`
-	Method  string `json:"method,omitempty"`
-	Data    any    `json:"data,omitempty"`
+func appendUvarint(buf []byte, v uint64) []byte {
+	for v >= 0x80 {
+		buf = append(buf, byte(v)|0x80)
+		v >>= 7
+	}
+	return append(buf, byte(v))
 }
 
-func newRpcError(code, message, method string, data any) rpcError {
-	return rpcError{Brand: true, Code: code, Message: message, Method: method, Data: data}
+func readUvarint(data []byte) (uint64, int) {
+	var out uint64
+	for i := 0; i < len(data) && i < 10; i++ {
+		b := data[i]
+		carry := uint64(b & 0x7f)
+		if i == 9 && carry > 1 {
+			return 0, -1
+		}
+		out |= carry << (7 * uint(i))
+		if (b & 0x80) == 0 {
+			return out, i + 1
+		}
+	}
+	return 0, 0
 }
 
-// echoResult is the success payload for `echo`.
-type echoResult struct {
-	ID      string `json:"id"`
-	Payload string `json:"payload"`
+func appendPostcardString(buf []byte, s string) []byte {
+	buf = appendUvarint(buf, uint64(len(s)))
+	return append(buf, s...)
 }
 
-// receiptResult is a success payload deliberately shaped like an error. It proves
-// the brand — not the `{ message, code }` shape — is what classifies a response.
-type receiptResult struct {
-	Message string `json:"message"`
-	Code    string `json:"code"`
+func encodeString(s string) []byte {
+	return appendPostcardString(nil, s)
+}
+
+func encodeOkString(s string) []byte {
+	return appendPostcardString([]byte{0}, s)
+}
+
+func encodeOkTwoStrings(a, b string) []byte {
+	buf := appendPostcardString([]byte{0}, a)
+	return appendPostcardString(buf, b)
+}
+
+func encodeOkStringSlice(items []string) []byte {
+	buf := appendUvarint([]byte{0}, uint64(len(items)))
+	for _, item := range items {
+		buf = appendPostcardString(buf, item)
+	}
+	return buf
+}
+
+func encodeErr(code, message, method string, data any) []byte {
+	buf := appendPostcardString([]byte{1}, code)
+	buf = appendPostcardString(buf, message)
+	if method == "" {
+		buf = append(buf, 0)
+	} else {
+		buf = append(buf, 1)
+		buf = appendPostcardString(buf, method)
+	}
+	if data == nil {
+		buf = append(buf, 0)
+	} else {
+		raw, _ := json.Marshal(data)
+		buf = append(buf, 1)
+		buf = appendPostcardString(buf, string(raw))
+	}
+	return buf
+}
+
+func asBytes(value any) ([]byte, bool) {
+	switch v := value.(type) {
+	case []byte:
+		return v, true
+	case interface{ Bytes() []byte }:
+		return v.Bytes(), true
+	default:
+		return nil, false
+	}
+}
+
+func decodePostcardString(data []byte) string {
+	strLen, n := readUvarint(data)
+	if n <= 0 || uint64(len(data)-n) < strLen {
+		return ""
+	}
+	return string(data[n : n+int(strLen)])
 }
 
 // splitAck separates the trailing acknowledgement callback socket.io appends when
@@ -85,14 +145,26 @@ func splitAck(args []any) ([]any, socket.Ack) {
 	return args, nil
 }
 
-// argString reads a positional string argument. Arguments arrive as decoded JSON,
-// so strings are string, numbers are float64 and objects are map[string]any.
+// argString reads a positional Postcard string argument.
 func argString(args []any, i int) string {
 	if i < 0 || i >= len(args) {
 		return ""
 	}
+	if data, ok := asBytes(args[i]); ok {
+		return decodePostcardString(data)
+	}
 	s, _ := args[i].(string)
 	return s
+}
+
+func replyString(args []any, i int) string {
+	if i < 0 || i >= len(args) {
+		return ""
+	}
+	if data, ok := asBytes(args[i]); ok && len(data) > 0 && data[0] == 0 {
+		return decodePostcardString(data[1:])
+	}
+	return argString(args, i)
 }
 
 // session is the per-connection state the handlers share.
@@ -130,7 +202,7 @@ func wire(client *socket.Socket) {
 		if ack == nil {
 			return
 		}
-		ack([]any{echoResult{ID: argString(params, 0), Payload: argString(params, 1)}}, nil)
+		ack([]any{encodeOkTwoStrings(argString(params, 0), argString(params, 1))}, nil)
 	})
 
 	// failTyped: a failure travels through the ack slot as a branded error, with a
@@ -142,7 +214,7 @@ func wire(client *socket.Socket) {
 			return
 		}
 		reason := argString(params, 0)
-		ack([]any{newRpcError(
+		ack([]any{encodeErr(
 			"GO_REFUSED",
 			"go server refused: "+reason,
 			"failTyped",
@@ -165,7 +237,7 @@ func wire(client *socket.Socket) {
 	// readNotes: reads back what `note` delivered, making fire-and-forget observable.
 	client.On("readNotes", func(args ...any) {
 		if _, ack := splitAck(args); ack != nil {
-			ack([]any{state.snapshot()}, nil)
+			ack([]any{encodeOkStringSlice(state.snapshot())}, nil)
 		}
 	})
 
@@ -188,7 +260,7 @@ func wire(client *socket.Socket) {
 		if ack == nil {
 			return
 		}
-		ack([]any{receiptResult{Message: "receipt for " + argString(params, 0), Code: "PAID"}}, nil)
+		ack([]any{encodeOkTwoStrings("receipt for "+argString(params, 0), "PAID")}, nil)
 	})
 
 	// roundTrip: the bidirectional path. Go pushes a fire-and-forget `notify`, then
@@ -203,8 +275,8 @@ func wire(client *socket.Socket) {
 
 		go func() {
 			// Fire-and-forget into the client: no ack callback appended.
-			if err := client.Emit("notify", "pushed:"+question); err != nil {
-				ack([]any{newRpcError("INTERNAL_ERROR", err.Error(), "roundTrip", nil)}, nil)
+			if err := client.Emit("notify", encodeString("pushed:"+question)); err != nil {
+				ack([]any{encodeErr("INTERNAL_ERROR", err.Error(), "roundTrip", nil)}, nil)
 				return
 			}
 
@@ -212,7 +284,7 @@ func wire(client *socket.Socket) {
 			// the very next emit on this socket, so the two must stay adjacent.
 			answered := make(chan []any, 1)
 			failed := make(chan error, 1)
-			client.Timeout(askTimeout).EmitWithAck("ask", question)(func(reply []any, err error) {
+			client.Timeout(askTimeout).EmitWithAck("ask", encodeString(question))(func(reply []any, err error) {
 				if err != nil {
 					failed <- err
 					return
@@ -222,9 +294,9 @@ func wire(client *socket.Socket) {
 
 			select {
 			case reply := <-answered:
-				ack([]any{"go saw: " + argString(reply, 0)}, nil)
+				ack([]any{encodeOkString("go saw: " + replyString(reply, 0))}, nil)
 			case err := <-failed:
-				ack([]any{newRpcError("INTERNAL_ERROR", err.Error(), "roundTrip", nil)}, nil)
+				ack([]any{encodeErr("INTERNAL_ERROR", err.Error(), "roundTrip", nil)}, nil)
 			}
 		}()
 	})

@@ -1,6 +1,8 @@
 import * as path from "path";
 import { CodeBlockWriter, Project, SourceFile, StructureKind } from "ts-morph";
 import { addCustomTypeImports } from "./emit-imports";
+import { methodHelperSuffix } from "./postcard";
+import type { RpcDirection, RpcSchema } from "./schema";
 import {
   regenerateCommand,
   RPC_ERROR_EVENT,
@@ -188,6 +190,8 @@ function writeHandleMethod(
   func: FunctionSignature,
   trailingChar: string,
   logFn: string,
+  handleDirection: RpcDirection,
+  usePostcard: boolean,
 ): void {
   const funcParams = func.params
     .map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`)
@@ -195,6 +199,7 @@ function writeHandleMethod(
   const returnType = func.isVoid ? "void" : func.returnType;
   const handlerParams = func.params.map((p) => p.name).join(", ");
   const typedParams = func.params.map((p) => `${p.name}: ${p.type}`).join(", ");
+  const suffix = methodHelperSuffix(handleDirection, func.name);
 
   writer.writeLine(
     `${func.name}(handler: (${funcParams}) => Promise<${returnType}>): Unsubscribe {`,
@@ -202,7 +207,63 @@ function writeHandleMethod(
   writer.indent(() => {
     writer.writeLine("checkDisposed();");
 
-    if (func.isVoid) {
+    if (usePostcard) {
+      if (func.isVoid) {
+        writer.writeLine("const listener = async (...rawArgs: unknown[]) => {");
+        writer.indent(() => {
+          writer.writeLine("try {");
+          writer.indent(() => {
+            if (func.params.length > 0) {
+              writer.writeLine(`const [${handlerParams}] = rpcDecodeArgs_${suffix}(rawArgs);`);
+            } else {
+              writer.writeLine(`rpcDecodeArgs_${suffix}(rawArgs);`);
+            }
+            writer.writeLine(`await handler(${handlerParams});`);
+          });
+          writer.writeLine("} catch (error) {");
+          writer.indent(() => {
+            writer.writeLine(`${logFn}('[${func.name}] Handler error:', error);`);
+            writer.writeLine(
+              `socket.emit('${RPC_ERROR_EVENT}', rpcEncodeErrorFrame(toRpcError(error, { method: '${func.name}' })));`,
+            );
+          });
+          writer.writeLine("}");
+        });
+        writer.writeLine("};");
+      } else {
+        writer.writeLine("const listener = async (...rawArgs: unknown[]) => {");
+        writer.indent(() => {
+          writer.writeLine("const last = rawArgs[rawArgs.length - 1];");
+          writer.writeLine("if (typeof last !== 'function') {");
+          writer.indent(() => {
+            writer.writeLine(
+              `socket.emit('${RPC_ERROR_EVENT}', rpcEncodeErrorFrame({ __rpcError: true, code: 'INVALID_ARGUMENT', message: 'missing acknowledgement callback', method: '${func.name}' }));`,
+            );
+            writer.writeLine("return;");
+          });
+          writer.writeLine("}");
+          writer.writeLine("const callback = last as (payload: Uint8Array) => void;");
+          writer.writeLine("const args = rawArgs.slice(0, -1);");
+          writer.writeLine("try {");
+          writer.indent(() => {
+            if (func.params.length > 0) {
+              writer.writeLine(`const [${handlerParams}] = rpcDecodeArgs_${suffix}(args);`);
+            } else {
+              writer.writeLine(`rpcDecodeArgs_${suffix}(args);`);
+            }
+            writer.writeLine(`const handlerResult = await handler(${handlerParams});`);
+            writer.writeLine(`callback(rpcEncodeResult_${suffix}(handlerResult));`);
+          });
+          writer.writeLine("} catch (error) {");
+          writer.indent(() => {
+            writer.writeLine(`${logFn}('[${func.name}] Handler error:', error);`);
+            writer.writeLine(`callback(rpcEncodeErrorResult(toRpcError(error, { method: '${func.name}' })));`);
+          });
+          writer.writeLine("}");
+        });
+        writer.writeLine("};");
+      }
+    } else if (func.isVoid) {
       writer.writeLine(`const listener = async (${typedParams}) => {`);
       writer.indent(() => {
         writer.writeLine("try {");
@@ -258,18 +319,26 @@ function writeCallMethod(
   trailingChar: string,
   defaultTimeout: number,
   errorMode: ResolvedConfig["errorMode"],
+  callDirection: RpcDirection,
+  usePostcard: boolean,
 ): void {
   const funcParams = func.params.map((p) => `${p.name}${p.isOptional ? "?" : ""}: ${p.type}`);
   funcParams.push(`opts?: RpcCallOptions`);
   const paramsString = funcParams.join(", ");
   const argsArray = func.params.map((p) => p.name);
   const argsString = argsArray.length > 0 ? `, ${argsArray.join(", ")}` : "";
+  const suffix = methodHelperSuffix(callDirection, func.name);
 
   if (func.isVoid) {
     writer.writeLine(`${func.name}(${paramsString}) {`);
     writer.indent(() => {
       writer.writeLine("if (_disposed) return;");
-      writer.writeLine(`(opts?.volatile ? socket.volatile : socket).emit('${func.name}'${argsString});`);
+      if (usePostcard) {
+        writer.writeLine(`const encodedArgs = rpcEncodeArgs_${suffix}(${argsArray.join(", ")});`);
+        writer.writeLine(`(opts?.volatile ? socket.volatile : socket).emit('${func.name}', ...encodedArgs);`);
+      } else {
+        writer.writeLine(`(opts?.volatile ? socket.volatile : socket).emit('${func.name}'${argsString});`);
+      }
     });
     writer.writeLine("}" + trailingChar);
     return;
@@ -295,7 +364,14 @@ function writeCallMethod(
       writer.writeLine(`let result: ${func.returnType} | RpcError;`);
       writer.writeLine("try {");
       writer.indent(() => {
-        writer.writeLine(`const ack = emitter.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
+        if (usePostcard) {
+          writer.writeLine(`const encodedArgs = rpcEncodeArgs_${suffix}(${argsArray.join(", ")});`);
+          writer.writeLine(
+            `const ack = emitter.timeout(timeout).emitWithAck('${func.name}', ...encodedArgs).then((raw: unknown) => rpcDecodeResult_${suffix}(raw));`,
+          );
+        } else {
+          writer.writeLine(`const ack = emitter.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
+        }
         writer.writeLine(
           `result = await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, '${func.name}')]) : ack);`,
         );
@@ -310,7 +386,14 @@ function writeCallMethod(
     } else {
       writer.writeLine("try {");
       writer.indent(() => {
-        writer.writeLine(`const ack = emitter.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
+        if (usePostcard) {
+          writer.writeLine(`const encodedArgs = rpcEncodeArgs_${suffix}(${argsArray.join(", ")});`);
+          writer.writeLine(
+            `const ack = emitter.timeout(timeout).emitWithAck('${func.name}', ...encodedArgs).then((raw: unknown) => rpcDecodeResult_${suffix}(raw));`,
+          );
+        } else {
+          writer.writeLine(`const ack = emitter.timeout(timeout).emitWithAck('${func.name}'${argsString});`);
+        }
         writer.writeLine(
           `return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, '${func.name}')]) : ack);`,
         );
@@ -333,7 +416,11 @@ function writeCallMethod(
  * These are additive — a second handler runs alongside the first — which is why they
  * bypass the `register` registry that `.handle` uses to enforce one handler per RPC method.
  */
-function writeSubscriptionMembers(writer: CodeBlockWriter, side: "client" | "server"): void {
+function writeSubscriptionMembers(
+  writer: CodeBlockWriter,
+  side: "client" | "server",
+  usePostcard: boolean,
+): void {
   writer.writeLine("get connected() { return socket.connected; },");
 
   const sub = (name: string, handlerSig: string, target: string, event: string) => {
@@ -353,7 +440,20 @@ function writeSubscriptionMembers(writer: CodeBlockWriter, side: "client" | "ser
     sub("onConnect", "() => void", "socket", "connect");
     sub("onReconnect", "(attempt: number) => void", "socket.io", "reconnect");
   }
-  sub("onRpcError", "(error: RpcError) => void", "socket", RPC_ERROR_EVENT);
+  if (usePostcard) {
+    writer.writeLine("onRpcError(handler: (error: RpcError) => void): Unsubscribe {");
+    writer.indent(() => {
+      writer.writeLine("checkDisposed();");
+      writer.writeLine("const wrapped = (raw: unknown) => handler(rpcDecodeErrorFrame(raw));");
+      writer.writeLine(`socket.on('${RPC_ERROR_EVENT}', wrapped);`);
+      writer.writeLine(`const unsubscribe = () => socket.off('${RPC_ERROR_EVENT}', wrapped);`);
+      writer.writeLine("unsubscribers.push(unsubscribe);");
+      writer.writeLine("return unsubscribe;");
+    });
+    writer.writeLine("},");
+  } else {
+    sub("onRpcError", "(error: RpcError) => void", "socket", RPC_ERROR_EVENT);
+  }
 }
 
 /**
@@ -414,11 +514,14 @@ function generateFactoryFunction(
   handleFunctions: FunctionSignature[],
   side: "client" | "server",
   config: ResolvedConfig,
+  usePostcard: boolean,
 ): void {
   const factoryName = side === "client" ? "createRpcClient" : "createRpcServer";
   const interfaceName = side === "client" ? "RpcClient" : "RpcServer";
   const targetSide = side === "client" ? "server" : "client";
   const logFn = config.errorLogger ? "errorLogger" : "console.error";
+  const callDirection: RpcDirection = side === "client" ? "client-to-server" : "server-to-client";
+  const handleDirection: RpcDirection = side === "client" ? "server-to-client" : "client-to-server";
 
   sourceFile.addStatements(`\n// === FACTORY FUNCTION ===`);
 
@@ -469,7 +572,7 @@ function generateFactoryFunction(
     writer.indent(() => {
       handleFunctions.forEach((func, index) => {
         const trailing = index < handleFunctions.length - 1 ? "," : "";
-        writeHandleMethod(writer, func, trailing, logFn);
+        writeHandleMethod(writer, func, trailing, logFn, handleDirection, usePostcard);
       });
     });
     writer.writeLine("};");
@@ -480,7 +583,15 @@ function generateFactoryFunction(
     writer.indent(() => {
       callFunctions.forEach((func, index) => {
         const trailing = index < callFunctions.length - 1 ? "," : "";
-        writeCallMethod(writer, func, trailing, config.defaultTimeout, config.errorMode);
+        writeCallMethod(
+          writer,
+          func,
+          trailing,
+          config.defaultTimeout,
+          config.errorMode,
+          callDirection,
+          usePostcard,
+        );
       });
     });
     writer.writeLine("};");
@@ -492,7 +603,7 @@ function generateFactoryFunction(
       writer.writeLine("handle,");
       writer.writeLine(`${targetSide},`);
       writer.writeLine("get socket() { return socket; },");
-      writeSubscriptionMembers(writer, side);
+      writeSubscriptionMembers(writer, side, usePostcard);
       writer.writeLine("get disposed() { return _disposed; },");
       writer.writeLine("dispose() {");
       writer.indent(() => {
@@ -548,15 +659,19 @@ export function generateSideFile(
   config: ResolvedConfig,
   usedTypes: Map<string, SourceFile>,
   inputFile: SourceFile,
+  schema?: RpcSchema,
 ): void {
   const socketModule = side === "client" ? "socket.io-client" : "socket.io";
   const fileName = `${side}.generated.ts`;
   const inputFilename = path.basename(config.inputPath, path.extname(config.inputPath));
+  const usePostcard = schema !== undefined;
 
   // The client calls what the server provides and handles what it itself provides;
   // the server is the mirror image.
   const callFunctions = side === "client" ? clientToServerFunctions : serverToClientFunctions;
   const handleFunctions = side === "client" ? serverToClientFunctions : clientToServerFunctions;
+  const callDirection: RpcDirection = side === "client" ? "client-to-server" : "server-to-client";
+  const handleDirection: RpcDirection = side === "client" ? "server-to-client" : "client-to-server";
 
   const sideFile = project.createSourceFile(path.join(outputDir, fileName), "", {
     overwrite: true,
@@ -574,6 +689,21 @@ export function generateSideFile(
   const valueImports = ["toRpcError"];
   if (hasValueCall) valueImports.push("rpcWhenAborted");
   if (hasValueCall && config.errorMode === "throw") valueImports.push("isRpcError");
+  if (usePostcard) {
+    valueImports.push("rpcDecodeErrorFrame");
+    if (handleFunctions.length > 0) valueImports.push("rpcEncodeErrorFrame");
+    if (handleFunctions.some((f) => !f.isVoid)) valueImports.push("rpcEncodeErrorResult");
+    for (const func of handleFunctions) {
+      const suffix = methodHelperSuffix(handleDirection, func.name);
+      valueImports.push(`rpcDecodeArgs_${suffix}`);
+      if (!func.isVoid) valueImports.push(`rpcEncodeResult_${suffix}`);
+    }
+    for (const func of callFunctions) {
+      const suffix = methodHelperSuffix(callDirection, func.name);
+      valueImports.push(`rpcEncodeArgs_${suffix}`);
+      if (!func.isVoid) valueImports.push(`rpcDecodeResult_${suffix}`);
+    }
+  }
 
   sideFile.addImportDeclaration({
     moduleSpecifier: "./types.generated",
@@ -625,7 +755,7 @@ export function generateSideFile(
   );
 
   generateFactoryInterface(sideFile, callFunctions, handleFunctions, side, config.errorMode);
-  generateFactoryFunction(sideFile, callFunctions, handleFunctions, side, config);
+  generateFactoryFunction(sideFile, callFunctions, handleFunctions, side, config, usePostcard);
 
   sideFile.formatText();
 }

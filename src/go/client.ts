@@ -527,18 +527,26 @@ function writeConnLifecycle(writer: GoWriter, side: GoSide): void {
   writer.line("// packet, failing every call in flight, so the one that is too large fails");
   writer.line("// here on its own and nothing is sent.");
   writer.block(`func (c *Conn) checkPayload(method string, packet []any) *${q}RpcError`, () => {
-    writer.line("encoded, err := json.Marshal(packet)");
-    writer.block("if err != nil", () =>
-      writer.line(
-        `return ${q}NewRpcError(${q}CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), method, nil)`,
-      ),
-    );
+    writer.line("payloadBytes := len(method)");
+    writer.block("for _, item := range packet", () => {
+      writer.block("if raw, ok := item.([]byte); ok", () => {
+        writer.line("payloadBytes += len(raw)");
+        writer.line("continue");
+      });
+      writer.line(`encoded, err := ${generated("encodeValue")}(item)`);
+      writer.block("if err != nil", () =>
+        writer.line(
+          `return ${q}NewRpcError(${q}CodeInternalError, fmt.Sprintf("cannot encode payload: %v", err), method, nil)`,
+        ),
+      );
+      writer.line("payloadBytes += len(encoded)");
+    });
     writer.line(`limit := int64(${generated("defaultMaxPayload")})`);
     writer.block(
       "if engine, ok := c.socket.Io().Engine().(interface{ MaxPayload() int64 }); ok && engine.MaxPayload() > 0",
       () => writer.line("limit = engine.MaxPayload()"),
     );
-    writer.block(`if size := int64(len(encoded)+len(c.namespace)) + ${generated("packetOverhead")}; size > limit`, () => {
+    writer.block(`if size := int64(payloadBytes+len(c.namespace)) + ${generated("packetOverhead")}; size > limit`, () => {
       writer.line('message := fmt.Sprintf("payload of about %d bytes exceeds the %d bytes the server accepts", size, limit)');
       writer.line(`return ${q}NewRpcError(${q}CodeInvalidArgument, message, method, nil)`);
     });
@@ -652,10 +660,18 @@ function writeClientFile(schema: RpcSchema, options: ResolvedGoBackendOptions): 
   writer.line(`package ${separate ? separate.packageName : options.packageName}`);
   writer.line();
   // A separate client carries its own copy of the runtime helpers, which is
-  // what needs `reflect`; a colocated one uses the types file's.
+  // what needs `encoding/json`, `math`, and `reflect`; a colocated one uses the types file's.
   writeImports(
     writer,
-    ["context", "encoding/json", "errors", "fmt", "net/url", "sync", "time", ...(separate ? ["reflect"] : [])],
+    [
+      "context",
+      "errors",
+      "fmt",
+      "net/url",
+      "sync",
+      "time",
+      ...(separate ? ["encoding/json", "math", "reflect"] : []),
+    ],
     [
       [SOCKET_ALIAS, options.client.socketImport],
       ...(separate ? ([[options.packageName, separate.typesImport]] as const) : []),
@@ -695,7 +711,7 @@ function writeClientFile(schema: RpcSchema, options: ResolvedGoBackendOptions): 
   writer.line();
   writeAckResult(writer);
   writer.line();
-  writeCaller(writer, side, inboundMethods(schema));
+  writeCaller(writer, side, inboundMethods(schema), declarations);
   return writer.toString();
 }
 

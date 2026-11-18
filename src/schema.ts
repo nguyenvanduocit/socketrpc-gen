@@ -218,3 +218,12 @@ export function nullableType(type: TypeRef): TypeRef {
     ? type
     : { kind: "nullable", type };
 }
+
+/**
+ * The schema as the JSON a non-TypeScript consumer reads: two-space indent and
+ * a trailing newline, so a committed copy diffs cleanly. `version` is the
+ * consumer's compatibility check.
+ */
+export function serializeRpcSchema(schema: RpcSchema): string {
+  return `${JSON.stringify(schema, null, 2)}\n`;
+}

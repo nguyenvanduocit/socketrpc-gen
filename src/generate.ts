@@ -1,7 +1,8 @@
+import * as fs from "fs";
 import * as path from "path";
 import { Project } from "ts-morph";
 import { extractInterfacesFromFile, requireRpcSchema } from "./extract";
-import type { RpcSchema } from "./schema";
+import { serializeRpcSchema, type RpcSchema } from "./schema";
 import { generateSideFile } from "./emit-side";
 import { generateTypesFile } from "./emit-types";
 import { generateGoClientFiles, generateGoServerFiles, validateGoTarget } from "./emit-go";
@@ -104,16 +105,17 @@ export async function generateRpcPackage(userConfig: GeneratorConfig): Promise<v
   // behind. The IR is deliberately wider than Go, so both checks are needed:
   // `requireRpcSchema` rejects what the IR cannot model at all, and
   // `validateGoTarget` rejects what it models but Go cannot spell.
-  let goSchema: RpcSchema | undefined;
   const emitsGoClient = config.clientLanguages.has("go");
-  if (config.serverLanguage === "go" || emitsGoClient) {
-    goSchema = requireRpcSchema(extracted);
-    validateGoTarget(goSchema, config);
-  }
-  let rustSchema: RpcSchema | undefined;
-  if (config.serverLanguage === "rust" || config.clientLanguages.has("rust")) {
-    rustSchema = goSchema ?? requireRpcSchema(extracted);
-    validateRustTarget(rustSchema, config);
+  const emitsGo = config.serverLanguage === "go" || emitsGoClient;
+  const emitsRust = config.serverLanguage === "rust" || config.clientLanguages.has("rust");
+  const schema =
+    emitsGo || emitsRust || config.schemaOutputPath !== undefined ? requireRpcSchema(extracted) : extracted.schema;
+  if (schema && emitsGo) validateGoTarget(schema, config);
+  if (schema && emitsRust) validateRustTarget(schema, config);
+
+  if (schema && config.schemaOutputPath !== undefined) {
+    fs.mkdirSync(path.dirname(config.schemaOutputPath), { recursive: true });
+    fs.writeFileSync(config.schemaOutputPath, serializeRpcSchema(schema));
   }
 
   const emitsTypeScriptClient = config.clientLanguages.has("typescript");
@@ -140,6 +142,7 @@ export async function generateRpcPackage(userConfig: GeneratorConfig): Promise<v
       serverToClientFunctions,
       usedTypes,
       inputFile,
+      schema,
     );
     const sides = [
       ...(emitsTypeScriptClient ? (["client"] as const) : []),
@@ -155,6 +158,7 @@ export async function generateRpcPackage(userConfig: GeneratorConfig): Promise<v
         config,
         usedTypes,
         inputFile,
+        schema,
       );
       emittedFiles.push(`${side}.generated.ts`);
     }
@@ -163,9 +167,9 @@ export async function generateRpcPackage(userConfig: GeneratorConfig): Promise<v
     await outputProject.save();
   }
 
-  if (goSchema && config.serverLanguage === "go") emittedFiles.push(...generateGoServerFiles(goSchema, config));
-  if (goSchema && emitsGoClient) emittedFiles.push(...generateGoClientFiles(goSchema, config));
-  if (rustSchema) emittedFiles.push(...generateRustFiles(rustSchema, config));
+  if (schema && config.serverLanguage === "go") emittedFiles.push(...generateGoServerFiles(schema, config));
+  if (schema && emitsGoClient) emittedFiles.push(...generateGoClientFiles(schema, config));
+  if (schema && emitsRust) emittedFiles.push(...generateRustFiles(schema, config));
 
   logGenerationSummary(clientToServerFunctions, serverToClientFunctions, emittedFiles, config);
 }

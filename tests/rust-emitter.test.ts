@@ -61,29 +61,29 @@ describe("Rust spelling", () => {
     expect(serverOnly["mod.rs"]).not.toContain("pub mod client;");
   });
 
-  test("types are UpperCamelCase, fields snake_case, renamed back to the wire name", () => {
+  test("types are UpperCamelCase, fields snake_case, with zero field-name overhead", () => {
     const types = files["types.rs"] ?? "";
     expect(types).toContain("pub struct HttpRecord {");
-    expect(types).toContain('    #[serde(rename = "displayName")]\n    pub display_name: String,');
-    expect(types).toContain('    #[serde(rename = "type")]\n    pub r#type: String,');
-    expect(types).toContain('    #[serde(rename = "self")]\n    pub self_: bool,');
+    expect(types).toContain("    pub display_name: String,");
+    expect(types).toContain("    pub r#type: String,");
+    expect(types).toContain("    pub self_: bool,");
   });
 
   test("absence: omitted, null, and both are three different spellings", () => {
     const types = files["types.rs"] ?? "";
-    expect(types).toContain('    #[serde(default, skip_serializing_if = "Option::is_none")]\n    pub note: Option<String>,');
+    expect(types).toContain("    pub note: Option<String>,");
     expect(types).toContain("    pub owner: Option<String>,");
     expect(types).toContain(
-      '    #[serde(default, skip_serializing_if = "Option::is_none", with = "rpc_double_option")]\n    pub due: Option<Option<String>>,',
+      '    #[serde(with = "rpc_double_option")]\n    pub due: Option<Option<String>>,',
     );
-    expect(types).toContain("    #[serde(default)]\n    pub extra: ::serde_json::Value,");
+    expect(types).toContain('    #[serde(with = "rpc_json")]\n    pub extra: ::serde_json::Value,');
     expect(types).toContain("    pub scores: ::std::collections::HashMap<String, f64>,");
   });
 
   test("string enums keep their literals and become Copy", () => {
     const types = files["types.rs"] ?? "";
-    expect(types).toContain('    #[serde(rename = "pending-review")]\n    PendingReview,');
-    expect(types).toContain('    #[serde(rename = "1st")]\n    V1st,');
+    expect(types).toContain("    PendingReview,");
+    expect(types).toContain("    V1st,");
     expect(types).toContain("#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ::serde::Serialize, ::serde::Deserialize)]");
   });
 
@@ -135,27 +135,21 @@ describe("discriminated unions", () => {
     { server: true, client: true },
   );
 
-  test("an internally tagged enum: variants renamed to their literal, fields to their wire name", () => {
+  test("an externally tagged Postcard enum: variants in declaration order, fields in declaration order", () => {
     expect(files["types.rs"]).toContain(
       [
         '/// Tagged by "kind": one of "ready", "need-photo", "empty".',
         "#[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]",
         "#[allow(clippy::large_enum_variant)]",
-        '#[serde(tag = "kind")]',
         "pub enum DraftResult {",
-        '    #[serde(rename = "ready")]',
         "    Ready {",
-        '        #[serde(rename = "stepCount")]',
         "        step_count: f64,",
-        '        #[serde(default, skip_serializing_if = "Option::is_none")]',
         "        next: Option<Box<DraftResult>>,",
         "    },",
-        '    #[serde(rename = "need-photo")]',
         "    NeedPhoto {",
-        '        #[serde(default, skip_serializing_if = "Option::is_none", with = "rpc_double_option")]',
+        '        #[serde(with = "rpc_double_option")]',
         "        due: Option<Option<String>>,",
         "    },",
-        '    #[serde(rename = "empty")]',
         "    Empty,",
         "}",
       ].join("\n"),

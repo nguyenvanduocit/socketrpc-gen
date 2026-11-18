@@ -72,10 +72,15 @@ export interface GeneratorConfig {
    * `server.rs` / `client.rs` for each Rust side). Defaults to `outputDir`.
    */
   rustOutputDir?: string;
+  /**
+   * File the contract's portable `RpcSchema` is written to as JSON. Refuses a
+   * contract the IR cannot model, before anything is written.
+   */
+  schemaOutputPath?: string;
 }
 
 /** The config keys that stay optional once defaults are applied. */
-type OptionalConfigKey = "errorLogger" | "goClientOutputDir" | "goClientPackageName";
+type OptionalConfigKey = "errorLogger" | "goClientOutputDir" | "goClientPackageName" | "schemaOutputPath";
 
 /**
  * Internal config with all defaults applied
@@ -86,6 +91,7 @@ export type ResolvedConfig = Required<Omit<GeneratorConfig, OptionalConfigKey | 
   errorLogger: string | undefined;
   goClientOutputDir: string | undefined;
   goClientPackageName: string | undefined;
+  schemaOutputPath: string | undefined;
 };
 
 /**
@@ -235,6 +241,7 @@ export function resolveConfig(userConfig: GeneratorConfig): ResolvedConfig {
     goClientSocketImport: DEFAULT_GO_CLIENT_SOCKET_IMPORT,
     goClientOutputDir: undefined,
     goClientPackageName: undefined,
+    schemaOutputPath: undefined,
     ...rest,
     clientLanguages: resolveClientLanguages(clientLanguage),
     goOutputDir: userConfig.goOutputDir ?? userConfig.outputDir,

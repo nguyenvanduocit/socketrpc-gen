@@ -13,7 +13,7 @@
  */
 
 import type { Socket } from "socket.io";
-import { type RpcError, type RpcCallOptions, type Unsubscribe, toRpcError } from "./types.generated";
+import { type RpcError, type RpcCallOptions, type Unsubscribe, toRpcError, rpcDecodeErrorFrame, rpcEncodeErrorFrame, rpcEncodeErrorResult, rpcDecodeArgs_c2s_generate, rpcEncodeResult_c2s_generate, rpcDecodeArgs_c2s_createTask, rpcEncodeResult_c2s_createTask, rpcDecodeArgs_c2s_getTask, rpcEncodeResult_c2s_getTask, rpcDecodeArgs_c2s_listTasks, rpcEncodeResult_c2s_listTasks, rpcDecodeArgs_c2s_cancelTask, rpcEncodeArgs_s2c_onProgress, rpcEncodeArgs_s2c_onTaskComplete, rpcEncodeArgs_s2c_onError } from "./types.generated";
 
 // === RpcServer INTERFACE ===
 /** Handler registration methods - implement these to handle calls from client */
@@ -113,64 +113,97 @@ export function createRpcServer(socket: Socket): RpcServer {
     const handle: RpcServerHandle = {
         generate(handler: (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }) => Promise<{ text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; }>): Unsubscribe {
             checkDisposed();
-            const listener = async (request: { prompt: string; maxTokens?: number | undefined; temperature?: number | undefined; }, callback: (result: { text: string; finishReason: "stop" | "length" | "content_filter"; usage: { inputTokens: number; outputTokens: number; }; } | RpcError) => void) => {
+            const listener = async (...rawArgs: unknown[]) => {
+                const last = rawArgs[rawArgs.length - 1];
+                if (typeof last !== 'function') {
+                    socket.emit('__rpc:error__', rpcEncodeErrorFrame({ __rpcError: true, code: 'INVALID_ARGUMENT', message: 'missing acknowledgement callback', method: 'generate' }));
+                    return;
+                }
+                const callback = last as (payload: Uint8Array) => void;
+                const args = rawArgs.slice(0, -1);
                 try {
+                    const [request] = rpcDecodeArgs_c2s_generate(args);
                     const handlerResult = await handler(request);
-                    callback(handlerResult);
+                    callback(rpcEncodeResult_c2s_generate(handlerResult));
                 } catch (error) {
                     console.error('[generate] Handler error:', error);
-                    callback(toRpcError(error, { method: 'generate' }));
+                    callback(rpcEncodeErrorResult(toRpcError(error, { method: 'generate' })));
                 }
             };
             return register('generate', listener);
         },
         createTask(handler: (request: { title: string; description?: string | undefined; }) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }>): Unsubscribe {
             checkDisposed();
-            const listener = async (request: { title: string; description?: string | undefined; }, callback: (result: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError) => void) => {
+            const listener = async (...rawArgs: unknown[]) => {
+                const last = rawArgs[rawArgs.length - 1];
+                if (typeof last !== 'function') {
+                    socket.emit('__rpc:error__', rpcEncodeErrorFrame({ __rpcError: true, code: 'INVALID_ARGUMENT', message: 'missing acknowledgement callback', method: 'createTask' }));
+                    return;
+                }
+                const callback = last as (payload: Uint8Array) => void;
+                const args = rawArgs.slice(0, -1);
                 try {
+                    const [request] = rpcDecodeArgs_c2s_createTask(args);
                     const handlerResult = await handler(request);
-                    callback(handlerResult);
+                    callback(rpcEncodeResult_c2s_createTask(handlerResult));
                 } catch (error) {
                     console.error('[createTask] Handler error:', error);
-                    callback(toRpcError(error, { method: 'createTask' }));
+                    callback(rpcEncodeErrorResult(toRpcError(error, { method: 'createTask' })));
                 }
             };
             return register('createTask', listener);
         },
         getTask(handler: (taskId: string) => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }>): Unsubscribe {
             checkDisposed();
-            const listener = async (taskId: string, callback: (result: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; } | RpcError) => void) => {
+            const listener = async (...rawArgs: unknown[]) => {
+                const last = rawArgs[rawArgs.length - 1];
+                if (typeof last !== 'function') {
+                    socket.emit('__rpc:error__', rpcEncodeErrorFrame({ __rpcError: true, code: 'INVALID_ARGUMENT', message: 'missing acknowledgement callback', method: 'getTask' }));
+                    return;
+                }
+                const callback = last as (payload: Uint8Array) => void;
+                const args = rawArgs.slice(0, -1);
                 try {
+                    const [taskId] = rpcDecodeArgs_c2s_getTask(args);
                     const handlerResult = await handler(taskId);
-                    callback(handlerResult);
+                    callback(rpcEncodeResult_c2s_getTask(handlerResult));
                 } catch (error) {
                     console.error('[getTask] Handler error:', error);
-                    callback(toRpcError(error, { method: 'getTask' }));
+                    callback(rpcEncodeErrorResult(toRpcError(error, { method: 'getTask' })));
                 }
             };
             return register('getTask', listener);
         },
         listTasks(handler: () => Promise<{ id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[]>): Unsubscribe {
             checkDisposed();
-            const listener = async (callback: (result: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }[] | RpcError) => void) => {
+            const listener = async (...rawArgs: unknown[]) => {
+                const last = rawArgs[rawArgs.length - 1];
+                if (typeof last !== 'function') {
+                    socket.emit('__rpc:error__', rpcEncodeErrorFrame({ __rpcError: true, code: 'INVALID_ARGUMENT', message: 'missing acknowledgement callback', method: 'listTasks' }));
+                    return;
+                }
+                const callback = last as (payload: Uint8Array) => void;
+                const args = rawArgs.slice(0, -1);
                 try {
+                    rpcDecodeArgs_c2s_listTasks(args);
                     const handlerResult = await handler();
-                    callback(handlerResult);
+                    callback(rpcEncodeResult_c2s_listTasks(handlerResult));
                 } catch (error) {
                     console.error('[listTasks] Handler error:', error);
-                    callback(toRpcError(error, { method: 'listTasks' }));
+                    callback(rpcEncodeErrorResult(toRpcError(error, { method: 'listTasks' })));
                 }
             };
             return register('listTasks', listener);
         },
         cancelTask(handler: (taskId: string) => Promise<void>): Unsubscribe {
             checkDisposed();
-            const listener = async (taskId: string) => {
+            const listener = async (...rawArgs: unknown[]) => {
                 try {
+                    const [taskId] = rpcDecodeArgs_c2s_cancelTask(rawArgs);
                     await handler(taskId);
                 } catch (error) {
                     console.error('[cancelTask] Handler error:', error);
-                    socket.emit('__rpc:error__', toRpcError(error, { method: 'cancelTask' }));
+                    socket.emit('__rpc:error__', rpcEncodeErrorFrame(toRpcError(error, { method: 'cancelTask' })));
                 }
             };
             return register('cancelTask', listener);
@@ -180,15 +213,18 @@ export function createRpcServer(socket: Socket): RpcServer {
     const client: RpcServerRemote = {
         onProgress(update: { taskId: string; progress: number; message?: string | undefined; }, opts?: RpcCallOptions) {
             if (_disposed) return;
-            (opts?.volatile ? socket.volatile : socket).emit('onProgress', update);
+            const encodedArgs = rpcEncodeArgs_s2c_onProgress(update);
+            (opts?.volatile ? socket.volatile : socket).emit('onProgress', ...encodedArgs);
         },
         onTaskComplete(task: { id: string; title: string; description: string; status: "pending" | "in_progress" | "completed"; createdAt: string; }, opts?: RpcCallOptions) {
             if (_disposed) return;
-            (opts?.volatile ? socket.volatile : socket).emit('onTaskComplete', task);
+            const encodedArgs = rpcEncodeArgs_s2c_onTaskComplete(task);
+            (opts?.volatile ? socket.volatile : socket).emit('onTaskComplete', ...encodedArgs);
         },
         onError(message: string, code: string, opts?: RpcCallOptions) {
             if (_disposed) return;
-            (opts?.volatile ? socket.volatile : socket).emit('onError', message, code);
+            const encodedArgs = rpcEncodeArgs_s2c_onError(message, code);
+            (opts?.volatile ? socket.volatile : socket).emit('onError', ...encodedArgs);
         }
     };
 
@@ -206,8 +242,9 @@ export function createRpcServer(socket: Socket): RpcServer {
         },
         onRpcError(handler: (error: RpcError) => void): Unsubscribe {
             checkDisposed();
-            socket.on('__rpc:error__', handler);
-            const unsubscribe = () => socket.off('__rpc:error__', handler);
+            const wrapped = (raw: unknown) => handler(rpcDecodeErrorFrame(raw));
+            socket.on('__rpc:error__', wrapped);
+            const unsubscribe = () => socket.off('__rpc:error__', wrapped);
             unsubscribers.push(unsubscribe);
             return unsubscribe;
         },

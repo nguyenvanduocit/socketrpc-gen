@@ -1,6 +1,8 @@
 import * as path from "path";
 import { Project, SourceFile, VariableDeclarationKind } from "ts-morph";
 import { addCustomTypeImports } from "./emit-imports";
+import { emitTypeScriptPostcardCodec } from "./postcard";
+import type { RpcSchema } from "./schema";
 import {
   regenerateCommand,
   RPC_ERROR_EVENT,
@@ -68,6 +70,7 @@ export function generateTypesFile(
   serverToClientFunctions: FunctionSignature[],
   usedTypes: Map<string, SourceFile>,
   inputFile: SourceFile,
+  schema?: RpcSchema,
 ): void {
   const typesFile = project.createSourceFile(path.join(outputDir, "types.generated.ts"), "", {
     overwrite: true,
@@ -242,6 +245,10 @@ return { __rpcError: true, message, code, method: opts?.method };`,
   });
 
   generateEventMaps(typesFile, clientToServerFunctions, serverToClientFunctions);
+
+  if (schema) {
+    typesFile.addStatements(emitTypeScriptPostcardCodec(schema));
+  }
 
   // Prepended last so it lands above the import declarations added at the top.
   typesFile.insertText(

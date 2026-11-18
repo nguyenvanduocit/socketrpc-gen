@@ -19,6 +19,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Verification Commands
 - `bun run check` - typecheck then run the full suite
+- `bun run test:fast` - the tests that need no `go` or `cargo` (everything except `tests/go-*.test.ts` and
+  `tests/*.integration.test.ts`); name a new test file by that rule so it lands in the right tier
+- `bun run test:integration` - only the toolchain tests that `test:fast` leaves out
 - `bun test` - full suite (includes Go compile, `go test -race`, `cargo build`/`clippy`, and cross-language integration; requires the `go` and `cargo` toolchains)
 - `cargo test` and `cargo clippy --all-targets -- -D warnings` in `rust/socketio-client` - the Rust client transport's own suite
 - `bun run generate:examples` - regenerate every example, then diff to spot drift
@@ -65,6 +68,9 @@ This is a TypeScript code generator for Socket.IO RPC packages. The tool generat
   types.generated.ts; `src/emit-imports.ts` resolves custom type imports
 - `src/emit-pkg.ts` - scaffolds package.json and tsconfig.json in the output directory
 - `src/emit-go.ts` - bridge into the Go backend under `src/go/`
+- `--schema-out <file>` writes the `RpcSchema` as JSON (`serializeRpcSchema` in `src/schema.ts`), after
+  the same `requireRpcSchema` refusal the Go and Rust backends pass, so a published schema never holds a
+  type reference with no declaration (`UNDECLARED_TYPE`, raised by `registerNamedType` in `src/extract.ts`)
 
 **Canonical IR (`src/schema.ts`)**
 - `RpcSchema` is the single language-neutral representation of a contract: methods with a

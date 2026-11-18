@@ -157,7 +157,7 @@ impl Conn {
 
     /// Calls `createRoom` (acknowledged).
     pub async fn call_create_room(&self, topic: &str, visibility: Visibility) -> Result<ChatRoom, RpcError> {
-        rpc_runtime::request(&self.inner, self.timeout, "createRoom", vec![::serde_json::to_value(topic), ::serde_json::to_value(visibility)]).await
+        rpc_runtime::request(&self.inner, self.timeout, "createRoom", vec![super::types::rpc_encode_arg(&topic), super::types::rpc_encode_arg(&visibility)]).await
     }
 
     /// Calls `listRooms` (acknowledged).
@@ -167,12 +167,12 @@ impl Conn {
 
     /// Calls `postMessage` (acknowledged).
     pub async fn call_post_message(&self, room_id: &str, body: &str) -> Result<Message, RpcError> {
-        rpc_runtime::request(&self.inner, self.timeout, "postMessage", vec![::serde_json::to_value(room_id), ::serde_json::to_value(body)]).await
+        rpc_runtime::request(&self.inner, self.timeout, "postMessage", vec![super::types::rpc_encode_arg(&room_id), super::types::rpc_encode_arg(&body)]).await
     }
 
     /// Calls `typing` (fire-and-forget).
     pub fn call_typing(&self, room_id: &str) -> Result<(), RpcError> {
-        rpc_runtime::emit(&self.inner, "typing", vec![::serde_json::to_value(room_id)])
+        rpc_runtime::emit(&self.inner, "typing", vec![super::types::rpc_encode_arg(&room_id)])
     }
 }
 
@@ -213,10 +213,11 @@ mod rpc_runtime {
     use ::tokio::sync::{mpsc, watch};
 
     use super::super::types::{
-        rpc_decode_result, rpc_encode_args, rpc_panic_message, RpcError, RpcErrorCode, Unsubscribe, RPC_ERROR_EVENT,
+        rpc_decode_error, rpc_decode_json_result, rpc_decode_result, rpc_encode_args, rpc_encode_error,
+        rpc_encode_error_result, rpc_json, rpc_panic_message, RpcError, RpcErrorCode, Unsubscribe, RPC_ERROR_EVENT,
     };
 
-    pub(super) type BoxedCall = Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send>>;
+    pub(super) type BoxedCall = Pin<Box<dyn Future<Output = Result<Vec<u8>, RpcError>> + Send>>;
 
     type Observer<T> = Arc<dyn Fn(&T) + Send + Sync>;
 
@@ -289,9 +290,7 @@ mod rpc_runtime {
             if self.disposed() {
                 return;
             }
-            if let Ok(value) = ::serde_json::to_value(error) {
-                let _ = self.socket.emit(RPC_ERROR_EVENT, &[value]);
-            }
+            let _ = self.socket.emit_bin(RPC_ERROR_EVENT, &[rpc_encode_error(error)]);
         }
 
         fn transport_error(&self, error: sio::Error, method: &str) -> RpcError {
@@ -428,7 +427,7 @@ mod rpc_runtime {
         acked: bool,
         run: F,
     ) where
-        F: Fn(super::Context, Vec<Value>) -> BoxedCall + Send + Sync + 'static,
+        F: Fn(super::Context, Vec<Result<Vec<u8>, String>>) -> BoxedCall + Send + Sync + 'static,
     {
         let (sender, mut receiver) = mpsc::unbounded_channel::<Call>();
         routes.insert(method, sender);
@@ -442,7 +441,7 @@ mod rpc_runtime {
 
     async fn serve<F>(inner: &Arc<Inner>, method: &'static str, arity: usize, acked: bool, run: &F, call: Call)
     where
-        F: Fn(super::Context, Vec<Value>) -> BoxedCall + Send + Sync + 'static,
+        F: Fn(super::Context, Vec<Result<Vec<u8>, String>>) -> BoxedCall + Send + Sync + 'static,
     {
         if acked && call.ack.is_none() {
             inner.emit_error(&RpcError::invalid_argument("missing acknowledgement callback").in_method(method));
@@ -455,8 +454,9 @@ mod rpc_runtime {
         } else {
             let conn = super::Conn { inner: Arc::clone(inner), timeout: inner.timeout, owner: None };
             let ctx = super::Context { conn, session: call.session };
+            let args: Vec<Result<Vec<u8>, String>> = call.args.into_iter().map(sio::take_bin_arg).collect();
             // Its own task, so a panicking handler answers INTERNAL_ERROR instead of killing the queue.
-            match ::tokio::spawn(run(ctx, call.args)).await {
+            match ::tokio::spawn(run(ctx, args)).await {
                 Ok(result) => result,
                 Err(join) if join.is_panic() => Err(RpcError::internal(rpc_panic_message(join.into_panic()))),
                 Err(join) => Err(RpcError::internal(join)),
@@ -467,13 +467,13 @@ mod rpc_runtime {
         match (acked, call.ack) {
             (true, Some(ack)) => {
                 let payload = match result {
-                    Ok(value) => value,
-                    Err(error) => ::serde_json::to_value(&error).unwrap_or(Value::Null),
+                    Ok(bytes) => bytes,
+                    Err(error) => rpc_encode_error_result(&error),
                 };
-                if let Err(too_large @ sio::Error::PayloadTooLarge { .. }) = ack.send(&[payload]) {
+                if let Err(too_large @ sio::Error::PayloadTooLarge { .. }) = ack.send_bin(&[payload]) {
                     // Nothing was sent: answer with why, rather than leave the server to time out.
                     let error = RpcError::internal(format!("cannot send reply: {too_large}")).in_method(method);
-                    let _ = ack.send(&[::serde_json::to_value(&error).unwrap_or(Value::Null)]);
+                    let _ = ack.send_bin(&[rpc_encode_error_result(&error)]);
                 }
             }
             // A fire-and-forget call has no acknowledgement slot, so its failure travels out of band.
@@ -515,9 +515,12 @@ mod rpc_runtime {
                     Notice::Error(report) => {
                         let observers = state.errors.snapshot();
                         drop(state);
-                        let report = report.unwrap_or(Value::Null);
-                        let error = ::serde_json::from_value::<RpcError>(report.clone())
-                            .unwrap_or_else(|_| RpcError::internal(report).with_method(RPC_ERROR_EVENT));
+                        let error = match report.map(sio::take_bin_arg) {
+                            Some(Ok(bytes)) => rpc_decode_error(&bytes)
+                                .unwrap_or_else(|err| RpcError::internal(err).with_method(RPC_ERROR_EVENT)),
+                            Some(Err(err)) => RpcError::internal(err).with_method(RPC_ERROR_EVENT),
+                            None => RpcError::internal("missing error payload").with_method(RPC_ERROR_EVENT),
+                        };
                         notify(observers, &error);
                     }
                 }
@@ -548,33 +551,57 @@ mod rpc_runtime {
         });
     }
 
-    pub(super) fn emit(inner: &Inner, method: &str, args: Vec<::serde_json::Result<Value>>) -> Result<(), RpcError> {
+    #[allow(dead_code)]
+    pub(super) fn emit(inner: &Inner, method: &str, args: Vec<Result<Vec<u8>, String>>) -> Result<(), RpcError> {
         let args = rpc_encode_args(method, args)?;
         if inner.disposed() {
             return Err(RpcError::new(RpcErrorCode::Disposed, "client is disposed").in_method(method));
         }
-        inner.socket.emit(method, &args).map_err(|error| inner.transport_error(error, method))
+        inner.socket.emit_bin(method, &args).map_err(|error| inner.transport_error(error, method))
     }
 
-    pub(super) async fn request<T: ::serde::de::DeserializeOwned>(
+    async fn request_raw(
         inner: &Inner,
         timeout: Duration,
         method: &str,
-        args: Vec<::serde_json::Result<Value>>,
-    ) -> Result<T, RpcError> {
+        args: Vec<Result<Vec<u8>, String>>,
+    ) -> Result<Vec<u8>, RpcError> {
         let args = rpc_encode_args(method, args)?;
         if inner.disposed() {
             return Err(RpcError::new(RpcErrorCode::Disposed, "client is disposed").in_method(method));
         }
         let mut values = inner
             .socket
-            .emit_with_ack(method, &args, timeout)
+            .emit_with_ack_bin(method, &args, timeout)
             .await
             .map_err(|error| inner.transport_error(error, method))?;
         if values.len() != 1 {
             let message = format!("expected one acknowledgement value, got {}", values.len());
             return Err(RpcError::invalid_argument(message).in_method(method));
         }
-        rpc_decode_result(method, values.remove(0))
+        sio::take_bin_arg(values.remove(0))
+            .map_err(|err| RpcError::invalid_argument(format!("invalid acknowledgement payload: {err}")).in_method(method))
+    }
+
+    #[allow(dead_code)]
+    pub(super) async fn request<T: ::serde::de::DeserializeOwned>(
+        inner: &Inner,
+        timeout: Duration,
+        method: &str,
+        args: Vec<Result<Vec<u8>, String>>,
+    ) -> Result<T, RpcError> {
+        let bytes = request_raw(inner, timeout, method, args).await?;
+        rpc_decode_result(method, &bytes)
+    }
+
+    #[allow(dead_code)]
+    pub(super) async fn request_json<T: rpc_json::WireOwned>(
+        inner: &Inner,
+        timeout: Duration,
+        method: &str,
+        args: Vec<Result<Vec<u8>, String>>,
+    ) -> Result<T, RpcError> {
+        let bytes = request_raw(inner, timeout, method, args).await?;
+        rpc_decode_json_result(method, &bytes)
     }
 }

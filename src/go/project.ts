@@ -157,6 +157,20 @@ export function resultGoType(method: RpcMethod, qualifier = ""): string | undefi
   return method.returnType.kind === "void" ? undefined : renderGoType(method.returnType, qualifier);
 }
 
+/** Whether a type reference resolves to a JSON value (`any` in Go). */
+export function isJsonValueType(
+  ref: TypeRef,
+  declarations: DeclarationScope,
+  seen: ReadonlySet<string> = new Set(),
+): boolean {
+  const { core } = unwrapOptionality(ref);
+  if (core.kind === "json") return true;
+  if (core.kind !== "named" || seen.has(core.name)) return false;
+  const declaration = declarations.get(core.name);
+  if (declaration?.kind !== "alias") return false;
+  return isJsonValueType(declaration.target, declarations, new Set([...seen, core.name]));
+}
+
 export function declarationsByName(schema: RpcSchema): Map<string, TypeDeclaration> {
   return new Map(schema.declarations.map((declaration) => [declaration.name, declaration]));
 }

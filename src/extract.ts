@@ -144,7 +144,19 @@ function registerNamedType(
   context: SchemaParseContext,
   diagnosticPath: string,
 ): void {
-  if (!isUserDeclaredSymbol(symbol)) return;
+  if (!isUserDeclaredSymbol(symbol)) {
+    // A reference with no declaration to follow would reach every consumer of
+    // the schema as a name that resolves to nothing.
+    addDiagnostic(
+      context,
+      "UNDECLARED_TYPE",
+      `'${name}' is referenced but never declared in a form the portable schema can model. Declare it as an interface, type alias, or string enum in your define file — ambient types such as Error or Date have no portable wire shape.`,
+      name,
+      location,
+      diagnosticPath,
+    );
+    return;
+  }
 
   const key = symbolKey(symbol);
   const existing = context.namedTypes.get(name);

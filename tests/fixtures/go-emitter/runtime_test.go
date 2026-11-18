@@ -44,7 +44,9 @@ func TestInboundAckPanicAndFireAndForget(t *testing.T) {
 		t.Helper()
 		values := make(chan []any, 2)
 		var calls atomic.Int32
-		raw.Trigger("getUser", userID, false, socket.Ack(func(args []any, _ error) {
+		userBytes, _ := rpc_encodeValue(userID)
+		incBytes, _ := rpc_encodeValue(false)
+		raw.Trigger("getUser", userBytes, incBytes, socket.Ack(func(args []any, _ error) {
 			calls.Add(1)
 			values <- args
 		}))
@@ -54,12 +56,12 @@ func TestInboundAckPanicAndFireAndForget(t *testing.T) {
 				t.Fatalf("expected one ack value, got %d", len(args))
 			}
 			if wantCode == "" {
-				user, ok := args[0].(User)
-				if !ok || user.ID != userID {
-					t.Fatalf("unexpected success ack: %#v", args[0])
+				var user User
+				if err := rpc_decodeInto(args[0], &user); err != nil || user.ID != userID {
+					t.Fatalf("unexpected success ack: %#v (err=%v)", args[0], err)
 				}
 			} else {
-				rpcErr, ok := args[0].(*RpcError)
+				rpcErr, ok := rpc_decodeReplyError(args[0], "getUser")
 				if !ok || !rpcErr.RPCError || rpcErr.Code != wantCode {
 					t.Fatalf("unexpected error ack: %#v", args[0])
 				}
@@ -77,7 +79,8 @@ func TestInboundAckPanicAndFireAndForget(t *testing.T) {
 	assertAck("error", CodeInvalidArgument)
 	assertAck("panic", CodeInternalError)
 
-	raw.Trigger("deleteUser", "gone")
+	goneBytes, _ := rpc_encodeValue("gone")
+	raw.Trigger("deleteUser", goneBytes)
 	select {
 	case deleted := <-handler.deleted:
 		if deleted != "gone" {
@@ -94,15 +97,12 @@ func TestClientAckErrorsDisconnectAndDispose(t *testing.T) {
 		if event != "confirm" || len(args) != 1 {
 			return nil, errors.New("unexpected call")
 		}
-		question, _ := args[0].(string)
+		var question string
+		_ = rpc_decodeValue(args[0], &question)
 		if question == "error" {
-			return []any{map[string]any{
-				"__rpcError": true,
-				"code":       "INVALID_ARGUMENT",
-				"message":    "bad question",
-			}}, nil
+			return []any{rpc_encodeReply(NewRpcError(CodeInvalidArgument, "bad question", "", nil))}, nil
 		}
-		return []any{true}, nil
+		return []any{rpc_encodeReply(true)}, nil
 	})
 	client, err := NewClient(raw, &ClientOptions{Timeout: 20 * time.Millisecond})
 	if err != nil {
@@ -159,7 +159,7 @@ func TestClientTimeoutAndContextCancellation(t *testing.T) {
 
 func TestEnumRejectsUnknownWireValue(t *testing.T) {
 	var status Status
-	if err := rpc_decodeValue("not-a-status", &status); err == nil {
+	if err := rpc_decodeValue([]byte{99}, &status); err == nil {
 		t.Fatal("expected unknown enum value to fail decoding")
 	}
 }
@@ -218,7 +218,8 @@ func TestFieldNamedAfterTheMarshallerKeepsNormalization(t *testing.T) {
 	}
 
 	var decoded Payload
-	if err := rpc_decodeValue(map[string]any{"labels": []any{"x"}}, &decoded); err != nil {
+	wireBytes, _ := rpc_encodeValue(Payload{Labels: []string{"x"}})
+	if err := rpc_decodeValue(wireBytes, &decoded); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(decoded.Labels) != 1 || decoded.Labels[0] != "x" {
@@ -253,12 +254,8 @@ func TestOnRpcErrorReceivesPeerReports(t *testing.T) {
 	reports := make(chan *RpcError, 1)
 	binding.OnRpcError(func(failure *RpcError) { reports <- failure })
 
-	raw.Trigger(RPCErrorEvent, map[string]any{
-		"__rpcError": true,
-		"code":       "INTERNAL_ERROR",
-		"message":    "client handler exploded",
-		"method":     "notify",
-	})
+	reportBytes, _ := rpc_appendRpcError(nil, NewRpcError(CodeInternalError, "client handler exploded", "notify", nil))
+	raw.Trigger(RPCErrorEvent, reportBytes)
 
 	select {
 	case failure := <-reports:
@@ -289,12 +286,8 @@ func TestOnRpcErrorObserversAreAdditiveAndOrdered(t *testing.T) {
 	binding.OnRpcError(func(*RpcError) { panic("observer exploded") })
 	binding.OnRpcError(func(*RpcError) { order <- "third" })
 
-	raw.Trigger(RPCErrorEvent, map[string]any{
-		"__rpcError": true,
-		"code":       "INTERNAL_ERROR",
-		"message":    "boom",
-		"method":     "notify",
-	})
+	boomBytes, _ := rpc_appendRpcError(nil, NewRpcError(CodeInternalError, "boom", "notify", nil))
+	raw.Trigger(RPCErrorEvent, boomBytes)
 
 	for _, want := range []string{"first", "third"} {
 		select {
@@ -323,12 +316,8 @@ func TestOnRpcErrorUnsubscribeDetachesOneObserver(t *testing.T) {
 	binding.OnRpcError(func(*RpcError) { kept <- struct{}{} })
 	unsubscribe()
 
-	raw.Trigger(RPCErrorEvent, map[string]any{
-		"__rpcError": true,
-		"code":       "INTERNAL_ERROR",
-		"message":    "boom",
-		"method":     "notify",
-	})
+	boomBytes, _ := rpc_appendRpcError(nil, NewRpcError(CodeInternalError, "boom", "notify", nil))
+	raw.Trigger(RPCErrorEvent, boomBytes)
 
 	select {
 	case <-kept:

@@ -266,6 +266,7 @@ socketrpc-gen <path> [options]
 -   `--go-client-package <name>`: Go package clause of the client in `--go-client-out`. Required with `--go-client-out`, and must differ from `--go-package`.
 -   `--go-client-socket-import <path>`: Go Socket.IO client import path the Go client is written against. (Default: "github.com/nguyenvanduocit/socketrpc-gen/go/socketio/clients/socket")
 -   `--rust-out <dir>`: Directory of the generated Rust module (`mod.rs`, `types.rs`, and `server.rs` / `client.rs` for each Rust side). (Default: the input file's directory)
+-   `--schema-out <file>`: Write the contract's language-neutral schema (`RpcSchema`, the same IR the Go and Rust backends read) to `<file>` as JSON, so a tool that is not written in TypeScript can consume the contract. The file carries a `version` field. A contract the schema cannot model — an inline union, `any`, a generic, or an undeclared type such as `Error` or `Date` — is refused before anything is written. It adds to the `--client` / `--server` output.
 -   `-w, --watch`: Watch for changes in the definition file and regenerate every output automatically. (Default: false)
 -   `-h, --help`: Display help for command.
 

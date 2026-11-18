@@ -1,5 +1,16 @@
 # Changelog
 
+## [11.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v10.0.0...v11.0.0) (2026-11-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* generated TypeScript, Go, and Rust clients and servers now communicate using the Postcard v1 binary wire format instead of JSON. Both sides of a connection must be regenerated with v11+.
+
+### Features
+
+* switch wire serialization to Postcard across TypeScript, Go, and Rust ([#54](https://github.com/nguyenvanduocit/socketrpc-gen/issues/54)) ([633a7d5](https://github.com/nguyenvanduocit/socketrpc-gen/commit/633a7d5ea23329a772f2dfdea219c2c56367b070))
+
 ## [10.0.0](https://github.com/nguyenvanduocit/socketrpc-gen/compare/v9.1.0...v10.0.0) (2026-11-08)
 
 

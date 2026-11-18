@@ -95,10 +95,18 @@ func requireCode(t *testing.T, err error, code RpcErrorCode) *RpcError {
 	return rpcErr
 }
 
+func mustEncode(v any) []byte {
+	b, err := rpc_encodeValue(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
 // ask delivers one acknowledged server-to-client call and returns the channel
 // its acknowledgement reaches the server on.
 func ask(raw *socket.Socket, question string) <-chan []any {
-	return raw.TriggerWithAck("confirm", question)
+	return raw.TriggerWithAck("confirm", mustEncode(question))
 }
 
 func awaitAnswer(t *testing.T, answers <-chan []any) any {
@@ -107,6 +115,13 @@ func awaitAnswer(t *testing.T, answers <-chan []any) any {
 	case values := <-answers:
 		if len(values) != 1 {
 			t.Fatalf("expected one acknowledgement value, got %d", len(values))
+		}
+		if rpcErr, ok := rpc_decodeReplyError(values[0], "confirm"); ok {
+			return rpcErr
+		}
+		var text string
+		if err := rpc_decodeInto(values[0], &text); err == nil {
+			return text
 		}
 		return values[0]
 	case <-time.After(2 * time.Second):
@@ -117,8 +132,9 @@ func awaitAnswer(t *testing.T, answers <-chan []any) any {
 
 func echoLookups(raw *socket.Socket) {
 	raw.SetAckHandler(func(event string, args []any) ([]any, error) {
-		id, _ := args[0].(string)
-		return []any{map[string]any{"id": id, "tags": []any{"a"}}}, nil
+		var id string
+		_ = rpc_decodeValue(args[0], &id)
+		return []any{rpc_encodeReply(Item{ID: id, Tags: []string{"a"}})}, nil
 	})
 }
 
@@ -153,7 +169,7 @@ func TestDialJoinsTheNamespaceWithACopyOfAuth(t *testing.T) {
 	if answer := awaitAnswer(t, ask(raw, "q")); answer != "yes: q" {
 		t.Fatalf("confirm answered %#v", answer)
 	}
-	raw.Trigger("notify", float64(7))
+	raw.Trigger("notify", mustEncode(float64(7)))
 	if seq := <-handler.notified; seq != 7 {
 		t.Fatalf("notify delivered %v", seq)
 	}
@@ -250,7 +266,7 @@ func TestInboundCallsKeepOrderAndIsolation(t *testing.T) {
 	_, raw, handler := dial(t, nil)
 
 	for seq := 1; seq <= 50; seq++ {
-		raw.Trigger("notify", float64(seq))
+		raw.Trigger("notify", mustEncode(float64(seq)))
 	}
 	for want := 1; want <= 50; want++ {
 		if got := <-handler.notified; got != float64(want) {
@@ -261,7 +277,7 @@ func TestInboundCallsKeepOrderAndIsolation(t *testing.T) {
 	// A slow confirm stalls only its own method.
 	slow := ask(raw, "slow")
 	<-handler.started
-	raw.Trigger("notify", float64(99))
+	raw.Trigger("notify", mustEncode(float64(99)))
 	select {
 	case seq := <-handler.notified:
 		if seq != 99 {
@@ -287,8 +303,8 @@ func TestInboundCallsKeepOrderAndIsolation(t *testing.T) {
 	}
 
 	// A fire-and-forget panic is reported out of band, and notify keeps running.
-	raw.Trigger("notify", float64(-1))
-	raw.Trigger("notify", float64(100))
+	raw.Trigger("notify", mustEncode(float64(-1)))
+	raw.Trigger("notify", mustEncode(float64(100)))
 	if seq := <-handler.notified; seq != 100 {
 		t.Fatalf("notify after a panic delivered %v", seq)
 	}
@@ -297,7 +313,7 @@ func TestInboundCallsKeepOrderAndIsolation(t *testing.T) {
 		reported := false
 		for _, emission := range raw.Emissions() {
 			if emission.Event == RPCErrorEvent {
-				failure, _ := emission.Args[0].(*RpcError)
+				failure, _ := rpc_decodeRpcError(emission.Args[0])
 				reported = failure != nil && failure.Code == CodeInternalError
 			}
 		}
@@ -355,7 +371,7 @@ func TestCallsFailPromptlyWhenTheConnectionDrops(t *testing.T) {
 	defer close(release)
 	raw.SetAckHandler(func(string, []any) ([]any, error) {
 		<-release
-		return []any{map[string]any{"id": "late", "tags": []any{}}}, nil
+		return []any{rpc_encodeReply(Item{ID: "late", Tags: []string{}})}, nil
 	})
 
 	result := make(chan error, 1)
@@ -483,7 +499,8 @@ func TestACallMadeAsTheConnectionDropsIsNeverSentLater(t *testing.T) {
 
 	for _, emission := range raw.Emissions() {
 		for _, arg := range emission.Args {
-			if arg == "window" {
+			var decoded string
+			if rpc_decodeValue(arg, &decoded) == nil && decoded == "window" {
 				t.Fatalf("%s from before the loss was sent on the next connection", emission.Event)
 			}
 		}

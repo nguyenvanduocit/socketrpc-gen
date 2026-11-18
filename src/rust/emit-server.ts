@@ -17,6 +17,7 @@ import {
   renderParamType,
   renderRustType,
   resultRustType,
+  usesJsonValue,
   type DeclarationScope,
 } from "./project";
 import { header } from "./emit-types";
@@ -51,12 +52,13 @@ export function emitHandlerTrait(name: string, methods: readonly RpcMethod[], do
  * calls the handler, encodes its result. `listen` is the runtime function of
  * the side being generated.
  */
-export function emitListen(method: RpcMethod, target: string): string[] {
+export function emitListen(method: RpcMethod, declarations: DeclarationScope, target: string): string[] {
   const acked = method.returnType.kind !== "void";
-  const decodes = method.params.map(
-    (param, index) =>
-      `                let arg${index}: ${renderRustType(param.type)} = super::types::rpc_decode_arg(&mut args, ${JSON.stringify(param.name)})?;`,
-  );
+  const decodes = method.params.map((param, index) => {
+    const decodeFn = usesJsonValue(param.type, declarations) ? "rpc_decode_json_arg" : "rpc_decode_arg";
+    return `                let arg${index}: ${renderRustType(param.type)} = super::types::${decodeFn}(&mut args, ${JSON.stringify(param.name)})?;`;
+  });
+  const encodeFn = usesJsonValue(method.returnType, declarations) ? "rpc_encode_json_result" : "rpc_encode_result";
   const call = `handler.${handlerMethodName(method.name)}(${["ctx", ...method.params.map((_, index) => `arg${index}`)].join(", ")}).await?`;
   return [
     "    {",
@@ -66,7 +68,7 @@ export function emitListen(method: RpcMethod, target: string): string[] {
     "            Box::pin(async move {",
     ...(method.params.length > 0 ? ["                let mut args = args.into_iter();"] : ["                drop(args);"]),
     ...decodes,
-    `                super::types::rpc_encode_result(${call})`,
+    `                super::types::${encodeFn}(${call})`,
     "            })",
     "        });",
     "    }",
@@ -78,7 +80,12 @@ export function emitCallMethod(method: RpcMethod, declarations: DeclarationScope
   const params = method.params.map(
     (param) => `${rustValueIdentifier(param.name)}: ${renderParamType(param.type, declarations)}`,
   );
-  const args = `vec![${method.params.map((param) => `::serde_json::to_value(${rustValueIdentifier(param.name)})`).join(", ")}]`;
+  const args = `vec![${method.params
+    .map((param) => {
+      const encodeFn = usesJsonValue(param.type, declarations) ? "rpc_encode_json_arg" : "rpc_encode_arg";
+      return `super::types::${encodeFn}(&${rustValueIdentifier(param.name)})`;
+    })
+    .join(", ")}]`;
   const signature = ["&self", ...params].join(", ");
   if (method.returnType.kind === "void") {
     return [
@@ -88,10 +95,11 @@ export function emitCallMethod(method: RpcMethod, declarations: DeclarationScope
       "    }",
     ];
   }
+  const requestFn = usesJsonValue(method.returnType, declarations) ? "request_json" : "request";
   return [
     methodDoc(method, "Calls"),
     `    pub async fn ${callMethodName(method.name)}(${signature}) -> Result<${resultRustType(method)}, RpcError> {`,
-    `        rpc_runtime::request(${target}, self.timeout, ${JSON.stringify(method.name)}, ${args}).await`,
+    `        rpc_runtime::${requestFn}(${target}, self.timeout, ${JSON.stringify(method.name)}, ${args}).await`,
     "    }",
   ];
 }
@@ -105,6 +113,7 @@ export function typesImport(schema: RpcSchema, declarations: DeclarationScope): 
 
 const SERVER_RUNTIME = (timeoutMs: number) => String.raw`
 mod rpc_runtime {
+    use ::std::collections::VecDeque;
     use ::std::future::Future;
     use ::std::panic::AssertUnwindSafe;
     use ::std::pin::Pin;
@@ -120,12 +129,13 @@ mod rpc_runtime {
     use ::tokio::sync::{mpsc, watch};
 
     use super::super::types::{
-        rpc_decode_result, rpc_encode_args, rpc_panic_message, RpcError, RpcErrorCode, Unsubscribe, RPC_ERROR_EVENT,
+        rpc_decode_error, rpc_decode_json_result, rpc_decode_result, rpc_encode_args, rpc_encode_error,
+        rpc_encode_error_result, rpc_json, rpc_panic_message, RpcError, RpcErrorCode, Unsubscribe, RPC_ERROR_EVENT,
     };
 
     pub(super) const DEFAULT_TIMEOUT: Duration = Duration::from_millis(${timeoutMs});
 
-    pub(super) type BoxedCall = Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send>>;
+    pub(super) type BoxedCall = Pin<Box<dyn Future<Output = Result<Vec<u8>, RpcError>> + Send>>;
 
     type Observer<T> = Arc<dyn Fn(&T) + Send + Sync>;
 
@@ -212,7 +222,7 @@ mod rpc_runtime {
             if self.disposed() {
                 return;
             }
-            let _ = self.socket.emit(RPC_ERROR_EVENT, error);
+            let _ = self.socket.emit(RPC_ERROR_EVENT, &Payload(rpc_encode_error(error)));
         }
 
         pub(super) fn subscribe_errors(self: &Arc<Self>, observer: Observer<RpcError>) -> Unsubscribe {
@@ -255,10 +265,41 @@ mod rpc_runtime {
         }
     }
 
+    /// Binary payload wrapper that serializes and deserializes through
+    /// socketioxide's binary attachment channel (serialize_bytes / deserialize_byte_buf).
+    struct Payload(Vec<u8>);
+
+    impl ::serde::Serialize for Payload {
+        fn serialize<S: ::serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(&self.0)
+        }
+    }
+
+    impl<'de> ::serde::Deserialize<'de> for Payload {
+        fn deserialize<D: ::serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct BytesVisitor;
+            impl ::serde::de::Visitor<'_> for BytesVisitor {
+                type Value = Payload;
+
+                fn expecting(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                    f.write_str("a binary postcard payload")
+                }
+
+                fn visit_bytes<E: ::serde::de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+                    Ok(Payload(v.to_vec()))
+                }
+
+                fn visit_byte_buf<E: ::serde::de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+                    Ok(Payload(v))
+                }
+            }
+            deserializer.deserialize_byte_buf(BytesVisitor)
+        }
+    }
+
     /// The raw argument list of an event and whether the peer awaits an acknowledgement.
-    /// socketioxide's own ${"`"}Data${"`"} extractor reads only the first argument and hides the ack id.
     pub(super) struct Inbound {
-        args: Result<Vec<Value>, String>,
+        args: Result<Vec<Result<Vec<u8>, String>>, String>,
         acked: bool,
     }
 
@@ -271,22 +312,40 @@ mod rpc_runtime {
             ack_id: &Option<i64>,
         ) -> Result<Self, Self::Error> {
             let args = match value {
-                PacketValue::Str(text, None) => match ::serde_json::from_str::<Vec<Value>>(text) {
+                PacketValue::Str(text, bins) => match ::serde_json::from_str::<Vec<Value>>(text) {
                     Ok(mut items) if !items.is_empty() => {
                         items.remove(0);
-                        Ok(items)
+                        let mut empty = VecDeque::new();
+                        let bins = bins.as_mut().unwrap_or(&mut empty);
+                        Ok(items
+                            .into_iter()
+                            .map(|item| {
+                                let Some(num) = item
+                                    .as_object()
+                                    .filter(|obj| obj.get("_placeholder") == Some(&Value::Bool(true)))
+                                    .and_then(|obj| obj.get("num"))
+                                    .and_then(Value::as_u64)
+                                    .and_then(|n| usize::try_from(n).ok())
+                                else {
+                                    return Err("expected binary postcard payload".to_string());
+                                };
+                                bins.get(num)
+                                    .map(|bytes| bytes.to_vec())
+                                    .ok_or_else(|| "missing binary attachment".to_string())
+                            })
+                            .collect())
                     }
                     Ok(_) => Err("event packet carries no event name".to_string()),
                     Err(err) => Err(format!("malformed event packet: {err}")),
                 },
-                _ => Err("binary payloads are not supported".to_string()),
+                _ => Err("malformed event packet".to_string()),
             };
             Ok(Self { args, acked: ack_id.is_some() })
         }
     }
 
     struct Call {
-        args: Result<Vec<Value>, String>,
+        args: Result<Vec<Result<Vec<u8>, String>>, String>,
         ack: Option<AckSender>,
     }
 
@@ -296,7 +355,7 @@ mod rpc_runtime {
     /// order and a slow handler stalls only its own method.
     pub(super) fn listen<F>(binding: &Arc<Binding>, method: &'static str, arity: usize, acked: bool, run: F)
     where
-        F: Fn(super::Context, Vec<Value>) -> BoxedCall + Send + Sync + 'static,
+        F: Fn(super::Context, Vec<Result<Vec<u8>, String>>) -> BoxedCall + Send + Sync + 'static,
     {
         let (sender, mut receiver) = mpsc::unbounded_channel::<Call>();
         binding.socket.on(method, move |inbound: Inbound, ack: AckSender| {
@@ -305,7 +364,7 @@ mod rpc_runtime {
                 // The binding is gone: answer rather than leave the caller to time out.
                 if let (true, Some(ack)) = (acked, call.ack) {
                     let error = RpcError::new(RpcErrorCode::Disposed, "server binding is disposed").in_method(method);
-                    let _ = ack.send(&error);
+                    let _ = ack.send(&Payload(rpc_encode_error_result(&error)));
                 }
             }
             ::std::future::ready(())
@@ -328,7 +387,8 @@ mod rpc_runtime {
             receiver.close();
             while let Ok(call) = receiver.try_recv() {
                 if let (true, Some(ack)) = (acked, call.ack) {
-                    let _ = ack.send(&binding.closed_error().in_method(method));
+                    let error = binding.closed_error().in_method(method);
+                    let _ = ack.send(&Payload(rpc_encode_error_result(&error)));
                 }
             }
         });
@@ -336,7 +396,7 @@ mod rpc_runtime {
 
     async fn serve<F>(binding: &Arc<Binding>, method: &'static str, arity: usize, acked: bool, run: &F, call: Call)
     where
-        F: Fn(super::Context, Vec<Value>) -> BoxedCall + Send + Sync + 'static,
+        F: Fn(super::Context, Vec<Result<Vec<u8>, String>>) -> BoxedCall + Send + Sync + 'static,
     {
         if acked && call.ack.is_none() {
             binding.emit_error(&RpcError::invalid_argument("missing acknowledgement callback").in_method(method));
@@ -363,10 +423,10 @@ mod rpc_runtime {
         match (acked, call.ack) {
             (true, Some(ack)) => {
                 let payload = match result {
-                    Ok(value) => value,
-                    Err(error) => ::serde_json::to_value(&error).unwrap_or(Value::Null),
+                    Ok(bytes) => bytes,
+                    Err(error) => rpc_encode_error_result(&error),
                 };
-                let _ = ack.send(&payload);
+                let _ = ack.send(&Payload(payload));
             }
             // A fire-and-forget call has no acknowledgement slot, so its failure travels out of band.
             _ => {
@@ -379,7 +439,7 @@ mod rpc_runtime {
 
     /// Observes the failures the peer reports for fire-and-forget calls it handled.
     pub(super) fn listen_errors(binding: &Arc<Binding>) {
-        let (sender, mut receiver) = mpsc::unbounded_channel::<Option<Value>>();
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Option<Result<Vec<u8>, String>>>();
         binding.socket.on(RPC_ERROR_EVENT, move |inbound: Inbound| {
             let _ = sender.send(inbound.args.ok().and_then(|args| args.into_iter().next()));
             ::std::future::ready(())
@@ -396,9 +456,12 @@ mod rpc_runtime {
                         None => break,
                     },
                 };
-                let report = report.unwrap_or(Value::Null);
-                let error = ::serde_json::from_value::<RpcError>(report.clone())
-                    .unwrap_or_else(|_| RpcError::internal(report).with_method(RPC_ERROR_EVENT));
+                let error = match report {
+                    Some(Ok(bytes)) => rpc_decode_error(&bytes)
+                        .unwrap_or_else(|err| RpcError::internal(err).with_method(RPC_ERROR_EVENT)),
+                    Some(Err(err)) => RpcError::internal(err).with_method(RPC_ERROR_EVENT),
+                    None => RpcError::internal("missing error payload").with_method(RPC_ERROR_EVENT),
+                };
                 let observers: Vec<_> = binding.lock().errors.list.iter().map(|(_, observer)| Arc::clone(observer)).collect();
                 notify(observers, &error);
             }
@@ -429,7 +492,7 @@ mod rpc_runtime {
 
     /// Spreads call arguments into separate Socket.IO arguments: socketioxide
     /// treats a tuple as an argument list and anything else as one argument.
-    struct Args<'a>(&'a [Value]);
+    struct Args<'a>(&'a [Payload]);
 
     impl ::serde::Serialize for Args<'_> {
         fn serialize<S: ::serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -460,39 +523,62 @@ mod rpc_runtime {
         .in_method(method)
     }
 
+    #[allow(dead_code)]
     pub(super) fn emit(
         binding: &Binding,
         method: &str,
-        args: Vec<::serde_json::Result<Value>>,
+        args: Vec<Result<Vec<u8>, String>>,
     ) -> Result<(), RpcError> {
-        let args = rpc_encode_args(method, args)?;
+        let args: Vec<Payload> = rpc_encode_args(method, args)?.into_iter().map(Payload).collect();
         if binding.disposed() {
             return Err(binding.closed_error().in_method(method));
         }
         binding.socket.emit(method, &Args(&args)).map_err(|err| send_error(err, method))
     }
 
-    pub(super) async fn request<T: ::serde::de::DeserializeOwned>(
+    async fn request_raw(
         binding: &Binding,
         timeout: Duration,
         method: &str,
-        args: Vec<::serde_json::Result<Value>>,
-    ) -> Result<T, RpcError> {
-        let args = rpc_encode_args(method, args)?;
+        args: Vec<Result<Vec<u8>, String>>,
+    ) -> Result<Vec<u8>, RpcError> {
+        let args: Vec<Payload> = rpc_encode_args(method, args)?.into_iter().map(Payload).collect();
         if binding.disposed() {
             return Err(binding.closed_error().in_method(method));
         }
         let ack = binding
             .socket
             .timeout(timeout)
-            .emit_with_ack::<_, Value>(method, &Args(&args))
+            .emit_with_ack::<_, Payload>(method, &Args(&args))
             .map_err(|err| send_error(err, method))?;
         // A call in flight fails the moment its connection drops or the binding is disposed.
-        let value = ::tokio::select! {
+        let payload = ::tokio::select! {
             result = ack => result.map_err(|err| ack_error(err, method))?,
             () = binding.cancelled() => return Err(binding.closed_error().in_method(method)),
         };
-        rpc_decode_result(method, value)
+        Ok(payload.0)
+    }
+
+    #[allow(dead_code)]
+    pub(super) async fn request<T: ::serde::de::DeserializeOwned>(
+        binding: &Binding,
+        timeout: Duration,
+        method: &str,
+        args: Vec<Result<Vec<u8>, String>>,
+    ) -> Result<T, RpcError> {
+        let bytes = request_raw(binding, timeout, method, args).await?;
+        rpc_decode_result(method, &bytes)
+    }
+
+    #[allow(dead_code)]
+    pub(super) async fn request_json<T: rpc_json::WireOwned>(
+        binding: &Binding,
+        timeout: Duration,
+        method: &str,
+        args: Vec<Result<Vec<u8>, String>>,
+    ) -> Result<T, RpcError> {
+        let bytes = request_raw(binding, timeout, method, args).await?;
+        rpc_decode_json_result(method, &bytes)
     }
 }
 `;
@@ -538,7 +624,9 @@ export function emitServerFile(
     "/// itself when the socket disconnects.",
     "pub fn bind_server<H: ServerHandler>(socket: &SocketRef, handler: Arc<H>) -> ServerBinding {",
     "    let binding = rpc_runtime::Binding::new(socket.clone());",
-    ...(inbound.length === 0 ? ["    drop(handler);"] : inbound.flatMap((method) => emitListen(method, "&binding"))),
+    ...(inbound.length === 0
+      ? ["    drop(handler);"]
+      : inbound.flatMap((method) => emitListen(method, declarations, "&binding"))),
     "    rpc_runtime::listen_errors(&binding);",
     "    rpc_runtime::listen_disconnect(&binding);",
     "    ServerBinding { binding }",

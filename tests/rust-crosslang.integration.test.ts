@@ -140,7 +140,9 @@ const RUST_CLIENT_CHECKS = [
 // --- In-process TypeScript server, from run 2 ---------------------------------
 
 const { createRpcServer } = await import(join(tsServerDir, "server.generated.ts"));
-const { isRpcError, rpcError } = await import(join(tsServerDir, "types.generated.ts"));
+const { isRpcError, rpcError, rpcDecodeResult_c2s_add, rpcDecodeErrorFrame } = await import(
+  join(tsServerDir, "types.generated.ts")
+);
 
 const httpServer = createServer();
 const ioServer = new Server(httpServer);
@@ -377,14 +379,14 @@ describe("generated TypeScript client against the generated Rust server", () => 
 
   test("wrong arity, wrong types and a missing acknowledgement are answered, not dropped", async () => {
     const { socket } = await connectTs();
-    const arity = await socket.timeout(2_000).emitWithAck("add", 1);
+    const arity = rpcDecodeResult_c2s_add(await socket.timeout(2_000).emitWithAck("add", 1));
     expect(arity).toMatchObject({ __rpcError: true, code: "INVALID_ARGUMENT", message: "expected 2 arguments, got 1", method: "add" });
-    const types = await socket.timeout(2_000).emitWithAck("add", "x", 2);
+    const types = rpcDecodeResult_c2s_add(await socket.timeout(2_000).emitWithAck("add", "x", 2));
     expect(types).toMatchObject({ code: "INVALID_ARGUMENT", method: "add" });
     expect(types.message).toContain("invalid argument a");
 
     const reports: Array<{ message: string }> = [];
-    socket.on("__rpc:error__", (error: { message: string }) => reports.push(error));
+    socket.on("__rpc:error__", (raw: unknown) => reports.push(rpcDecodeErrorFrame(raw)));
     socket.emit("add", 1, 2);
     expect(await eventually(() => reports.length > 0)).toBe(true);
     expect(reports[0]).toMatchObject({ code: "INVALID_ARGUMENT", message: "missing acknowledgement callback", method: "add" });

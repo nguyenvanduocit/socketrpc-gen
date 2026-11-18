@@ -270,6 +270,7 @@ describe("SocketRPC schema extraction", () => {
       expect(extracted.schema).toBeUndefined();
       expect(extracted.diagnostics.map(({ code }) => code)).toEqual([
         "UNSUPPORTED_UNION_TYPE",
+        "UNDECLARED_TYPE",
         "UNSUPPORTED_ANY_TYPE",
         "UNSUPPORTED_GENERIC_TYPE",
       ]);
@@ -314,6 +315,33 @@ describe("SocketRPC schema extraction", () => {
         caught = error;
       }
       expect(caught).toBeInstanceOf(SchemaExtractionError);
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+describe("a type the contract references but does not declare", () => {
+  test(
+    "is refused by the IR, naming the type and the fix, so no schema carries a dangling reference",
+    async () => {
+      const inputPath = createFixture({
+        "define.ts": `
+        export interface ServerFunctions {}
+        export interface ClientFunctions {
+          showError: (error: Error) => void;
+        }
+      `,
+      });
+
+      const extracted = await extractInterfacesFromFile(inputPath);
+
+      expect(extracted.schema).toBeUndefined();
+      expect(extracted.diagnostics).toHaveLength(1);
+      const [diagnostic] = extracted.diagnostics;
+      expect(diagnostic?.code).toBe("UNDECLARED_TYPE");
+      expect(diagnostic?.location.path).toBe("server-to-client.showError.params.error");
+      expect(diagnostic?.message).toContain("'Error' is referenced but never declared");
+      expect(diagnostic?.message).toContain("Declare it as an interface, type alias, or string enum");
     },
     TEST_TIMEOUT_MS,
   );

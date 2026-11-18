@@ -42,9 +42,20 @@ pub(crate) enum Packet {
     ConnectError {
         message: String,
     },
-    /// A binary event or acknowledgement. The contracts socketrpc-gen generates
-    /// are JSON-only, so these are reported rather than reassembled.
-    Binary,
+    BinaryEvent {
+        attachments: usize,
+        event: String,
+        args: Vec<Value>,
+        id: Option<u64>,
+    },
+    BinaryAck {
+        attachments: usize,
+        id: u64,
+        args: Vec<Value>,
+    },
+    DiscardBinary {
+        attachments: usize,
+    },
 }
 
 /// What the server advertises when its open packet omits a value. These are the
@@ -83,9 +94,18 @@ pub(crate) fn decode_packet(text: &str, namespace: &str) -> Result<Option<Packet
     let kind = chars.next().ok_or_else(|| "empty socket.io packet".to_string())?;
     let mut rest = chars.as_str();
 
-    if kind == '5' || kind == '6' {
-        return Ok(Some(Packet::Binary));
-    }
+    let attachments = if kind == '5' || kind == '6' {
+        let dash = rest
+            .find('-')
+            .ok_or_else(|| "binary packet missing attachment count".to_string())?;
+        let count = rest[..dash]
+            .parse::<usize>()
+            .map_err(|err| format!("invalid attachment count: {err}"))?;
+        rest = &rest[dash + 1..];
+        Some(count)
+    } else {
+        None
+    };
 
     let packet_namespace = if rest.starts_with('/') {
         match rest.find(',') {
@@ -104,7 +124,7 @@ pub(crate) fn decode_packet(text: &str, namespace: &str) -> Result<Option<Packet
         "/"
     };
     if packet_namespace != namespace {
-        return Ok(None);
+        return Ok(attachments.filter(|&count| count > 0).map(|attachments| Packet::DiscardBinary { attachments }));
     }
 
     let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
@@ -125,7 +145,7 @@ pub(crate) fn decode_packet(text: &str, namespace: &str) -> Result<Option<Packet
     match kind {
         '0' => Ok(Some(Packet::Connect)),
         '1' => Ok(Some(Packet::Disconnect)),
-        '2' => {
+        '2' | '5' => {
             let Value::Array(mut items) = json()? else {
                 return Err("event payload is not an array".to_string());
             };
@@ -135,14 +155,22 @@ pub(crate) fn decode_packet(text: &str, namespace: &str) -> Result<Option<Packet
             let Value::String(event) = items.remove(0) else {
                 return Err("event name is not a string".to_string());
             };
-            Ok(Some(Packet::Event { event, args: items, id }))
+            match attachments {
+                Some(attachments) if attachments > 0 => {
+                    Ok(Some(Packet::BinaryEvent { attachments, event, args: items, id }))
+                }
+                _ => Ok(Some(Packet::Event { event, args: items, id })),
+            }
         }
-        '3' => {
+        '3' | '6' => {
             let id = id.ok_or_else(|| "acknowledgement without an id".to_string())?;
             let Value::Array(args) = json()? else {
                 return Err("acknowledgement payload is not an array".to_string());
             };
-            Ok(Some(Packet::Ack { id, args }))
+            match attachments {
+                Some(attachments) if attachments > 0 => Ok(Some(Packet::BinaryAck { attachments, id, args })),
+                _ => Ok(Some(Packet::Ack { id, args })),
+            }
         }
         '4' => {
             let message = match json() {
@@ -158,6 +186,51 @@ pub(crate) fn decode_packet(text: &str, namespace: &str) -> Result<Option<Packet
         }
         other => Err(format!("unknown socket.io packet type {other:?}")),
     }
+}
+
+/// Replaces `_placeholder` entries in a packet's argument list with the binary
+/// frames that followed the header.
+pub(crate) fn reconstruct_args(args: Vec<Value>, buffers: &[Vec<u8>]) -> Result<Vec<Value>, String> {
+    args.into_iter()
+        .map(|arg| {
+            let Some(num) = arg
+                .as_object()
+                .filter(|obj| obj.get("_placeholder") == Some(&Value::Bool(true)))
+                .and_then(|obj| obj.get("num"))
+                .and_then(Value::as_u64)
+            else {
+                return Ok(arg);
+            };
+            let bytes = buffers
+                .get(num as usize)
+                .ok_or_else(|| format!("binary placeholder {num} out of bounds"))?;
+            Ok(serde_json::json!({
+                "_placeholder": true,
+                "bytes": bytes,
+            }))
+        })
+        .collect()
+}
+
+/// Extracts the binary payload from a reconstructed Socket.IO argument.
+pub fn take_bin_arg(value: Value) -> Result<Vec<u8>, String> {
+    let Value::Object(mut obj) = value else {
+        return Err("expected binary postcard payload".to_string());
+    };
+    if obj.get("_placeholder") != Some(&Value::Bool(true)) {
+        return Err("expected binary postcard payload".to_string());
+    }
+    let Some(Value::Array(items)) = obj.remove("bytes") else {
+        return Err("expected binary postcard payload".to_string());
+    };
+    items
+        .into_iter()
+        .map(|item| {
+            item.as_u64()
+                .and_then(|n| u8::try_from(n).ok())
+                .ok_or_else(|| "invalid byte in binary payload".to_string())
+        })
+        .collect()
 }
 
 /// The `/nsp,` prefix a packet for a non-default namespace carries.
@@ -192,6 +265,46 @@ pub(crate) fn encode_event(namespace: &str, id: Option<u64>, event: &str, args: 
 
 pub(crate) fn encode_ack(namespace: &str, id: u64, args: &[Value]) -> String {
     format!("43{}{id}{}", namespace_prefix(namespace), Value::Array(args.to_vec()))
+}
+
+pub(crate) fn encode_event_bin(
+    namespace: &str,
+    id: Option<u64>,
+    event: &str,
+    args: &[Vec<u8>],
+) -> (String, Vec<Vec<u8>>) {
+    if args.is_empty() {
+        return (encode_event(namespace, id, event, &[]), Vec::new());
+    }
+    let mut items = Vec::with_capacity(args.len() + 1);
+    items.push(Value::String(event.to_string()));
+    for index in 0..args.len() {
+        items.push(serde_json::json!({ "_placeholder": true, "num": index }));
+    }
+    let id = id.map(|id| id.to_string()).unwrap_or_default();
+    let header = format!(
+        "45{}-{}{id}{}",
+        args.len(),
+        namespace_prefix(namespace),
+        Value::Array(items)
+    );
+    (header, args.to_vec())
+}
+
+pub(crate) fn encode_ack_bin(namespace: &str, id: u64, args: &[Vec<u8>]) -> (String, Vec<Vec<u8>>) {
+    if args.is_empty() {
+        return (encode_ack(namespace, id, &[]), Vec::new());
+    }
+    let items: Vec<Value> = (0..args.len())
+        .map(|index| serde_json::json!({ "_placeholder": true, "num": index }))
+        .collect();
+    let header = format!(
+        "46{}-{}{id}{}",
+        args.len(),
+        namespace_prefix(namespace),
+        Value::Array(items)
+    );
+    (header, args.to_vec())
 }
 
 #[cfg(test)]

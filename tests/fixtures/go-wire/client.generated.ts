@@ -13,7 +13,7 @@
  */
 
 import type { Socket } from "socket.io-client";
-import { type RpcError, type RpcCallOptions, type Unsubscribe, toRpcError, rpcWhenAborted } from "./types.generated";
+import { type RpcError, type RpcCallOptions, type Unsubscribe, toRpcError, rpcWhenAborted, rpcDecodeErrorFrame, rpcEncodeErrorFrame, rpcEncodeErrorResult, rpcDecodeArgs_s2c_notify, rpcDecodeArgs_s2c_ask, rpcEncodeResult_s2c_ask, rpcEncodeArgs_c2s_echo, rpcDecodeResult_c2s_echo, rpcEncodeArgs_c2s_failTyped, rpcDecodeResult_c2s_failTyped, rpcEncodeArgs_c2s_note, rpcEncodeArgs_c2s_readNotes, rpcDecodeResult_c2s_readNotes, rpcEncodeArgs_c2s_neverAck, rpcDecodeResult_c2s_neverAck, rpcEncodeArgs_c2s_dropWhileInFlight, rpcDecodeResult_c2s_dropWhileInFlight, rpcEncodeArgs_c2s_receipt, rpcDecodeResult_c2s_receipt, rpcEncodeArgs_c2s_roundTrip, rpcDecodeResult_c2s_roundTrip } from "./types.generated";
 import type { Echo, Receipt } from "./define";
 
 // === RpcClient INTERFACE ===
@@ -122,25 +122,34 @@ export function createRpcClient(socket: Socket): RpcClient {
     const handle: RpcClientHandle = {
         notify(handler: (text: string) => Promise<void>): Unsubscribe {
             checkDisposed();
-            const listener = async (text: string) => {
+            const listener = async (...rawArgs: unknown[]) => {
                 try {
+                    const [text] = rpcDecodeArgs_s2c_notify(rawArgs);
                     await handler(text);
                 } catch (error) {
                     console.error('[notify] Handler error:', error);
-                    socket.emit('__rpc:error__', toRpcError(error, { method: 'notify' }));
+                    socket.emit('__rpc:error__', rpcEncodeErrorFrame(toRpcError(error, { method: 'notify' })));
                 }
             };
             return register('notify', listener);
         },
         ask(handler: (question: string) => Promise<string>): Unsubscribe {
             checkDisposed();
-            const listener = async (question: string, callback: (result: string | RpcError) => void) => {
+            const listener = async (...rawArgs: unknown[]) => {
+                const last = rawArgs[rawArgs.length - 1];
+                if (typeof last !== 'function') {
+                    socket.emit('__rpc:error__', rpcEncodeErrorFrame({ __rpcError: true, code: 'INVALID_ARGUMENT', message: 'missing acknowledgement callback', method: 'ask' }));
+                    return;
+                }
+                const callback = last as (payload: Uint8Array) => void;
+                const args = rawArgs.slice(0, -1);
                 try {
+                    const [question] = rpcDecodeArgs_s2c_ask(args);
                     const handlerResult = await handler(question);
-                    callback(handlerResult);
+                    callback(rpcEncodeResult_s2c_ask(handlerResult));
                 } catch (error) {
                     console.error('[ask] Handler error:', error);
-                    callback(toRpcError(error, { method: 'ask' }));
+                    callback(rpcEncodeErrorResult(toRpcError(error, { method: 'ask' })));
                 }
             };
             return register('ask', listener);
@@ -154,7 +163,8 @@ export function createRpcClient(socket: Socket): RpcClient {
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
-                const ack = emitter.timeout(timeout).emitWithAck('echo', id, payload);
+                const encodedArgs = rpcEncodeArgs_c2s_echo(id, payload);
+                const ack = emitter.timeout(timeout).emitWithAck('echo', ...encodedArgs).then((raw: unknown) => rpcDecodeResult_c2s_echo(raw));
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'echo')]) : ack);
             } catch (err) {
                 return toRpcError(err, { method: 'echo' });
@@ -166,7 +176,8 @@ export function createRpcClient(socket: Socket): RpcClient {
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
-                const ack = emitter.timeout(timeout).emitWithAck('failTyped', reason);
+                const encodedArgs = rpcEncodeArgs_c2s_failTyped(reason);
+                const ack = emitter.timeout(timeout).emitWithAck('failTyped', ...encodedArgs).then((raw: unknown) => rpcDecodeResult_c2s_failTyped(raw));
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'failTyped')]) : ack);
             } catch (err) {
                 return toRpcError(err, { method: 'failTyped' });
@@ -174,7 +185,8 @@ export function createRpcClient(socket: Socket): RpcClient {
         },
         note(text: string, opts?: RpcCallOptions) {
             if (_disposed) return;
-            (opts?.volatile ? socket.volatile : socket).emit('note', text);
+            const encodedArgs = rpcEncodeArgs_c2s_note(text);
+            (opts?.volatile ? socket.volatile : socket).emit('note', ...encodedArgs);
         },
         async readNotes(opts?: RpcCallOptions): Promise<string[] | RpcError> {
             if (_disposed) return { __rpcError: true, message: 'RPC instance has been disposed', code: 'DISPOSED', method: 'readNotes' };
@@ -182,7 +194,8 @@ export function createRpcClient(socket: Socket): RpcClient {
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
-                const ack = emitter.timeout(timeout).emitWithAck('readNotes');
+                const encodedArgs = rpcEncodeArgs_c2s_readNotes();
+                const ack = emitter.timeout(timeout).emitWithAck('readNotes', ...encodedArgs).then((raw: unknown) => rpcDecodeResult_c2s_readNotes(raw));
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'readNotes')]) : ack);
             } catch (err) {
                 return toRpcError(err, { method: 'readNotes' });
@@ -194,7 +207,8 @@ export function createRpcClient(socket: Socket): RpcClient {
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
-                const ack = emitter.timeout(timeout).emitWithAck('neverAck', id);
+                const encodedArgs = rpcEncodeArgs_c2s_neverAck(id);
+                const ack = emitter.timeout(timeout).emitWithAck('neverAck', ...encodedArgs).then((raw: unknown) => rpcDecodeResult_c2s_neverAck(raw));
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'neverAck')]) : ack);
             } catch (err) {
                 return toRpcError(err, { method: 'neverAck' });
@@ -206,7 +220,8 @@ export function createRpcClient(socket: Socket): RpcClient {
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
-                const ack = emitter.timeout(timeout).emitWithAck('dropWhileInFlight', id);
+                const encodedArgs = rpcEncodeArgs_c2s_dropWhileInFlight(id);
+                const ack = emitter.timeout(timeout).emitWithAck('dropWhileInFlight', ...encodedArgs).then((raw: unknown) => rpcDecodeResult_c2s_dropWhileInFlight(raw));
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'dropWhileInFlight')]) : ack);
             } catch (err) {
                 return toRpcError(err, { method: 'dropWhileInFlight' });
@@ -218,7 +233,8 @@ export function createRpcClient(socket: Socket): RpcClient {
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
-                const ack = emitter.timeout(timeout).emitWithAck('receipt', id);
+                const encodedArgs = rpcEncodeArgs_c2s_receipt(id);
+                const ack = emitter.timeout(timeout).emitWithAck('receipt', ...encodedArgs).then((raw: unknown) => rpcDecodeResult_c2s_receipt(raw));
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'receipt')]) : ack);
             } catch (err) {
                 return toRpcError(err, { method: 'receipt' });
@@ -230,7 +246,8 @@ export function createRpcClient(socket: Socket): RpcClient {
             const timeout = opts?.timeout ?? 5000;
             const emitter = opts?.volatile ? socket.volatile : socket;
             try {
-                const ack = emitter.timeout(timeout).emitWithAck('roundTrip', question);
+                const encodedArgs = rpcEncodeArgs_c2s_roundTrip(question);
+                const ack = emitter.timeout(timeout).emitWithAck('roundTrip', ...encodedArgs).then((raw: unknown) => rpcDecodeResult_c2s_roundTrip(raw));
                 return await (opts?.signal ? Promise.race([ack, rpcWhenAborted(opts.signal, 'roundTrip')]) : ack);
             } catch (err) {
                 return toRpcError(err, { method: 'roundTrip' });
@@ -266,8 +283,9 @@ export function createRpcClient(socket: Socket): RpcClient {
         },
         onRpcError(handler: (error: RpcError) => void): Unsubscribe {
             checkDisposed();
-            socket.on('__rpc:error__', handler);
-            const unsubscribe = () => socket.off('__rpc:error__', handler);
+            const wrapped = (raw: unknown) => handler(rpcDecodeErrorFrame(raw));
+            socket.on('__rpc:error__', wrapped);
+            const unsubscribe = () => socket.off('__rpc:error__', wrapped);
             unsubscribers.push(unsubscribe);
             return unsubscribe;
         },

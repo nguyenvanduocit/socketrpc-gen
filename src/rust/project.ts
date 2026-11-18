@@ -232,6 +232,38 @@ export function resultRustType(method: RpcMethod): string {
   return method.returnType.kind === "void" ? "()" : renderRustType(method.returnType);
 }
 
+/**
+ * Whether `ref` reaches `::serde_json::Value` without crossing a struct or union
+ * declaration (whose own JSON fields already carry `#[serde(with = "rpc_json")]`).
+ */
+export function usesJsonValue(
+  ref: TypeRef,
+  declarations: DeclarationScope,
+  seen: ReadonlySet<string> = new Set(),
+): boolean {
+  switch (ref.kind) {
+    case "json":
+      return true;
+    case "optional":
+    case "nullable":
+      return usesJsonValue(ref.type, declarations, seen);
+    case "array":
+      return usesJsonValue(ref.element, declarations, seen);
+    case "map":
+      return usesJsonValue(ref.value, declarations, seen);
+    case "named": {
+      if (seen.has(ref.name)) return false;
+      const declaration = declarations.get(ref.name);
+      if (declaration?.kind === "alias") {
+        return usesJsonValue(declaration.target, declarations, new Set([...seen, ref.name]));
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
 /** Every declaration name a set of type references mentions, in first-mention order. */
 export function referencedDeclarations(refs: readonly TypeRef[], declarations: DeclarationScope): string[] {
   const names: string[] = [];

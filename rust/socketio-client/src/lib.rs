@@ -42,6 +42,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
 use packet::{EngineFrame, Handshake, Packet};
+pub use packet::take_bin_arg;
 
 /// How to reach the server and how to behave when the connection drops.
 #[derive(Debug, Clone)]
@@ -165,7 +166,17 @@ impl Ack {
         let frame = packet::encode_ack(&self.shared.namespace, self.id, args);
         let state = self.shared.lock();
         match &state.session {
-            Some(session) if session.epoch == self.epoch => session.send(frame, state.max_payload),
+            Some(session) if session.epoch == self.epoch => session.send(frame, Vec::new(), state.max_payload),
+            _ => Err(Error::Disconnected),
+        }
+    }
+
+    /// Answers the event with binary payloads.
+    pub fn send_bin(&self, args: &[Vec<u8>]) -> Result<(), Error> {
+        let (frame, binaries) = packet::encode_ack_bin(&self.shared.namespace, self.id, args);
+        let state = self.shared.lock();
+        match &state.session {
+            Some(session) if session.epoch == self.epoch => session.send(frame, binaries, state.max_payload),
             _ => Err(Error::Disconnected),
         }
     }
@@ -197,7 +208,14 @@ impl Socket {
     pub fn emit(&self, event: &str, args: &[Value]) -> Result<(), Error> {
         let frame = packet::encode_event(&self.shared.namespace, None, event, args);
         let state = self.shared.lock();
-        state.sendable()?.send(frame, state.max_payload)
+        state.sendable()?.send(frame, Vec::new(), state.max_payload)
+    }
+
+    /// Sends a binary event without awaiting an acknowledgement.
+    pub fn emit_bin(&self, event: &str, args: &[Vec<u8>]) -> Result<(), Error> {
+        let (frame, binaries) = packet::encode_event_bin(&self.shared.namespace, None, event, args);
+        let state = self.shared.lock();
+        state.sendable()?.send(frame, binaries, state.max_payload)
     }
 
     /// Sends an event and awaits the server's acknowledgement arguments.
@@ -210,7 +228,32 @@ impl Socket {
             let mut state = self.shared.lock();
             let id = state.next_ack;
             let frame = packet::encode_event(&self.shared.namespace, Some(id), event, args);
-            state.sendable()?.send(frame, state.max_payload)?;
+            state.sendable()?.send(frame, Vec::new(), state.max_payload)?;
+            state.next_ack += 1;
+            state.pending.insert(id, sender);
+            id
+        };
+        let _pending = PendingGuard { shared: &self.shared, id };
+        match tokio::time::timeout(timeout, receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(Error::Disconnected),
+            Err(_) => Err(Error::Timeout),
+        }
+    }
+
+    /// Sends a binary event and awaits the server's acknowledgement arguments.
+    pub async fn emit_with_ack_bin(
+        &self,
+        event: &str,
+        args: &[Vec<u8>],
+        timeout: Duration,
+    ) -> Result<Vec<Value>, Error> {
+        let (sender, receiver) = oneshot::channel();
+        let id = {
+            let mut state = self.shared.lock();
+            let id = state.next_ack;
+            let (frame, binaries) = packet::encode_event_bin(&self.shared.namespace, Some(id), event, args);
+            state.sendable()?.send(frame, binaries, state.max_payload)?;
             state.next_ack += 1;
             state.pending.insert(id, sender);
             id
@@ -311,20 +354,27 @@ impl State {
     }
 }
 
+#[derive(Debug)]
+struct OutboundPacket {
+    text: String,
+    binaries: Vec<Vec<u8>>,
+}
+
 /// The writer side of the connection that is up right now.
 #[derive(Debug)]
 struct LiveSession {
     epoch: u64,
-    outbound: mpsc::UnboundedSender<String>,
+    outbound: mpsc::UnboundedSender<OutboundPacket>,
 }
 
 impl LiveSession {
-    fn send(&self, frame: String, max_payload: u64) -> Result<(), Error> {
-        let size = frame.len() as u64;
+    fn send(&self, text: String, binaries: Vec<Vec<u8>>, max_payload: u64) -> Result<(), Error> {
+        let bin_bytes: u64 = binaries.iter().map(|b| b.len() as u64).sum();
+        let size = (text.len() as u64).saturating_add(bin_bytes);
         if size > max_payload {
             return Err(Error::PayloadTooLarge { size, max: max_payload });
         }
-        self.outbound.send(frame).map_err(|_| Error::Disconnected)
+        self.outbound.send(OutboundPacket { text, binaries }).map_err(|_| Error::Disconnected)
     }
 }
 
@@ -335,7 +385,7 @@ impl Shared {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn install(&self, outbound: mpsc::UnboundedSender<String>, handshake: &Handshake) -> u64 {
+    fn install(&self, outbound: mpsc::UnboundedSender<OutboundPacket>, handshake: &Handshake) -> u64 {
         let mut state = self.lock();
         state.epoch += 1;
         state.max_payload = handshake.max_payload;
@@ -420,7 +470,7 @@ struct Connection {
 /// The connection `connect` established, handed to the reader task.
 struct Session0 {
     connection: Connection,
-    outbound: mpsc::UnboundedReceiver<String>,
+    outbound: mpsc::UnboundedReceiver<OutboundPacket>,
     epoch: u64,
 }
 
@@ -461,6 +511,16 @@ async fn next_text(stream: &mut SplitStream<Stream>) -> Result<String, Error> {
 
 async fn send_text(sink: &mut SplitSink<Stream, Message>, frame: String) -> Result<(), Error> {
     sink.send(Message::Text(frame.into())).await.map_err(|err| Error::Transport(err.to_string()))
+}
+
+async fn send_packet(sink: &mut SplitSink<Stream, Message>, packet: OutboundPacket) -> Result<(), Error> {
+    send_text(sink, packet.text).await?;
+    for binary in packet.binaries {
+        sink.send(Message::Binary(binary.into()))
+            .await
+            .map_err(|err| Error::Transport(err.to_string()))?;
+    }
+    Ok(())
 }
 
 /// One connection attempt: WebSocket upgrade, Engine.IO open, Socket.IO CONNECT.
@@ -584,10 +644,29 @@ async fn drive(
     }
 }
 
+enum PendingBinaryKind {
+    Event {
+        event: String,
+        args: Vec<Value>,
+        id: Option<u64>,
+    },
+    Ack {
+        id: u64,
+        args: Vec<Value>,
+    },
+    Discard,
+}
+
+struct PendingBinary {
+    expected: usize,
+    buffers: Vec<Vec<u8>>,
+    kind: PendingBinaryKind,
+}
+
 async fn run_session(
     shared: &Arc<Shared>,
     connection: &mut Connection,
-    outbound: &mut mpsc::UnboundedReceiver<String>,
+    outbound: &mut mpsc::UnboundedReceiver<OutboundPacket>,
     epoch: u64,
     events: &mpsc::UnboundedSender<Event>,
     close: &mut watch::Receiver<bool>,
@@ -597,6 +676,7 @@ async fn run_session(
     let deadline = tokio::time::sleep(window);
     tokio::pin!(deadline);
     let end = |reason, reconnect| SessionEnd { reason, reconnect };
+    let mut pending_binary: Option<PendingBinary> = None;
 
     loop {
         tokio::select! {
@@ -606,9 +686,9 @@ async fn run_session(
                 let _ = sink.close().await;
                 return end("io client disconnect", false);
             }
-            frame = outbound.recv() => match frame {
-                Some(frame) => {
-                    if send_text(sink, frame).await.is_err() {
+            packet = outbound.recv() => match packet {
+                Some(packet) => {
+                    if send_packet(sink, packet).await.is_err() {
                         return end("transport error", true);
                     }
                 }
@@ -624,19 +704,71 @@ async fn run_session(
                         }
                     }
                     Ok(EngineFrame::Close) => return end("transport close", true),
-                    Ok(EngineFrame::Message(body)) => match packet::decode_packet(body, &shared.namespace) {
-                        Ok(Some(Packet::Event { event, args, id })) => {
-                            let ack = id.map(|id| Ack { shared: Arc::clone(shared), epoch, id });
-                            let _ = events.send(Event::Message { event, args, ack });
+                    Ok(EngineFrame::Message(body)) => {
+                        if pending_binary.is_some() {
+                            return end("parse error", true);
                         }
-                        Ok(Some(Packet::Ack { id, args })) => shared.resolve(id, args),
-                        Ok(Some(Packet::Disconnect)) => return end("io server disconnect", false),
-                        Ok(_) => {}
-                        Err(_) => return end("parse error", true),
-                    },
+                        match packet::decode_packet(body, &shared.namespace) {
+                            Ok(Some(Packet::Event { event, args, id })) => {
+                                let ack = id.map(|id| Ack { shared: Arc::clone(shared), epoch, id });
+                                let _ = events.send(Event::Message { event, args, ack });
+                            }
+                            Ok(Some(Packet::Ack { id, args })) => shared.resolve(id, args),
+                            Ok(Some(Packet::BinaryEvent { attachments, event, args, id })) => {
+                                pending_binary = Some(PendingBinary {
+                                    expected: attachments,
+                                    buffers: Vec::with_capacity(attachments),
+                                    kind: PendingBinaryKind::Event { event, args, id },
+                                });
+                            }
+                            Ok(Some(Packet::BinaryAck { attachments, id, args })) => {
+                                pending_binary = Some(PendingBinary {
+                                    expected: attachments,
+                                    buffers: Vec::with_capacity(attachments),
+                                    kind: PendingBinaryKind::Ack { id, args },
+                                });
+                            }
+                            Ok(Some(Packet::DiscardBinary { attachments })) => {
+                                pending_binary = Some(PendingBinary {
+                                    expected: attachments,
+                                    buffers: Vec::with_capacity(attachments),
+                                    kind: PendingBinaryKind::Discard,
+                                });
+                            }
+                            Ok(Some(Packet::Disconnect)) => return end("io server disconnect", false),
+                            Ok(_) => {}
+                            Err(_) => return end("parse error", true),
+                        }
+                    }
                     Ok(EngineFrame::Open(_) | EngineFrame::Ignored) => {}
                     Err(_) => return end("parse error", true),
                 },
+                Some(Ok(Message::Binary(bytes))) => {
+                    let Some(pending) = pending_binary.as_mut() else {
+                        return end("parse error", true);
+                    };
+                    pending.buffers.push(bytes.to_vec());
+                    if pending.buffers.len() == pending.expected {
+                        if let Some(completed) = pending_binary.take() {
+                            match completed.kind {
+                                PendingBinaryKind::Event { event, args, id } => {
+                                    let Ok(args) = packet::reconstruct_args(args, &completed.buffers) else {
+                                        return end("parse error", true);
+                                    };
+                                    let ack = id.map(|id| Ack { shared: Arc::clone(shared), epoch, id });
+                                    let _ = events.send(Event::Message { event, args, ack });
+                                }
+                                PendingBinaryKind::Ack { id, args } => {
+                                    let Ok(args) = packet::reconstruct_args(args, &completed.buffers) else {
+                                        return end("parse error", true);
+                                    };
+                                    shared.resolve(id, args);
+                                }
+                                PendingBinaryKind::Discard => {}
+                            }
+                        }
+                    }
+                }
                 Some(Ok(Message::Close(_))) | None => return end("transport close", true),
                 Some(Ok(_)) => {}
                 Some(Err(_)) => return end("transport error", true),

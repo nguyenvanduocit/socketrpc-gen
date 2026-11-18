@@ -273,15 +273,16 @@ func (b *ServerBinding) rpc_emitError(err *RpcError) {
 		return
 	}
 	// Data is caller-supplied and may not encode; the report must survive it.
-	if rpc_ensureEncodable(err, err.Method) != nil {
-		err = NewRpcError(err.Code, err.Message, err.Method, nil)
+	encoded, encErr := rpc_appendRpcError(nil, err)
+	if encErr != nil {
+		encoded, _ = rpc_appendRpcError(nil, NewRpcError(err.Code, err.Message, err.Method, nil))
 	}
 	b.rpc_emitState.mu.Lock()
 	defer b.rpc_emitState.mu.Unlock()
 	if !b.rpc_socket.Connected() || b.Disposed() {
 		return
 	}
-	_ = b.rpc_socket.Emit(RPCErrorEvent, err)
+	_ = b.rpc_socket.Emit(RPCErrorEvent, encoded)
 }
 
 type rpc_errorSubscription struct {
@@ -333,8 +334,13 @@ func (c *rpc_inboundCall) reply(value any) {
 		}
 		return
 	}
+	payload := rpc_encodeReply(value)
 	c.once.Do(func() {
-		c.ack([]any{value}, nil)
+		if c.binding != nil && c.binding.rpc_emitState != nil {
+			c.binding.rpc_emitState.mu.Lock()
+			defer c.binding.rpc_emitState.mu.Unlock()
+		}
+		c.ack([]any{payload}, nil)
 	})
 }
 
@@ -580,15 +586,16 @@ func rpc_emit(c *Client, ctx context.Context, method string, args ...any) error 
 	if err := rpc_errorFromContext(ctx, method); err != nil {
 		return err
 	}
-	if err := rpc_ensureEncodable(args, method); err != nil {
-		return err
+	encoded, encErr := rpc_encodeArgs(method, args)
+	if encErr != nil {
+		return encErr
 	}
 	c.emitState.mu.Lock()
 	defer c.emitState.mu.Unlock()
 	if err := c.stateError(method); err != nil {
 		return err
 	}
-	if err := c.socket.Emit(method, args...); err != nil {
+	if err := c.socket.Emit(method, encoded...); err != nil {
 		return rpc_errorFromTransport(err, method)
 	}
 	return nil
@@ -599,8 +606,9 @@ func rpc_request(c *Client, ctx context.Context, method string, target any, args
 	if err := rpc_errorFromContext(ctx, method); err != nil {
 		return err
 	}
-	if err := rpc_ensureEncodable(args, method); err != nil {
-		return err
+	encoded, encErr := rpc_encodeArgs(method, args)
+	if encErr != nil {
+		return encErr
 	}
 	response := make(chan rpc_ackResult, 1)
 	c.emitState.mu.Lock()
@@ -608,7 +616,7 @@ func rpc_request(c *Client, ctx context.Context, method string, target any, args
 		c.emitState.mu.Unlock()
 		return err
 	}
-	c.socket.Timeout(c.timeout).EmitWithAck(method, args...)(func(values []any, err error) {
+	c.socket.Timeout(c.timeout).EmitWithAck(method, encoded...)(func(values []any, err error) {
 		select {
 		case response <- rpc_ackResult{args: values, err: err}:
 		default:
@@ -631,7 +639,7 @@ func rpc_request(c *Client, ctx context.Context, method string, target any, args
 		message := fmt.Sprintf("expected one acknowledgement value, got %d", len(acknowledged.args))
 		return NewRpcError(CodeInvalidArgument, message, method, nil)
 	}
-	if failure, ok := rpc_decodeRpcError(acknowledged.args[0]); ok {
+	if failure, ok := rpc_decodeReplyError(acknowledged.args[0], method); ok {
 		return failure
 	}
 	if err := rpc_decodeInto(acknowledged.args[0], target); err != nil {

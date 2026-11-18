@@ -18,6 +18,8 @@
   ],
   "scripts": {
     "test": "bun test",
+    "test:fast": "bun test --path-ignore-patterns '**/go-*.test.ts' --path-ignore-patterns '**/*.integration.test.ts'",
+    "test:integration": "bun test tests/go-*.test.ts tests/*.integration.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test",
     "generate:examples": "bun run index.ts ./examples/01-basic/define.ts && bun run index.ts ./examples/02-single-extension/define.ts && bun run index.ts ./examples/03-multi-level-extension/define.ts && bun run index.ts ./examples/04-zod-integration/define.ts && bun run index.ts ./examples/00-full-app/pkg/rpc/define.ts && bun run generate:go-example && bun run generate:go-client-example && bun run generate:rust-example",

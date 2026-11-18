@@ -69,7 +69,7 @@ go mod edit -replace=github.com/nguyenvanduocit/socketrpc-gen/go/socketio=../../
 go build ./...
 ```
 
-`tests/generator.test.ts` does the same on a copy of this directory and runs
+`tests/generator.integration.test.ts` does the same on a copy of this directory and runs
 `go build ./...` and `go vet ./...`, so the programs below are compiled on every
 test run.
 

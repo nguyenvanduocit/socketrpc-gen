@@ -71,11 +71,9 @@ impl<'de> ::serde::Deserialize<'de> for RpcErrorCode {
 
 /// An error that occurred during an RPC call.
 ///
-/// On the wire it is the branded object every SocketRPC peer understands:
-/// `{ "__rpcError": true, "code", "message", "method"?, "data"? }`. A handler
-/// signals failure by returning one; a caller receives one for a failed call.
+/// A handler signals failure by returning one; a caller receives one for a
+/// failed call.
 #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
-#[serde(into = "RpcErrorWire", try_from = "RpcErrorWire")]
 pub struct RpcError {
     pub code: RpcErrorCode,
     pub message: String,
@@ -85,6 +83,7 @@ pub struct RpcError {
     /// `Err` whatever serde_json's features make a `Value` weigh
     /// (`preserve_order` more than doubles it), keeping callers clear of
     /// `clippy::result_large_err`.
+    #[serde(with = "rpc_json")]
     pub data: Option<Box<::serde_json::Value>>,
 }
 
@@ -131,35 +130,6 @@ impl ::std::fmt::Display for RpcError {
 
 impl ::std::error::Error for RpcError {}
 
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-struct RpcErrorWire {
-    #[serde(rename = "__rpcError")]
-    brand: bool,
-    code: RpcErrorCode,
-    message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    method: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    data: Option<::serde_json::Value>,
-}
-
-impl From<RpcError> for RpcErrorWire {
-    fn from(error: RpcError) -> Self {
-        Self { brand: true, code: error.code, message: error.message, method: error.method, data: error.data.map(|data| *data) }
-    }
-}
-
-impl TryFrom<RpcErrorWire> for RpcError {
-    type Error = &'static str;
-
-    fn try_from(wire: RpcErrorWire) -> Result<Self, Self::Error> {
-        if !wire.brand {
-            return Err("not an RpcError: __rpcError is not true");
-        }
-        Ok(Self { code: wire.code, message: wire.message, method: wire.method, data: wire.data.map(Box::new) })
-    }
-}
-
 /// Removes the observer it was returned for. Dropping it keeps the observer.
 #[must_use = "dropping an Unsubscribe keeps the observer registered; call .unsubscribe() to remove it"]
 pub struct Unsubscribe(Box<dyn FnOnce() + Send>);
@@ -181,47 +151,1021 @@ impl ::std::fmt::Debug for Unsubscribe {
     }
 }
 
-/// Encodes call arguments, refusing a value serde_json cannot represent.
+/// Postcard v1 binary wire format implementation for Serde.
+#[allow(dead_code)]
+pub(super) mod rpc_postcard {
+    use ::serde::de::{self, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess, VariantAccess, Visitor};
+    use ::serde::ser::{
+        self, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple,
+        SerializeTupleStruct, SerializeTupleVariant,
+    };
+    use ::serde::{Deserialize, Serialize};
+
+    #[derive(Debug)]
+    pub struct Error(String);
+
+    impl ::std::fmt::Display for Error {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    impl ::std::error::Error for Error {}
+
+    impl ser::Error for Error {
+        fn custom<T: ::std::fmt::Display>(msg: T) -> Self {
+            Self(msg.to_string())
+        }
+    }
+
+    impl de::Error for Error {
+        fn custom<T: ::std::fmt::Display>(msg: T) -> Self {
+            Self(msg.to_string())
+        }
+    }
+
+    pub fn to_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, String> {
+        let mut ser = Serializer { output: Vec::with_capacity(32) };
+        value.serialize(&mut ser).map_err(|err| err.0)?;
+        Ok(ser.output)
+    }
+
+    pub fn from_bytes<'de, T: Deserialize<'de>>(input: &'de [u8]) -> Result<T, String> {
+        let mut de = Deserializer { input };
+        let value = T::deserialize(&mut de).map_err(|err| err.0)?;
+        if !de.input.is_empty() {
+            return Err(format!("trailing bytes in postcard buffer: {}", de.input.len()));
+        }
+        Ok(value)
+    }
+
+    struct Serializer {
+        output: Vec<u8>,
+    }
+
+    impl Serializer {
+        fn write_varint_u32(&mut self, mut value: u32) {
+            while value >= 0x80 {
+                self.output.push(((value as u8) & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            self.output.push(value as u8);
+        }
+
+        fn write_varint_u64(&mut self, mut value: u64) {
+            while value >= 0x80 {
+                self.output.push(((value as u8) & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            self.output.push(value as u8);
+        }
+
+        fn write_varint_u128(&mut self, mut value: u128) {
+            while value >= 0x80 {
+                self.output.push(((value as u8) & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            self.output.push(value as u8);
+        }
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    const fn zig_zag_i16(n: i16) -> u16 {
+        ((n << 1) ^ (n >> 15)) as u16
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    const fn zig_zag_i32(n: i32) -> u32 {
+        ((n << 1) ^ (n >> 31)) as u32
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    const fn zig_zag_i64(n: i64) -> u64 {
+        ((n << 1) ^ (n >> 63)) as u64
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    const fn zig_zag_i128(n: i128) -> u128 {
+        ((n << 1) ^ (n >> 127)) as u128
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    const fn un_zig_zag_i16(n: u16) -> i16 {
+        ((n >> 1) as i16) ^ (-((n & 1) as i16))
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    const fn un_zig_zag_i32(n: u32) -> i32 {
+        ((n >> 1) as i32) ^ (-((n & 1) as i32))
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    const fn un_zig_zag_i64(n: u64) -> i64 {
+        ((n >> 1) as i64) ^ (-((n & 1) as i64))
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    const fn un_zig_zag_i128(n: u128) -> i128 {
+        ((n >> 1) as i128) ^ (-((n & 1) as i128))
+    }
+
+    impl ser::Serializer for &mut Serializer {
+        type Ok = ();
+        type Error = Error;
+        type SerializeSeq = Self;
+        type SerializeTuple = Self;
+        type SerializeTupleStruct = Self;
+        type SerializeTupleVariant = Self;
+        type SerializeMap = Self;
+        type SerializeStruct = Self;
+        type SerializeStructVariant = Self;
+
+        fn serialize_bool(self, v: bool) -> Result<(), Error> {
+            self.output.push(u8::from(v));
+            Ok(())
+        }
+
+        #[allow(clippy::cast_sign_loss)]
+        fn serialize_i8(self, v: i8) -> Result<(), Error> {
+            self.output.push(v as u8);
+            Ok(())
+        }
+
+        fn serialize_i16(self, v: i16) -> Result<(), Error> {
+            self.write_varint_u32(u32::from(zig_zag_i16(v)));
+            Ok(())
+        }
+
+        fn serialize_i32(self, v: i32) -> Result<(), Error> {
+            self.write_varint_u32(zig_zag_i32(v));
+            Ok(())
+        }
+
+        fn serialize_i64(self, v: i64) -> Result<(), Error> {
+            self.write_varint_u64(zig_zag_i64(v));
+            Ok(())
+        }
+
+        fn serialize_i128(self, v: i128) -> Result<(), Error> {
+            self.write_varint_u128(zig_zag_i128(v));
+            Ok(())
+        }
+
+        fn serialize_u8(self, v: u8) -> Result<(), Error> {
+            self.output.push(v);
+            Ok(())
+        }
+
+        fn serialize_u16(self, v: u16) -> Result<(), Error> {
+            self.write_varint_u32(u32::from(v));
+            Ok(())
+        }
+
+        fn serialize_u32(self, v: u32) -> Result<(), Error> {
+            self.write_varint_u32(v);
+            Ok(())
+        }
+
+        fn serialize_u64(self, v: u64) -> Result<(), Error> {
+            self.write_varint_u64(v);
+            Ok(())
+        }
+
+        fn serialize_u128(self, v: u128) -> Result<(), Error> {
+            self.write_varint_u128(v);
+            Ok(())
+        }
+
+        fn serialize_f32(self, v: f32) -> Result<(), Error> {
+            if !v.is_finite() {
+                return Err(Error("non-finite f32 cannot be encoded".to_string()));
+            }
+            self.output.extend_from_slice(&v.to_le_bytes());
+            Ok(())
+        }
+
+        fn serialize_f64(self, v: f64) -> Result<(), Error> {
+            if !v.is_finite() {
+                return Err(Error("non-finite f64 cannot be encoded".to_string()));
+            }
+            self.output.extend_from_slice(&v.to_le_bytes());
+            Ok(())
+        }
+
+        fn serialize_char(self, v: char) -> Result<(), Error> {
+            let mut buf = [0u8; 4];
+            self.serialize_str(v.encode_utf8(&mut buf))
+        }
+
+        fn serialize_str(self, v: &str) -> Result<(), Error> {
+            self.serialize_bytes(v.as_bytes())
+        }
+
+        fn serialize_bytes(self, v: &[u8]) -> Result<(), Error> {
+            self.write_varint_u64(v.len() as u64);
+            self.output.extend_from_slice(v);
+            Ok(())
+        }
+
+        fn serialize_none(self) -> Result<(), Error> {
+            self.output.push(0);
+            Ok(())
+        }
+
+        fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<(), Error> {
+            self.output.push(1);
+            value.serialize(self)
+        }
+
+        fn serialize_unit(self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn serialize_unit_struct(self, _name: &'static str) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn serialize_unit_variant(
+            self,
+            _name: &'static str,
+            variant_index: u32,
+            _variant: &'static str,
+        ) -> Result<(), Error> {
+            self.write_varint_u32(variant_index);
+            Ok(())
+        }
+
+        fn serialize_newtype_struct<T: ?Sized + Serialize>(
+            self,
+            _name: &'static str,
+            value: &T,
+        ) -> Result<(), Error> {
+            value.serialize(self)
+        }
+
+        fn serialize_newtype_variant<T: ?Sized + Serialize>(
+            self,
+            _name: &'static str,
+            variant_index: u32,
+            _variant: &'static str,
+            value: &T,
+        ) -> Result<(), Error> {
+            self.write_varint_u32(variant_index);
+            value.serialize(self)
+        }
+
+        fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Error> {
+            let len = len.ok_or_else(|| Error("sequence length must be known".to_string()))?;
+            self.write_varint_u64(len as u64);
+            Ok(self)
+        }
+
+        fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Error> {
+            Ok(self)
+        }
+
+        fn serialize_tuple_struct(
+            self,
+            _name: &'static str,
+            _len: usize,
+        ) -> Result<Self::SerializeTupleStruct, Error> {
+            Ok(self)
+        }
+
+        fn serialize_tuple_variant(
+            self,
+            _name: &'static str,
+            variant_index: u32,
+            _variant: &'static str,
+            _len: usize,
+        ) -> Result<Self::SerializeTupleVariant, Error> {
+            self.write_varint_u32(variant_index);
+            Ok(self)
+        }
+
+        fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Error> {
+            let len = len.ok_or_else(|| Error("map length must be known".to_string()))?;
+            self.write_varint_u64(len as u64);
+            Ok(self)
+        }
+
+        fn serialize_struct(
+            self,
+            _name: &'static str,
+            _len: usize,
+        ) -> Result<Self::SerializeStruct, Error> {
+            Ok(self)
+        }
+
+        fn serialize_struct_variant(
+            self,
+            _name: &'static str,
+            variant_index: u32,
+            _variant: &'static str,
+            _len: usize,
+        ) -> Result<Self::SerializeStructVariant, Error> {
+            self.write_varint_u32(variant_index);
+            Ok(self)
+        }
+    }
+
+    impl SerializeSeq for &mut Serializer {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
+            value.serialize(&mut **self)
+        }
+
+        fn end(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    impl SerializeTuple for &mut Serializer {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
+            value.serialize(&mut **self)
+        }
+
+        fn end(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    impl SerializeTupleStruct for &mut Serializer {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
+            value.serialize(&mut **self)
+        }
+
+        fn end(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    impl SerializeTupleVariant for &mut Serializer {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
+            value.serialize(&mut **self)
+        }
+
+        fn end(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    impl SerializeMap for &mut Serializer {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), Error> {
+            key.serialize(&mut **self)
+        }
+
+        fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
+            value.serialize(&mut **self)
+        }
+
+        fn end(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    impl SerializeStruct for &mut Serializer {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_field<T: ?Sized + Serialize>(
+            &mut self,
+            _key: &'static str,
+            value: &T,
+        ) -> Result<(), Error> {
+            value.serialize(&mut **self)
+        }
+
+        fn end(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    impl SerializeStructVariant for &mut Serializer {
+        type Ok = ();
+        type Error = Error;
+
+        fn serialize_field<T: ?Sized + Serialize>(
+            &mut self,
+            _key: &'static str,
+            value: &T,
+        ) -> Result<(), Error> {
+            value.serialize(&mut **self)
+        }
+
+        fn end(self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    struct Deserializer<'de> {
+        input: &'de [u8],
+    }
+
+    impl<'de> Deserializer<'de> {
+        fn read_u8(&mut self) -> Result<u8, Error> {
+            let (&byte, rest) = self
+                .input
+                .split_first()
+                .ok_or_else(|| Error("unexpected end of postcard buffer".to_string()))?;
+            self.input = rest;
+            Ok(byte)
+        }
+
+        fn read_exact(&mut self, len: usize) -> Result<&'de [u8], Error> {
+            if self.input.len() < len {
+                return Err(Error("unexpected end of postcard buffer".to_string()));
+            }
+            let (head, tail) = self.input.split_at(len);
+            self.input = tail;
+            Ok(head)
+        }
+
+        fn read_varint_u16(&mut self) -> Result<u16, Error> {
+            let mut out = 0u16;
+            for i in 0..3 {
+                let val = self.read_u8()?;
+                let carry = u16::from(val & 0x7f);
+                out |= carry << (7 * i);
+                if (val & 0x80) == 0 {
+                    if i == 2 && carry > 0x03 {
+                        return Err(Error("u16 varint overflow".to_string()));
+                    }
+                    return Ok(out);
+                }
+            }
+            Err(Error("u16 varint overflow".to_string()))
+        }
+
+        fn read_varint_u32(&mut self) -> Result<u32, Error> {
+            let mut out = 0u32;
+            for i in 0..5 {
+                let val = self.read_u8()?;
+                let carry = u32::from(val & 0x7f);
+                out |= carry << (7 * i);
+                if (val & 0x80) == 0 {
+                    if i == 4 && carry > 0x0f {
+                        return Err(Error("u32 varint overflow".to_string()));
+                    }
+                    return Ok(out);
+                }
+            }
+            Err(Error("u32 varint overflow".to_string()))
+        }
+
+        fn read_varint_u64(&mut self) -> Result<u64, Error> {
+            let mut out = 0u64;
+            for i in 0..10 {
+                let val = self.read_u8()?;
+                let carry = u64::from(val & 0x7f);
+                out |= carry << (7 * i);
+                if (val & 0x80) == 0 {
+                    if i == 9 && carry > 0x01 {
+                        return Err(Error("u64 varint overflow".to_string()));
+                    }
+                    return Ok(out);
+                }
+            }
+            Err(Error("u64 varint overflow".to_string()))
+        }
+
+        fn read_varint_u128(&mut self) -> Result<u128, Error> {
+            let mut out = 0u128;
+            for i in 0..19 {
+                let val = self.read_u8()?;
+                let carry = u128::from(val & 0x7f);
+                out |= carry << (7 * i);
+                if (val & 0x80) == 0 {
+                    if i == 18 && carry > 0x03 {
+                        return Err(Error("u128 varint overflow".to_string()));
+                    }
+                    return Ok(out);
+                }
+            }
+            Err(Error("u128 varint overflow".to_string()))
+        }
+
+        fn read_varint_usize(&mut self) -> Result<usize, Error> {
+            let val = self.read_varint_u64()?;
+            usize::try_from(val).map_err(|_| Error("usize varint overflow".to_string()))
+        }
+    }
+
+    struct Counted<'a, 'de: 'a> {
+        de: &'a mut Deserializer<'de>,
+        remaining: usize,
+    }
+
+    impl<'de> SeqAccess<'de> for Counted<'_, 'de> {
+        type Error = Error;
+
+        fn next_element_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>, Error> {
+            if self.remaining == 0 {
+                return Ok(None);
+            }
+            self.remaining -= 1;
+            seed.deserialize(&mut *self.de).map(Some)
+        }
+
+        fn size_hint(&self) -> Option<usize> {
+            Some(self.remaining)
+        }
+    }
+
+    impl<'de> MapAccess<'de> for Counted<'_, 'de> {
+        type Error = Error;
+
+        fn next_key_seed<K: DeserializeSeed<'de>>(&mut self, seed: K) -> Result<Option<K::Value>, Error> {
+            if self.remaining == 0 {
+                return Ok(None);
+            }
+            self.remaining -= 1;
+            seed.deserialize(&mut *self.de).map(Some)
+        }
+
+        fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, Error> {
+            seed.deserialize(&mut *self.de)
+        }
+
+        fn size_hint(&self) -> Option<usize> {
+            Some(self.remaining)
+        }
+    }
+
+    impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
+        type Error = Error;
+
+        fn deserialize_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Error> {
+            Err(Error("postcard does not support deserialize_any".to_string()))
+        }
+
+        fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.read_u8()? {
+                0 => visitor.visit_bool(false),
+                1 => visitor.visit_bool(true),
+                other => Err(Error(format!("invalid bool discriminant {other}"))),
+            }
+        }
+
+        #[allow(clippy::cast_possible_wrap)]
+        fn deserialize_i8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            visitor.visit_i8(self.read_u8()? as i8)
+        }
+
+        fn deserialize_i16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            visitor.visit_i16(un_zig_zag_i16(self.read_varint_u16()?))
+        }
+
+        fn deserialize_i32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            visitor.visit_i32(un_zig_zag_i32(self.read_varint_u32()?))
+        }
+
+        fn deserialize_i64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            visitor.visit_i64(un_zig_zag_i64(self.read_varint_u64()?))
+        }
+
+        fn deserialize_i128<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            visitor.visit_i128(un_zig_zag_i128(self.read_varint_u128()?))
+        }
+
+        fn deserialize_u8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            visitor.visit_u8(self.read_u8()?)
+        }
+
+        fn deserialize_u16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            visitor.visit_u16(self.read_varint_u16()?)
+        }
+
+        fn deserialize_u32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            visitor.visit_u32(self.read_varint_u32()?)
+        }
+
+        fn deserialize_u64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            visitor.visit_u64(self.read_varint_u64()?)
+        }
+
+        fn deserialize_u128<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            visitor.visit_u128(self.read_varint_u128()?)
+        }
+
+        fn deserialize_f32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            let bytes = self.read_exact(4)?;
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(bytes);
+            let val = f32::from_le_bytes(buf);
+            if !val.is_finite() {
+                return Err(Error("non-finite f32 in postcard buffer".to_string()));
+            }
+            visitor.visit_f32(val)
+        }
+
+        fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            let bytes = self.read_exact(8)?;
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(bytes);
+            let val = f64::from_le_bytes(buf);
+            if !val.is_finite() {
+                return Err(Error("non-finite f64 in postcard buffer".to_string()));
+            }
+            visitor.visit_f64(val)
+        }
+
+        fn deserialize_char<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            let len = self.read_varint_usize()?;
+            let bytes = self.read_exact(len)?;
+            let text = ::std::str::from_utf8(bytes).map_err(|err| Error(err.to_string()))?;
+            let mut chars = text.chars();
+            let ch = chars.next().ok_or_else(|| Error("empty char".to_string()))?;
+            if chars.next().is_some() {
+                return Err(Error("multiple chars in single char field".to_string()));
+            }
+            visitor.visit_char(ch)
+        }
+
+        fn deserialize_str<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            let len = self.read_varint_usize()?;
+            let bytes = self.read_exact(len)?;
+            let text = ::std::str::from_utf8(bytes).map_err(|err| Error(err.to_string()))?;
+            visitor.visit_borrowed_str(text)
+        }
+
+        fn deserialize_string<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_str(visitor)
+        }
+
+        fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            let len = self.read_varint_usize()?;
+            let bytes = self.read_exact(len)?;
+            visitor.visit_borrowed_bytes(bytes)
+        }
+
+        fn deserialize_byte_buf<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            let len = self.read_varint_usize()?;
+            let bytes = self.read_exact(len)?;
+            visitor.visit_byte_buf(bytes.to_vec())
+        }
+
+        fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.read_u8()? {
+                0 => visitor.visit_none(),
+                1 => visitor.visit_some(self),
+                other => Err(Error(format!("invalid option discriminant {other}"))),
+            }
+        }
+
+        fn deserialize_unit<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            visitor.visit_unit()
+        }
+
+        fn deserialize_unit_struct<V: Visitor<'de>>(
+            self,
+            _name: &'static str,
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            visitor.visit_unit()
+        }
+
+        fn deserialize_newtype_struct<V: Visitor<'de>>(
+            self,
+            _name: &'static str,
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            visitor.visit_newtype_struct(self)
+        }
+
+        fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            let len = self.read_varint_usize()?;
+            visitor.visit_seq(Counted { de: self, remaining: len })
+        }
+
+        fn deserialize_tuple<V: Visitor<'de>>(
+            self,
+            len: usize,
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            visitor.visit_seq(Counted { de: self, remaining: len })
+        }
+
+        fn deserialize_tuple_struct<V: Visitor<'de>>(
+            self,
+            _name: &'static str,
+            len: usize,
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            self.deserialize_tuple(len, visitor)
+        }
+
+        fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            let len = self.read_varint_usize()?;
+            visitor.visit_map(Counted { de: self, remaining: len })
+        }
+
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _name: &'static str,
+            fields: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            self.deserialize_tuple(fields.len(), visitor)
+        }
+
+        fn deserialize_enum<V: Visitor<'de>>(
+            self,
+            _name: &'static str,
+            _variants: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            visitor.visit_enum(self)
+        }
+
+        fn deserialize_identifier<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            self.deserialize_str(visitor)
+        }
+
+        fn deserialize_ignored_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Error> {
+            Err(Error("postcard does not support deserialize_ignored_any".to_string()))
+        }
+    }
+
+    impl<'de> EnumAccess<'de> for &mut Deserializer<'de> {
+        type Error = Error;
+        type Variant = Self;
+
+        fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self::Variant), Error> {
+            let index = self.read_varint_u32()?;
+            let val = seed.deserialize(index.into_deserializer())?;
+            Ok((val, self))
+        }
+    }
+
+    impl<'de> VariantAccess<'de> for &mut Deserializer<'de> {
+        type Error = Error;
+
+        fn unit_variant(self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn newtype_variant_seed<T: DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value, Error> {
+            seed.deserialize(self)
+        }
+
+        fn tuple_variant<V: Visitor<'de>>(self, len: usize, visitor: V) -> Result<V::Value, Error> {
+            de::Deserializer::deserialize_tuple(self, len, visitor)
+        }
+
+        fn struct_variant<V: Visitor<'de>>(
+            self,
+            fields: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            de::Deserializer::deserialize_tuple(self, fields.len(), visitor)
+        }
+    }
+}
+
+/// Adapter encoding `::serde_json::Value` (and containers of it) as UTF-8 JSON
+/// strings inside a Postcard stream, since `Value` requires self-describing
+/// deserialization.
+#[allow(dead_code)]
+pub(super) mod rpc_json {
+    use ::serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use ::std::collections::HashMap;
+
+    pub trait Wire {
+        fn write<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error>;
+    }
+
+    pub trait WireOwned: Sized {
+        fn read<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error>;
+    }
+
+    pub struct AsWire<'a, T: ?Sized + Wire>(pub &'a T);
+
+    impl<T: ?Sized + Wire> Serialize for AsWire<'_, T> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            self.0.write(serializer)
+        }
+    }
+
+    pub struct FromWire<T: WireOwned>(pub T);
+
+    impl<'de, T: WireOwned> Deserialize<'de> for FromWire<T> {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            T::read(deserializer).map(Self)
+        }
+    }
+
+    impl Wire for ::serde_json::Value {
+        fn write<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let text = ::serde_json::to_string(self).map_err(::serde::ser::Error::custom)?;
+            serializer.serialize_str(&text)
+        }
+    }
+
+    impl WireOwned for ::serde_json::Value {
+        fn read<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let text = <String as Deserialize>::deserialize(deserializer)?;
+            ::serde_json::from_str(&text).map_err(::serde::de::Error::custom)
+        }
+    }
+
+    impl<T: ?Sized + Wire> Wire for &T {
+        fn write<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            (**self).write(serializer)
+        }
+    }
+
+    impl<T: ?Sized + Wire> Wire for Box<T> {
+        fn write<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            (**self).write(serializer)
+        }
+    }
+
+    impl<T: WireOwned> WireOwned for Box<T> {
+        fn read<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            T::read(deserializer).map(Box::new)
+        }
+    }
+
+    impl<T: Wire> Wire for Option<T> {
+        fn write<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            match self {
+                Some(value) => serializer.serialize_some(&AsWire(value)),
+                None => serializer.serialize_none(),
+            }
+        }
+    }
+
+    impl<T: WireOwned> WireOwned for Option<T> {
+        fn read<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            <Option<FromWire<T>> as Deserialize>::deserialize(deserializer)
+                .map(|opt| opt.map(|wrapped| wrapped.0))
+        }
+    }
+
+    impl<T: Wire> Wire for [T] {
+        fn write<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use ::serde::ser::SerializeSeq;
+            let mut seq = serializer.serialize_seq(Some(self.len()))?;
+            for item in self {
+                seq.serialize_element(&AsWire(item))?;
+            }
+            seq.end()
+        }
+    }
+
+    impl<T: Wire> Wire for Vec<T> {
+        fn write<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            self.as_slice().write(serializer)
+        }
+    }
+
+    impl<T: WireOwned> WireOwned for Vec<T> {
+        fn read<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            <Vec<FromWire<T>> as Deserialize>::deserialize(deserializer)
+                .map(|items| items.into_iter().map(|wrapped| wrapped.0).collect())
+        }
+    }
+
+    impl<T: Wire> Wire for HashMap<String, T> {
+        fn write<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use ::serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(self.len()))?;
+            for (key, value) in self {
+                map.serialize_entry(key, &AsWire(value))?;
+            }
+            map.end()
+        }
+    }
+
+    impl<T: WireOwned> WireOwned for HashMap<String, T> {
+        fn read<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            <HashMap<String, FromWire<T>> as Deserialize>::deserialize(deserializer)
+                .map(|items| items.into_iter().map(|(key, val)| (key, val.0)).collect())
+        }
+    }
+
+    pub fn serialize<T: Wire, S: Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
+        value.write(serializer)
+    }
+
+    pub fn deserialize<'de, T: WireOwned, D: Deserializer<'de>>(deserializer: D) -> Result<T, D::Error> {
+        T::read(deserializer)
+    }
+}
+
+/// Encodes one positional call argument with Postcard.
+#[allow(dead_code)]
+pub(super) fn rpc_encode_arg<T: ::serde::Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, String> {
+    rpc_postcard::to_bytes(value)
+}
+
+/// Encodes one positional call argument containing a JSON value with Postcard.
+#[allow(dead_code)]
+pub(super) fn rpc_encode_json_arg<T: rpc_json::Wire + ?Sized>(value: &T) -> Result<Vec<u8>, String> {
+    rpc_postcard::to_bytes(&rpc_json::AsWire(value))
+}
+
+/// Collects encoded call arguments, refusing any that failed to encode.
 #[allow(dead_code)]
 pub(super) fn rpc_encode_args(
     method: &str,
-    args: Vec<::serde_json::Result<::serde_json::Value>>,
-) -> Result<Vec<::serde_json::Value>, RpcError> {
+    args: Vec<Result<Vec<u8>, String>>,
+) -> Result<Vec<Vec<u8>>, RpcError> {
     args.into_iter()
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| RpcError::invalid_argument(format!("cannot encode argument: {err}")).in_method(method))
 }
 
-/// Encodes a handler's result for the acknowledgement.
+/// Encodes a handler's result as `Result::Ok(value)` in Postcard (`0x00` + value).
 #[allow(dead_code)]
-pub(super) fn rpc_encode_result<T: ::serde::Serialize>(value: T) -> Result<::serde_json::Value, RpcError> {
-    ::serde_json::to_value(value).map_err(|err| RpcError::internal(format!("cannot encode result: {err}")))
+pub(super) fn rpc_encode_result<T: ::serde::Serialize>(value: T) -> Result<Vec<u8>, RpcError> {
+    rpc_postcard::to_bytes(&Ok::<T, RpcError>(value))
+        .map_err(|err| RpcError::internal(format!("cannot encode result: {err}")))
 }
 
-/// Decodes positional argument `index` of an inbound call.
+/// Encodes a handler's JSON-containing result as `Result::Ok(value)` in Postcard.
+#[allow(dead_code)]
+pub(super) fn rpc_encode_json_result<T: rpc_json::Wire>(value: T) -> Result<Vec<u8>, RpcError> {
+    rpc_postcard::to_bytes(&Ok::<rpc_json::AsWire<'_, T>, RpcError>(rpc_json::AsWire(&value)))
+        .map_err(|err| RpcError::internal(format!("cannot encode result: {err}")))
+}
+
+/// Encodes an [`RpcError`] as `Result::Err(error)` in Postcard (`0x01` + error).
+#[allow(dead_code)]
+pub(super) fn rpc_encode_error_result(error: &RpcError) -> Vec<u8> {
+    rpc_postcard::to_bytes(&Err::<(), &RpcError>(error)).unwrap_or_else(|_| vec![1])
+}
+
+/// Encodes an out-of-band [`RpcError`] for `RPC_ERROR_EVENT`.
+#[allow(dead_code)]
+pub(super) fn rpc_encode_error(error: &RpcError) -> Vec<u8> {
+    rpc_postcard::to_bytes(error).unwrap_or_default()
+}
+
+/// Decodes an out-of-band [`RpcError`] from `RPC_ERROR_EVENT`.
+#[allow(dead_code)]
+pub(super) fn rpc_decode_error(bytes: &[u8]) -> Result<RpcError, String> {
+    rpc_postcard::from_bytes(bytes)
+}
+
+/// Decodes positional argument `name` of an inbound call from Postcard bytes.
 #[allow(dead_code)]
 pub(super) fn rpc_decode_arg<T: ::serde::de::DeserializeOwned>(
-    args: &mut ::std::vec::IntoIter<::serde_json::Value>,
+    args: &mut ::std::vec::IntoIter<Result<Vec<u8>, String>>,
     name: &str,
 ) -> Result<T, RpcError> {
-    let value = args.next().unwrap_or(::serde_json::Value::Null);
-    ::serde_json::from_value(value).map_err(|err| RpcError::invalid_argument(format!("invalid argument {name}: {err}")))
+    let bytes = args
+        .next()
+        .unwrap_or_else(|| Err("missing argument".to_string()))
+        .map_err(|err| RpcError::invalid_argument(format!("invalid argument {name}: {err}")))?;
+    rpc_postcard::from_bytes(&bytes)
+        .map_err(|err| RpcError::invalid_argument(format!("invalid argument {name}: {err}")))
 }
 
-/// Reads an acknowledgement: the peer's branded error, or the result.
+/// Decodes a JSON-containing positional argument `name` of an inbound call.
+#[allow(dead_code)]
+pub(super) fn rpc_decode_json_arg<T: rpc_json::WireOwned>(
+    args: &mut ::std::vec::IntoIter<Result<Vec<u8>, String>>,
+    name: &str,
+) -> Result<T, RpcError> {
+    rpc_decode_arg::<rpc_json::FromWire<T>>(args, name).map(|wrapped| wrapped.0)
+}
+
+/// Reads an acknowledgement payload: `Result<T, RpcError>` in Postcard.
 #[allow(dead_code)]
 pub(super) fn rpc_decode_result<T: ::serde::de::DeserializeOwned>(
     method: &str,
-    value: ::serde_json::Value,
+    bytes: &[u8],
 ) -> Result<T, RpcError> {
-    if value.get("__rpcError") == Some(&::serde_json::Value::Bool(true)) {
-        return Err(::serde_json::from_value::<RpcError>(value)
-            .unwrap_or_else(|err| RpcError::invalid_argument(format!("malformed RpcError: {err}")))
-            .in_method(method));
+    match rpc_postcard::from_bytes::<Result<T, RpcError>>(bytes) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(error.in_method(method)),
+        Err(err) => Err(RpcError::invalid_argument(format!("invalid acknowledgement payload: {err}")).in_method(method)),
     }
-    ::serde_json::from_value(value).map_err(|err| {
-        RpcError::invalid_argument(format!("invalid acknowledgement payload: {err}")).in_method(method)
-    })
+}
+
+/// Reads a JSON-containing acknowledgement payload: `Result<T, RpcError>` in Postcard.
+#[allow(dead_code)]
+pub(super) fn rpc_decode_json_result<T: rpc_json::WireOwned>(
+    method: &str,
+    bytes: &[u8],
+) -> Result<T, RpcError> {
+    rpc_decode_result::<rpc_json::FromWire<T>>(method, bytes).map(|wrapped| wrapped.0)
 }
 
 /// Reads a panic's message, for the INTERNAL_ERROR a panicking handler answers with.
@@ -237,32 +1181,61 @@ pub(super) fn rpc_panic_message(payload: Box<dyn ::std::any::Any + Send>) -> Str
 }
 
 /// `Option<Option<T>>` for a field that may be omitted or null: the outer
-/// `None` is an omitted key, `Some(None)` an explicit null.
+/// `None` is an omitted key (`0x00`), `Some(Some(v))` a value (`0x01` + v), and
+/// `Some(None)` an explicit null (`0x02`).
 #[allow(dead_code)]
 mod rpc_double_option {
-    pub fn serialize<T: ::serde::Serialize, S: ::serde::Serializer>(
+    use ::serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<T: Serialize, S: Serializer>(
         value: &Option<Option<T>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         match value {
-            Some(inner) => ::serde::Serialize::serialize(inner, serializer),
-            None => serializer.serialize_none(),
+            None => serializer.serialize_u8(0),
+            Some(Some(inner)) => (1u8, inner).serialize(serializer),
+            Some(None) => serializer.serialize_u8(2),
         }
     }
 
-    pub fn deserialize<'de, T: ::serde::Deserialize<'de>, D: ::serde::Deserializer<'de>>(
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<Option<T>>, D::Error> {
-        <Option<T> as ::serde::Deserialize>::deserialize(deserializer).map(Some)
+        struct DoubleOptionVisitor<T>(::std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> ::serde::de::Visitor<'de> for DoubleOptionVisitor<T> {
+            type Value = Option<Option<T>>;
+
+            fn expecting(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.write_str("a double option discriminant (0, 1, or 2)")
+            }
+
+            fn visit_seq<A: ::serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let tag: u8 = seq
+                    .next_element()?
+                    .ok_or_else(|| ::serde::de::Error::custom("missing double option discriminant"))?;
+                match tag {
+                    0 => Ok(None),
+                    1 => {
+                        let value: T = seq
+                            .next_element()?
+                            .ok_or_else(|| ::serde::de::Error::custom("missing double option value"))?;
+                        Ok(Some(Some(value)))
+                    }
+                    2 => Ok(Some(None)),
+                    other => Err(::serde::de::Error::custom(format!(
+                        "invalid double option discriminant {other}"
+                    ))),
+                }
+            }
+        }
+        deserializer.deserialize_tuple(2, DoubleOptionVisitor(::std::marker::PhantomData))
     }
 }
 
 /// One of "public", "private".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ::serde::Serialize, ::serde::Deserialize)]
 pub enum Visibility {
-    #[serde(rename = "public")]
     Public,
-    #[serde(rename = "private")]
     Private,
 }
 
@@ -288,7 +1261,6 @@ impl ::std::fmt::Display for Visibility {
 pub struct ChatRoom {
     pub id: String,
     pub topic: String,
-    #[serde(rename = "memberCount")]
     pub member_count: f64,
     pub visibility: Visibility,
 }
@@ -296,11 +1268,8 @@ pub struct ChatRoom {
 #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
 pub struct Message {
     pub id: String,
-    #[serde(rename = "roomId")]
     pub room_id: String,
     pub body: String,
-    #[serde(rename = "sentAt")]
     pub sent_at: String,
-    #[serde(rename = "editedAt", default, skip_serializing_if = "Option::is_none")]
     pub edited_at: Option<String>,
 }

@@ -99,6 +99,7 @@ const CLIENT_FILE_NAMES = new Set([
   "errors",
   "fmt",
   "json",
+  "math",
   "reflect",
   "sync",
   "time",

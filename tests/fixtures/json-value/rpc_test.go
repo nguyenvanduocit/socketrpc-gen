@@ -70,8 +70,12 @@ func TestJSONValueIsProjectedAsAny(t *testing.T) {
 // value, and every JSON shape has to survive the hop into an `any` unchanged.
 func TestDecodeAcceptsEveryJSONShape(t *testing.T) {
 	for _, shape := range everyJSONShape {
+		encoded, err := rpc_encodeValue(&shape)
+		if err != nil {
+			t.Fatalf("encoding %#v failed: %v", shape, err)
+		}
 		var decoded any
-		if err := rpc_decodeValue(shape, &decoded); err != nil {
+		if err := rpc_decodeValue(encoded, &decoded); err != nil {
 			t.Fatalf("decoding %#v failed: %v", shape, err)
 		}
 		if !reflect.DeepEqual(decoded, shape) {
@@ -84,7 +88,10 @@ func TestDecodeAcceptsEveryJSONShape(t *testing.T) {
 func TestDecodeCarriesJSONValueInsideAStruct(t *testing.T) {
 	for _, shape := range everyJSONShape {
 		var decoded Mutation
-		wire := map[string]any{"path": "notes.md", "key": "meta", "value": shape}
+		wire, err := rpc_encodeValue(Mutation{Path: "notes.md", Key: "meta", Value: shape})
+		if err != nil {
+			t.Fatalf("encoding a mutation carrying %#v failed: %v", shape, err)
+		}
 		if err := rpc_decodeValue(wire, &decoded); err != nil {
 			t.Fatalf("decoding a mutation carrying %#v failed: %v", shape, err)
 		}
@@ -153,19 +160,29 @@ func TestOptionalJSONValueIsAbsentOnlyWhenNil(t *testing.T) {
 // the same way — so a JSON value that has to survive verbatim must not carry
 // that key at its top level.
 func TestBrandedJSONValueIsReadAsAnError(t *testing.T) {
-	branded := map[string]any{"__rpcError": true, "code": "NOPE", "message": "not an error"}
+	branded, err := rpc_appendRpcError(nil, NewRpcError("NOPE", "not an error", "", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := rpc_decodeRpcError(branded); !ok {
 		t.Fatal("a payload carrying the brand is a failure by protocol definition")
 	}
 
 	// An object that merely looks similar stays a value, and so does every shape
 	// the contract actually promises.
-	lookalike := map[string]any{"code": "NOPE", "message": "not an error"}
+	lookalike, err := rpc_encodeValue(map[string]any{"code": "NOPE", "message": "not an error"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := rpc_decodeRpcError(lookalike); ok {
 		t.Fatal("an unbranded payload must not decode as an RpcError")
 	}
 	for _, shape := range everyJSONShape {
-		if _, ok := rpc_decodeRpcError(shape); ok {
+		encoded, err := rpc_encodeValue(shape)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := rpc_decodeRpcError(encoded); ok {
 			t.Fatalf("%#v must reach the caller as a value", shape)
 		}
 	}
